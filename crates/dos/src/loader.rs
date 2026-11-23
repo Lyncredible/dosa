@@ -1,13 +1,18 @@
 use crate::DosError;
-use dosa_cpu::Cpu;
+use dosa_cpu::{Cpu, CpuProfile};
 
 pub(crate) const PSP: u16 = 0x1000;
 pub(crate) const CONVENTIONAL_END: u16 = 0xa000;
 const ENVIRONMENT: u16 = PSP - 0x20;
 const LOAD: u16 = PSP + 0x10;
 
-pub(crate) fn load(bytes: &[u8], name: &str, args: &str) -> Result<Cpu, DosError> {
-    let mut cpu = Cpu::new();
+pub(crate) fn load(
+    bytes: &[u8],
+    name: &str,
+    args: &str,
+    profile: CpuProfile,
+) -> Result<Cpu, DosError> {
+    let mut cpu = Cpu::with_profile(profile);
     let args = if args.is_empty() {
         String::new()
     } else {

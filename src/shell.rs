@@ -48,6 +48,10 @@ impl Shell {
         format!("{}:\\{directory}> ", self.drive)
     }
 
+    pub fn current_drive(&self) -> char {
+        self.drive
+    }
+
     pub fn execute(&mut self, line: &str) -> Result<Command, Box<dyn Error>> {
         let (word, args) = split_word(line.trim())?;
         let output = match word.to_ascii_uppercase().as_str() {
