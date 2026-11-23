@@ -11,7 +11,7 @@ cargo build --release --locked
 cargo run --release -- --mount C=path/to/games.zip
 ~~~
 
-The first mounted drive is selected on startup. Type `DIR` to list its contents and enter an executable name to start it. The shell looks for `.COM` and `.EXE` when you omit the extension. Type `HELP` for more shell commands.
+The first mounted drive is selected on startup. Type `DIR` to list its contents and enter a program name to start it. When you omit the extension, the shell checks `.COM`, `.EXE`, and `.BAT` in that order. Type `HELP` for more shell commands.
 
 Mount a directory, a single file, or a ZIP. Quote host paths containing spaces.
 
@@ -29,6 +29,14 @@ DIR
 ~~~
 
 Mounts are read-only. Headless execution returns the program's DOS exit code. It reports an error if the guest needs keyboard input or reaches the instruction limit.
+
+### Batch files
+
+Run a batch file by name at the DOS prompt or pass its name and arguments with `--exec`. A batch waits for each DOS program to exit before running the next line. Drive and directory changes carry over to later commands and to the prompt.
+
+Batch files support `ECHO`, `@ECHO OFF`, `REM`, labels, `GOTO`, `CALL file.BAT`, `CALL :label`, `EXIT /B [status]`, and `IF [NOT] ERRORLEVEL number command`. Substitutions include `%0` through `%9`, `%*`, `%ERRORLEVEL%`, and `%%` for a literal percent. Use `CALL` to return to a parent script. Invoking a batch file directly replaces the current script.
+
+Scripts accept ASCII or UTF-8 text. Dosa reports unsupported syntax, including pipes, redirection, and environment-variable expansion, with the batch path and line number. Mount host sources with `--mount` or at the interactive prompt before you start a script. Each run allows up to 16 call frames and 10,000 executed lines.
 
 ## Launch profiles
 

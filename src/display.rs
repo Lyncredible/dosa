@@ -38,6 +38,7 @@ const VGA: [[u8; 3]; 16] = [
     [255, 215, 151],
     [245, 248, 253],
 ];
+const BATCH_LINES_PER_TICK: usize = 64;
 
 static GLYPHS: LazyLock<[[u8; 8]; 256]> = LazyLock::new(|| {
     std::array::from_fn(|index| {
@@ -150,7 +151,15 @@ impl Desktop {
 
     fn submit(&mut self, line: &str) {
         self.shell.machine.write_console(b"\r\n");
-        match self.shell.execute(line) {
+        let result = self.shell.execute(line);
+        self.apply_command(result);
+        if !self.running && !self.exit && !self.shell.batch_active() {
+            self.write_prompt();
+        }
+    }
+
+    fn apply_command(&mut self, result: Result<Command, Box<dyn std::error::Error>>) {
+        match result {
             Ok(Command::Print(output)) => {
                 self.shell.machine.write_console(&output);
                 if !output.ends_with(b"\n") {
@@ -161,19 +170,41 @@ impl Desktop {
             Ok(Command::Prompt) => {}
             Ok(Command::Exit) => {
                 self.exit = true;
-                return;
             }
             Ok(Command::Launched) => {
                 self.running = true;
                 self.status = String::new();
-                return;
             }
             Err(error) => self
                 .shell
                 .machine
                 .write_console(format!("{error}\r\n").as_bytes()),
         }
-        self.write_prompt();
+    }
+
+    fn advance_batch(&mut self) {
+        for _ in 0..BATCH_LINES_PER_TICK {
+            match self.shell.step_batch() {
+                Ok(Some(step)) => {
+                    if let Some(echo) = step.echo {
+                        self.shell.machine.write_console(echo.as_bytes());
+                    }
+                    self.apply_command(Ok(step.command));
+                }
+                Ok(None) => {
+                    self.write_prompt();
+                    break;
+                }
+                Err(error) => {
+                    self.apply_command(Err(error));
+                    self.write_prompt();
+                    break;
+                }
+            }
+            if self.running || self.exit {
+                break;
+            }
+        }
     }
 
     fn render(&mut self) {
@@ -233,15 +264,21 @@ impl App for Desktop {
                 .machine
                 .run(instructions_per_tick(self.settings.speed))
             {
-                Ok(RunState::Idle | RunState::Exited(_)) => {
+                Ok(state @ (RunState::Idle | RunState::Exited(_))) => {
+                    if let RunState::Exited(code) = state {
+                        self.shell.guest_finished(code);
+                    }
                     self.running = false;
                     self.shell.machine.write_console(b"\r\n");
-                    self.write_prompt();
+                    if !self.shell.batch_active() {
+                        self.write_prompt();
+                    }
                 }
                 Ok(RunState::Running | RunState::WaitingForKey) => {}
                 Err(error) => {
                     self.running = false;
                     self.shell.machine.stop();
+                    let error = self.shell.guest_failed(error.into());
                     self.shell
                         .machine
                         .write_console(format!("\r\n{error}\r\n").as_bytes());
@@ -250,6 +287,9 @@ impl App for Desktop {
             }
             // The guest's output has already been written to video memory.
             self.shell.machine.take_output();
+        }
+        if !self.running && !self.paused && !self.exit && self.shell.batch_active() {
+            self.advance_batch();
         }
         self.render();
     }
@@ -367,6 +407,9 @@ impl App for Desktop {
                     .map_or(0, encode_cp437),
             };
             self.shell.machine.key(ascii, event.scan_code);
+            return;
+        }
+        if self.shell.batch_active() {
             return;
         }
         match event.key {
@@ -522,6 +565,57 @@ mod tests {
         cursor.cursor_mask[1] = 0x4000;
         draw_mouse_cursor(&mut pixels, 2, 1, &cursor);
         assert_eq!(pixels, [245, 235, 225, 255, 40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn desktop_batch_waits_for_guest_input_and_returns_to_the_prompt() {
+        let scratch = std::env::temp_dir().join(format!("dosa-batch-{}", std::process::id()));
+        std::fs::create_dir(&scratch).unwrap();
+        let script = scratch.join("RUN.BAT");
+        let guest = scratch.join("WAITKEY.COM");
+        std::fs::write(
+            &script,
+            b"@echo off\r\nwaitkey\r\necho resumed %errorlevel%\r\n",
+        )
+        .unwrap();
+        std::fs::write(&guest, [0x31, 0xc0, 0xcd, 0x16, 0xb8, 9, 0x4c, 0xcd, 0x21]).unwrap();
+
+        let mut shell = Shell::new();
+        shell.mount('C', Mount::open(&scratch).unwrap()).unwrap();
+        let mut desktop = Desktop::new(shell, Some("run"));
+        desktop.tick();
+        desktop.tick();
+        assert!(desktop.running && desktop.shell.batch_active());
+        assert_eq!(desktop.shell.errorlevel(), 0);
+
+        desktop.input(Input {
+            key: Key::Enter,
+            pressed: true,
+            text: None,
+            modifiers: Default::default(),
+            scan_code: 0x1c,
+        });
+        desktop.tick();
+        assert!(!desktop.running && !desktop.shell.batch_active());
+        assert_eq!(desktop.shell.errorlevel(), 9);
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected the text console");
+        };
+        let chars: Vec<u8> = frame.cells.iter().step_by(2).copied().collect();
+        assert!(
+            chars
+                .windows(b"resumed 9".len())
+                .any(|word| word == b"resumed 9")
+        );
+        let (col, row) = frame.cursor.unwrap();
+        assert_eq!(col, 5);
+        let cursor_line = usize::from(row) * usize::from(frame.columns);
+        assert_eq!(&chars[cursor_line..cursor_line + 5], b"C:\\> ");
+
+        drop(desktop);
+        std::fs::remove_file(script).unwrap();
+        std::fs::remove_file(guest).unwrap();
+        std::fs::remove_dir(scratch).unwrap();
     }
 
     #[test]
