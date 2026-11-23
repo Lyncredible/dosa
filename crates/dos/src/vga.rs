@@ -46,6 +46,8 @@ impl Vga {
         self.attribute_index = 0;
         self.attribute_data = false;
         self.attributes.fill(0);
+        self.attributes[0x10] = if planar16 { 1 } else { 0x41 };
+        self.attributes[0x12] = 0x0f;
         for (index, register) in self.attributes[..16].iter_mut().enumerate() {
             *register = index as u8;
         }
@@ -104,6 +106,7 @@ impl Vga {
                     let color = planes.iter().enumerate().fold(0, |color, (plane, byte)| {
                         color | ((byte >> (7 - x % 8)) & 1) << plane
                     });
+                    let color = color & self.attributes[0x12] & 0x0f;
                     let attribute = self.attributes[usize::from(color)];
                     let low = if self.attributes[0x10] & 0x80 != 0 {
                         (attribute & 0x0f) | ((self.attributes[0x14] & 3) << 4)
@@ -391,6 +394,9 @@ mod tests {
         vga.reset_attribute_latch();
         vga.write_port(0x3c0, 5);
         assert_eq!(vga.read_port(0x3c1), Some(0x21));
+        vga.set_attribute(0x12, 1);
+        vga.refresh();
+        assert_eq!(vga.frame()[0], 1);
     }
 
     #[test]
