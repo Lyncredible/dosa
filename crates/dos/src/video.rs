@@ -33,7 +33,7 @@ pub enum Video<'a> {
     },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 struct TextGeometry {
     scan_lines: u16,
     character_height: u16,
@@ -60,6 +60,19 @@ impl TextGeometry {
 
     const fn text_bytes(self) -> usize {
         ROW_BYTES * self.rows()
+    }
+
+    const fn font_page_bytes(self) -> u16 {
+        // DOSBox-compatible BIOS page padding after a font-height change.
+        self.text_bytes() as u16 + 0x100
+    }
+
+    const fn console_page_bytes(self) -> u16 {
+        if self.rows() == 25 {
+            0x1000
+        } else {
+            self.font_page_bytes()
+        }
     }
 
     const fn cursor_shape(self) -> u16 {
@@ -164,10 +177,8 @@ impl Adapter {
             self.set_mode(cpu, 0x83);
         }
         self.next_scan_lines = self.console.scan_lines;
-        if self.text != self.console {
-            self.row = row;
-            self.set_text_geometry(cpu, self.console);
-        }
+        self.row = row;
+        self.set_text_geometry(cpu, self.console, self.console.console_page_bytes());
         self.set_cursor_shape(cpu, self.cursor_shape & !0x2000);
         self.update_scan_line_selection(cpu);
     }
@@ -179,7 +190,7 @@ impl Adapter {
         self.next_scan_lines = self.console.scan_lines;
         self.col = previous.col;
         self.row = previous.row;
-        self.set_text_geometry(to, self.console);
+        self.set_text_geometry(to, self.console, self.console.console_page_bytes());
         self.update_scan_line_selection(to);
     }
 
@@ -226,7 +237,7 @@ impl Adapter {
         self.palette = default_palette();
         self.cga_color = 15;
         if mode == 3 {
-            self.set_text_geometry(cpu, TextGeometry::standard(self.next_scan_lines));
+            self.set_text_geometry(cpu, TextGeometry::standard(self.next_scan_lines), 0x1000);
         }
         if clear {
             match mode {
@@ -261,14 +272,9 @@ impl Adapter {
         cpu.write_u16(0x40, 0x60, self.cursor_shape);
     }
 
-    fn set_text_geometry(&mut self, cpu: &mut Cpu, geometry: TextGeometry) {
+    fn set_text_geometry(&mut self, cpu: &mut Cpu, geometry: TextGeometry, page_bytes: u16) {
         self.text = geometry;
         self.row = self.row.min(geometry.rows() - 1);
-        let page_bytes = if geometry.rows() == 25 {
-            0x1000
-        } else {
-            geometry.text_bytes() as u16
-        };
         cpu.write_u16(0x40, 0x4c, page_bytes);
         cpu.write_u8(0x40, 0x84, (geometry.rows() - 1) as u8);
         cpu.write_u16(0x40, 0x85, geometry.character_height);
@@ -458,13 +464,11 @@ impl Adapter {
                     0x12 => 8,
                     _ => 16,
                 };
-                self.set_text_geometry(
-                    cpu,
-                    TextGeometry {
-                        character_height,
-                        ..self.text
-                    },
-                );
+                let geometry = TextGeometry {
+                    character_height,
+                    ..self.text
+                };
+                self.set_text_geometry(cpu, geometry, geometry.font_page_bytes());
             }
             0x12 if bl == 0x10 => {
                 cpu.regs.bx = 3;
