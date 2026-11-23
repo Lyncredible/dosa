@@ -309,3 +309,67 @@ fn supported_cpu_generation_can_still_report_unimplemented_instructions() {
     assert_eq!(error.kind, CpuErrorKind::Unsupported);
     assert_eq!(cpu.regs.ip, 0x0100);
 }
+
+#[test]
+fn sti_delays_irqs_only_when_enabling_if() {
+    // CLI / STI / NOP / STI / CLI
+    let mut cpu = program(&[0xfa, 0xfb, 0x90, 0xfb, 0xfa]);
+    advance(&mut cpu, 2);
+    assert!(cpu.flag(IF));
+    assert!(!cpu.can_accept_maskable_interrupt());
+    advance(&mut cpu, 1);
+    assert!(cpu.can_accept_maskable_interrupt());
+    advance(&mut cpu, 1);
+    assert!(cpu.can_accept_maskable_interrupt());
+    advance(&mut cpu, 1);
+    assert!(!cpu.can_accept_maskable_interrupt());
+}
+
+#[test]
+fn mov_and_pop_ss_protect_the_next_stack_instruction() {
+    // MOV SS,AX / MOV SP,0200h / POP SS / MOV SP,0100h
+    let mut cpu = program(&[0x8e, 0xd0, 0xbc, 0x00, 0x02, 0x17, 0xbc, 0x00, 0x01]);
+    cpu.regs.flags |= IF;
+    cpu.regs.ax = 0x2000;
+    cpu.write_u16(0x2000, 0x0200, 0x2400);
+
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.regs.ss, 0x2000);
+    assert!(!cpu.can_accept_maskable_interrupt());
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.regs.sp, 0x0200);
+    assert!(cpu.can_accept_maskable_interrupt());
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.regs.ss, 0x2400);
+    assert!(!cpu.can_accept_maskable_interrupt());
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.regs.sp, 0x0100);
+    assert!(cpu.can_accept_maskable_interrupt());
+}
+
+#[test]
+fn hlt_stops_instruction_fetch_until_an_interrupt_returns_to_the_next_ip() {
+    // STI / HLT / MOV AX,1234h
+    let mut cpu = program(&[0xfb, 0xf4, 0xb8, 0x34, 0x12]);
+    cpu.load(0x4321, 0x200, &[0xcf]); // IRET
+    cpu.write_u16(0, 32, 0x200);
+    cpu.write_u16(0, 34, 0x4321);
+
+    advance(&mut cpu, 1);
+    assert!(!cpu.can_accept_maskable_interrupt());
+    assert_eq!(cpu.step().unwrap(), Step::Halt);
+    assert!(cpu.can_accept_maskable_interrupt());
+    assert!(cpu.is_halted());
+    assert_eq!(cpu.step().unwrap(), Step::Halt);
+    assert_eq!(cpu.regs.ip, 0x0102);
+    assert_eq!(cpu.regs.ax, 0);
+
+    cpu.enter_interrupt(8);
+    assert!(!cpu.is_halted());
+    assert!(!cpu.can_accept_maskable_interrupt());
+    assert_eq!(cpu.read_u16(cpu.regs.ss, cpu.regs.sp), 0x0102);
+    advance(&mut cpu, 2);
+    assert_eq!(cpu.regs.ax, 0x1234);
+    assert_eq!(cpu.regs.sp, 0xfffe);
+    assert!(cpu.can_accept_maskable_interrupt());
+}
