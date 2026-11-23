@@ -55,6 +55,53 @@ fn com_reads_key_then_prints_and_exits() {
 }
 
 #[test]
+fn guest_keyboard_irq_waits_for_if_and_pic_and_delivers_make_and_break() {
+    let directory = Directory::new("keyboard-irq");
+    let mut program = vec![
+        0xba, 0x40, 0x01, // mov dx, 0140h
+        0xb8, 0x09, 0x25, 0xcd, 0x21, // DOS set INT 09h vector
+        0xfa, // cli, host queues input here
+        0xb0, 0x02, 0xe6, 0x21, // mask PIC IRQ1
+        0xfb, // sti
+        0x31, 0xc0, 0xe6, 0x21, // unmask PIC
+        0xeb, 0xfe, // wait on IRQ1
+    ];
+    program.resize(0x40, 0x90);
+    program.extend_from_slice(&[
+        0xfb, // sti, must not recursively receive the current IRQ
+        0x50, 0x53, // push ax, push bx
+        0xb0, 0xad, 0xe6, 0x64, // disable keyboard interface while reading
+        0x31, 0xdb, 0x8a, 0x1e, 0x80, 0x01, // bx = processed count
+        0xe4, 0x60, 0x88, 0x87, 0x81, 0x01, // store scancode at [bx+0181h]
+        0xfe, 0x06, 0x80, 0x01, // increment processed count
+        0xb0, 0xae, 0xe6, 0x64, // enable keyboard interface
+        0xb0, 0x20, 0xe6, 0x20, // non-specific EOI
+        0x5b, 0x58, 0xcf, // pop bx, pop ax, iret
+    ]);
+    fs::write(directory.0.join("IRQ.COM"), program).unwrap();
+    let mut machine = directory.machine();
+    machine.launch('C', "IRQ.COM", "").unwrap();
+    machine.run(4).unwrap();
+    let segment = machine.cpu.regs.cs;
+    let initial_stack = machine.cpu.regs.sp;
+    machine.key(b'A', 0x1e);
+    machine.key_up(0x1e);
+
+    machine.run(5).unwrap(); // executes through unmasking
+    assert_eq!(machine.cpu.read_u8(segment, 0x180), 0);
+    assert_eq!(machine.cpu.regs.sp, initial_stack);
+    assert!(machine.keys.is_empty(), "guest handler owns the scancodes");
+
+    machine.run(3).unwrap(); // handler entry, STI and both pushes
+    assert_eq!(machine.cpu.regs.sp, initial_stack - 10);
+    machine.run(100).unwrap();
+    assert_eq!(machine.cpu.read_u8(segment, 0x180), 2);
+    assert_eq!(machine.cpu.read_u8(segment, 0x181), 0x1e);
+    assert_eq!(machine.cpu.read_u8(segment, 0x182), 0x9e);
+    assert_eq!(machine.cpu.regs.sp, initial_stack);
+}
+
+#[test]
 fn mz_relocates_and_displays_vga_memory() {
     let directory = Directory::new("mz");
     let program = [
