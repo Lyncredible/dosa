@@ -21,6 +21,7 @@ The first milestone is a GPU-rendered DOS prompt that can mount host content and
 | [15 · Reusable launch settings and fullscreen](docs/tasks/15-launch-and-view.md) | 03, 10 | Initial profiles and fullscreen complete |
 | [16 · Compatibility roadmap](docs/tasks/16-compatibility-roadmap.md) | 05, 09 | Planned |
 | [17 · DOS batch files](docs/tasks/17-batch-files.md) | 04, 15 | Planned |
+| [18 · VGA sixteen-color graphics](docs/tasks/18-video16.md) | 07 | In progress |
 
 See [architecture](docs/architecture.md) for the library boundaries and execution model.
 
