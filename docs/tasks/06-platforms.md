@@ -8,3 +8,5 @@ Validate the same source on Windows, Linux, and macOS. Keep headless execution a
 - Document platform prerequisites, verified graphics backends, and build instructions after testing them.
 
 Desktop GPU smoke coverage starts with Windows Vulkan and Direct3D 12. The Linux and macOS desktop runs are still open.
+
+The full workspace, including test targets, passed `cargo check --workspace --all-targets --locked` for `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin` from a Windows host. The native test suite and manual GPU checks for those targets remain open.
