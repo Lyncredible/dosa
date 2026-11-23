@@ -16,3 +16,7 @@ font8x8 = "0.3.1"
 
 [dev-dependencies]
 zip = { version = "9.8.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[[test]]
+name = "desktop_smoke"
+harness = false

@@ -90,6 +90,10 @@ impl Desktop {
         desktop
     }
 
+    pub fn guest_graphics_active(&self) -> bool {
+        self.running && matches!(self.shell.machine.video(), Video::Graphics { .. })
+    }
+
     fn write_prompt(&mut self) {
         self.shell
             .machine
