@@ -3,6 +3,8 @@
 mod files;
 mod keyboard;
 mod loader;
+mod pic;
+mod pit;
 mod services;
 mod vga;
 mod video;
@@ -17,6 +19,8 @@ use dosa_mount::{Mount, MountError};
 use files::DosFiles;
 use keyboard::{KEYBOARD_VECTOR, Keyboard, MAX_KEYS};
 use loader::{CONVENTIONAL_END, PSP};
+use pic::Pic;
+use pit::{BIOS_DIVISOR, Pit};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::time::Instant;
@@ -25,6 +29,8 @@ use video::Adapter;
 const CARRY: u16 = 1;
 const ZERO: u16 = 0x40;
 const INTERRUPT_ENABLE: u16 = 0x0200;
+const TIMER_VECTOR: u8 = 0x08;
+const TIMER_SAMPLE_INTERVAL: usize = 256;
 
 #[derive(Debug)]
 pub enum DosError {
@@ -85,6 +91,8 @@ pub struct Machine {
     pending: Option<Pending>,
     keys: VecDeque<(u8, u8)>,
     keyboard: Keyboard,
+    pic: Pic,
+    pit: Pit,
     modifiers: u8,
     locks: u8,
     output: Vec<u8>,
@@ -114,6 +122,8 @@ impl Machine {
             pending: None,
             keys: VecDeque::new(),
             keyboard: Keyboard::default(),
+            pic: Pic::default(),
+            pit: Pit::new(0),
             modifiers: 0,
             locks: 0,
             output: Vec::new(),
@@ -164,6 +174,8 @@ impl Machine {
         self.pending = None;
         self.keys.clear();
         self.keyboard = Keyboard::default();
+        self.pic = Pic::default();
+        self.pit = Pit::new(pit::ticks(self.clock.elapsed()));
         self.modifiers = 0;
         self.locks = 0;
         self.output.clear();
@@ -260,13 +272,18 @@ impl Machine {
             return Ok(self.state);
         }
         self.state = RunState::Running;
-        self.update_clock();
+        let now = pit::ticks(self.clock.elapsed());
+        self.pit.advance(now);
+        self.bios_ticks_at(now);
         if let Some(pending) = self.pending.take() {
             self.resume(pending);
         }
-        for _ in 0..budget {
+        for instruction in 0..budget {
             if self.state != RunState::Running {
                 break;
+            }
+            if instruction != 0 && instruction % TIMER_SAMPLE_INTERVAL == 0 {
+                self.pit.advance(pit::ticks(self.clock.elapsed()));
             }
             if let Err(error) = self.step() {
                 self.exit(1);
@@ -278,13 +295,7 @@ impl Machine {
     }
 
     fn step(&mut self) -> Result<(), DosError> {
-        if self.cpu.regs.flags & INTERRUPT_ENABLE != 0
-            && self.keyboard.irq_ready()
-            && self.has_interrupt_handler(KEYBOARD_VECTOR)
-        {
-            self.keyboard.acknowledge_irq();
-            self.cpu.enter_interrupt(KEYBOARD_VECTOR);
-        }
+        self.service_hardware_interrupt();
         match self.cpu.step().map_err(DosError::Cpu)? {
             Step::Continue => {}
             Step::Interrupt(vector) => self.interrupt(vector)?,
@@ -292,9 +303,12 @@ impl Machine {
                 let mut value = 0;
                 for byte in 0..width {
                     let port = port.wrapping_add(u16::from(byte));
+                    let requests = self.irq_requests();
                     let part = self
-                        .keyboard
-                        .port_read(port)
+                        .pic
+                        .port_read(port, requests)
+                        .or_else(|| self.pit.port_read(port))
+                        .or_else(|| self.keyboard.port_read(port))
                         .or_else(|| self.video.port_read(port))
                         .unwrap_or(0xff);
                     value |= u32::from(part) << (u32::from(byte) * 8);
@@ -305,7 +319,10 @@ impl Machine {
                 for byte in 0..width {
                     let port = port.wrapping_add(u16::from(byte));
                     let value = (value >> (byte * 8)) as u8;
-                    if !self.keyboard.port_write(port, value) {
+                    if !self.pic.port_write(port, value)
+                        && !self.pit.port_write(port, value)
+                        && !self.keyboard.port_write(port, value)
+                    {
                         self.video.port_write(port, value);
                     }
                 }
@@ -315,9 +332,40 @@ impl Machine {
         Ok(())
     }
 
+    fn irq_requests(&self) -> u8 {
+        u8::from(self.pit.irq_requested()) | (u8::from(self.keyboard.irq_requested()) << 1)
+    }
+
+    fn service_hardware_interrupt(&mut self) {
+        if self.cpu.regs.flags & INTERRUPT_ENABLE == 0 {
+            return;
+        }
+        let Some(irq) = self.pic.next_irq(self.irq_requests()) else {
+            return;
+        };
+        let vector = TIMER_VECTOR + irq;
+        if irq == 0 {
+            self.pit.acknowledge_irq();
+        }
+        if self.has_interrupt_handler(vector) {
+            if vector == KEYBOARD_VECTOR {
+                self.keyboard.acknowledge_irq();
+            }
+            self.pic.acknowledge(irq);
+            self.cpu.enter_interrupt(vector);
+        }
+    }
+
     fn update_clock(&mut self) -> u32 {
-        let ticks =
-            ((self.clock.elapsed().as_micros() * 1_193_182 / 65_536_000_000) % 0x1800b0) as u32;
+        self.bios_ticks_at(pit::ticks(self.clock.elapsed()))
+    }
+
+    fn bios_ticks_at(&mut self, now: u64) -> u32 {
+        if self.has_interrupt_handler(TIMER_VECTOR) {
+            return u32::from(self.cpu.read_u16(0x40, 0x6c))
+                | (u32::from(self.cpu.read_u16(0x40, 0x6e)) << 16);
+        }
+        let ticks = (now / BIOS_DIVISOR % 0x1800b0) as u32;
         self.cpu.write_u16(0x40, 0x6c, ticks as u16);
         self.cpu.write_u16(0x40, 0x6e, (ticks >> 16) as u16);
         ticks

@@ -102,6 +102,52 @@ fn guest_keyboard_irq_waits_for_if_and_pic_and_delivers_make_and_break() {
 }
 
 #[test]
+fn guest_timer_runs_repeatedly_with_programmed_pit_period() {
+    let directory = Directory::new("timer-irq");
+    let mut program = vec![
+        0xba, 0x40, 0x01, // mov dx, 0140h
+        0xb8, 0x08, 0x25, 0xcd, 0x21, // DOS set INT 08h vector
+        0xb0, 0x36, 0xe6, 0x43, // PIT channel 0, low/high, mode 3
+        0xb0, 0x10, 0xe6, 0x40, // divisor low byte
+        0x31, 0xc0, 0xe6, 0x40, // divisor high byte
+        0xeb, 0xfe, // wait for timer
+    ];
+    program.resize(0x40, 0x90);
+    program.extend_from_slice(&[
+        0x50, // push ax
+        0xfe, 0x06, 0x80, 0x01, // increment timer count
+        0xcd, 0x1c, // default BIOS timer callback
+        0xb0, 0x20, 0xe6, 0x20, // non-specific EOI
+        0x58, 0xcf, // pop ax, iret
+    ]);
+    fs::write(directory.0.join("TIMER.COM"), program).unwrap();
+    let mut machine = directory.machine();
+    machine.launch('C', "TIMER.COM", "").unwrap();
+    machine.pit = crate::pit::Pit::new(0);
+    let segment = machine.cpu.regs.cs;
+    let initial_stack = machine.cpu.regs.sp;
+    assert_eq!(machine.bios_ticks_at(crate::pit::BIOS_DIVISOR * 3), 3);
+    assert_eq!(machine.cpu.read_u16(0x40, 0x6c), 3);
+    for _ in 0..9 {
+        machine.step().unwrap();
+    }
+    assert_eq!(machine.bios_ticks_at(crate::pit::BIOS_DIVISOR * 4), 3);
+
+    machine.pit.advance(15);
+    machine.step().unwrap();
+    assert_eq!(machine.cpu.read_u8(segment, 0x180), 0);
+
+    machine.pit.advance(16);
+    machine.step().unwrap();
+    machine.pit.advance(32);
+    for _ in 0..20 {
+        machine.step().unwrap();
+    }
+    assert_eq!(machine.cpu.read_u8(segment, 0x180), 2);
+    assert_eq!(machine.cpu.regs.sp, initial_stack);
+}
+
+#[test]
 fn mz_relocates_and_displays_vga_memory() {
     let directory = Directory::new("mz");
     let program = [
