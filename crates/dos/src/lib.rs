@@ -3,6 +3,7 @@
 mod files;
 mod loader;
 mod services;
+mod vga;
 mod video;
 
 #[cfg(test)]

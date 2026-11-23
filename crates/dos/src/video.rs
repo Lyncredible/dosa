@@ -1,12 +1,11 @@
+use crate::vga::{Vga, WIDTH as VGA_WIDTH};
 use dosa_cpu::Cpu;
 
 const TEXT: usize = 0xb8000;
-const GRAPHICS: usize = 0xa0000;
 const COLS: usize = 80;
 const ROWS: usize = 25;
 const ROW_BYTES: usize = COLS * 2;
 const TEXT_BYTES: usize = ROW_BYTES * ROWS;
-const GRAPHICS_BYTES: usize = 320 * 200;
 const CGA_WIDTH: usize = 640;
 const CGA_HEIGHT: usize = 200;
 const CGA_STRIDE: usize = CGA_WIDTH / 8;
@@ -42,6 +41,7 @@ pub(crate) struct Adapter {
     cga_pixels: Box<[u8]>,
     cga_color: u8,
     saved_text: Option<Box<[u8]>>,
+    vga: Vga,
 }
 
 impl Adapter {
@@ -58,6 +58,7 @@ impl Adapter {
             cga_pixels: vec![0; CGA_WIDTH * CGA_HEIGHT].into_boxed_slice(),
             cga_color: 15,
             saved_text: None,
+            vga: Vga::new(),
         }
     }
 
@@ -70,9 +71,9 @@ impl Adapter {
                 palette: &self.palette,
             },
             0x13 => Video::Graphics {
-                width: 320,
-                height: 200,
-                indices: &cpu.memory[GRAPHICS..GRAPHICS + GRAPHICS_BYTES],
+                width: VGA_WIDTH as u32,
+                height: (self.vga.frame().len() / VGA_WIDTH) as u32,
+                indices: self.vga.frame(),
                 palette: &self.palette,
             },
             _ => Video::Text(TextFrame {
@@ -85,6 +86,10 @@ impl Adapter {
     }
 
     pub(crate) fn refresh(&mut self, cpu: &Cpu) {
+        if self.mode == 0x13 {
+            self.vga.refresh();
+            return;
+        }
         if self.mode != 6 {
             return;
         }
@@ -137,14 +142,20 @@ impl Adapter {
         {
             cpu.memory[TEXT..TEXT + TEXT_BYTES].copy_from_slice(&text);
         }
+        let clear = value & 0x80 == 0;
+        if mode == 0x13 {
+            self.vga.enter(cpu, self.mode == 0x13, clear);
+        } else if self.mode == 0x13 {
+            self.vga.leave(cpu);
+        }
         self.mode = mode;
         self.palette = default_palette();
         self.cga_color = 15;
-        if value & 0x80 == 0 {
+        if clear {
             match mode {
                 3 => self.clear(cpu),
                 6 => cpu.memory[TEXT..TEXT + 2 * CGA_BANK].fill(0),
-                _ => cpu.memory[GRAPHICS..GRAPHICS + GRAPHICS_BYTES].fill(0),
+                _ => {}
             }
         }
         cpu.write_u8(0x40, 0x49, mode);
@@ -300,12 +311,10 @@ impl Adapter {
             0x0c | 0x0d if self.mode == 0x13 => {
                 let x = usize::from(cpu.regs.cx);
                 let y = usize::from(cpu.regs.dx);
-                if x < 320 && y < 200 {
-                    let pixel = &mut cpu.memory[GRAPHICS + y * 320 + x];
-                    if ah == 0x0c {
-                        *pixel = al;
-                    } else {
-                        cpu.regs.ax = u16::from_le_bytes([*pixel, ah]);
+                if x < VGA_WIDTH && y < self.vga.height() {
+                    let pixel = self.vga.pixel(x, y, (ah == 0x0c).then_some(al));
+                    if ah == 0x0d {
+                        cpu.regs.ax = u16::from_le_bytes([pixel, ah]);
                     }
                 }
             }
@@ -359,7 +368,7 @@ impl Adapter {
                 self.retrace = !self.retrace;
                 Some(if self.retrace { 0x09 } else { 0 })
             }
-            _ => None,
+            _ => self.vga.read_port(port),
         }
     }
 
@@ -372,7 +381,7 @@ impl Adapter {
                 self.dac_write = (self.dac_write + 1) % 768;
             }
             0x3d9 if self.mode == 6 => self.cga_color = value & 15,
-            _ => {}
+            _ => self.vga.write_port(port, value),
         }
     }
 }
