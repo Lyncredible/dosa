@@ -1,6 +1,6 @@
 # dosa tasks
 
-The first milestone is a GPU-rendered DOS prompt that can mount host content and run a small real-mode COM program on Windows. The next milestone expands executable and device coverage against reproducible DOS workloads. Linux and macOS share the Rust libraries and desktop frontend and have their own validation task.
+The first milestone is a GPU-rendered DOS prompt that can mount host content and run small real-mode COM and MZ programs on Windows. The next milestone expands executable and device coverage against reproducible DOS workloads. Linux and macOS share the Rust libraries and desktop frontend and have their own validation task.
 
 | Task | Depends on | Status |
 | --- | --- | --- |

@@ -1,13 +1,14 @@
 # Architecture
 
-dosa runs DOS applications in a Rust emulator and presents the guest display in a native desktop window. The built-in DOS services start with the calls needed for small real-mode programs. The first compatibility milestone targets COM execution, and the roadmap tracks MZ programs and the PC devices needed for broader application support.
+dosa runs DOS applications in a Rust emulator and presents the guest display in a native desktop window. The built-in DOS services start with the calls needed for small real-mode programs. The first compatibility milestone targets basic COM and MZ execution, text output, and VGA mode 13h. Later milestones track the CPU coverage, DOS services, and PC devices needed for broader application support.
 
 | Crate | Owns |
 | --- | --- |
 | `dosa-cpu` | Real-mode x86 execution, registers, segmented memory, instruction outcomes and interrupt dispatch |
 | `dosa-mount` | Host directory, single-file, and ZIP sources exposed through DOS drive paths |
-| `dosa-dos` | Guest program loading, DOS and BIOS services, shell, input queue, and guest display state |
+| `dosa-dos` | Guest program loading, DOS and BIOS services, input queue, and guest display state |
 | `dosa-desktop` | Native window and input, GPU presentation, and application lifecycle |
+| `dosa` | Command-line arguments, shell, and composition of the DOS library and desktop frontend |
 
 The DOS library composes the CPU and mount libraries. It advances the guest in bounded instruction batches so that keyboard input and window events can run even when a guest loops. CPU and DOS tests run headlessly with deterministic synthetic programs. Unsupported CPU instructions and services should report enough information to reproduce a failure, including the guest address for instruction errors.
 
