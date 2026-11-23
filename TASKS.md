@@ -4,12 +4,12 @@ The first milestone is a GPU-rendered DOS prompt that can mount host content and
 
 | Task | Depends on | Status |
 | --- | --- | --- |
-| [01 · Real-mode CPU and memory](docs/tasks/01-cpu.md) | Architecture | In progress |
-| [02 · Host drive mounts](docs/tasks/02-mounts.md) | Architecture | In progress |
-| [03 · GPU desktop](docs/tasks/03-desktop.md) | Architecture | In progress |
-| [04 · DOS and first runnable milestone](docs/tasks/04-dos.md) | 01, 02, 03 | In progress |
+| [01 · Real-mode CPU and memory](docs/tasks/01-cpu.md) | Architecture | Initial implementation complete |
+| [02 · Host drive mounts](docs/tasks/02-mounts.md) | Architecture | Read-only mounts complete |
+| [03 · GPU desktop](docs/tasks/03-desktop.md) | Architecture | Windows GPU smoke passed |
+| [04 · DOS and first runnable milestone](docs/tasks/04-dos.md) | 01, 02, 03 | Initial implementation complete |
 | [05 · DOS application compatibility](docs/tasks/05-compatibility.md) | 04 | Planned |
-| [06 · Platform validation](docs/tasks/06-platforms.md) | 04 | Planned |
+| [06 · Platform validation](docs/tasks/06-platforms.md) | 04 | Windows verified, other platforms pending |
 
 See [architecture](docs/architecture.md) for the library boundaries and execution model.
 

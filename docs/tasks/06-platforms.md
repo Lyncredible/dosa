@@ -6,3 +6,5 @@ Validate the same source on Windows, Linux, and macOS. Keep headless execution a
 - Launch the native desktop on each platform and exercise keyboard, resizing, GPU presentation, and clean shutdown.
 - Smoke-test representative directory, file, and ZIP mounts on each platform. Include paths with spaces.
 - Document platform prerequisites, verified graphics backends, and build instructions after testing them.
+
+Desktop GPU smoke coverage starts with Windows Vulkan and Direct3D 12. The Linux and macOS desktop runs are still open.

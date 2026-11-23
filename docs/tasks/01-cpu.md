@@ -7,3 +7,5 @@ Implement the platform-independent execution core in `crates/cpu`. Run real-mode
 - Exercise a COM-style program that issues a DOS interrupt.
 
 Expand instruction coverage in [05](05-compatibility.md) based on reproducible failures.
+
+The initial interpreter was merged in [PR #2](https://github.com/Lyncredible/dosa/pull/2) after nine Windows unit tests passed.

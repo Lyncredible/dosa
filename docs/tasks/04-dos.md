@@ -9,3 +9,5 @@ Compose the CPU and mounts in `crates/dos`. Load COM and MZ executables and supp
 - Run a local archive smoke test on Windows. Record the outcome and compatibility gaps without recording private fixture names or paths.
 
 This milestone establishes the end-to-end execution path. Track broader executable support in [05](05-compatibility.md).
+
+The DOS runtime tests cover COM output and exit, a relocated MZ program that draws into VGA memory, and a guest opening a mounted file relative to its current directory.
