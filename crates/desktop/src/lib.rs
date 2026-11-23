@@ -130,6 +130,18 @@ impl<A: App> Desktop<A> {
 
     fn use_menu_command(&mut self, window: &Window, command: Option<menu::Command>) {
         match command {
+            Some(menu::Command::Screenshot) => {
+                self.pointer.set_position(None);
+                self.sync_pointer(window, true);
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_parent(window)
+                    .add_filter("PNG image", &["png"])
+                    .set_file_name("dosa.png")
+                    .save_file()
+                {
+                    self.app.menu_action(MenuAction::SaveScreenshot(path));
+                }
+            }
             Some(menu::Command::Mount(kind, drive)) => {
                 self.pointer.set_position(None);
                 self.sync_pointer(window, true);

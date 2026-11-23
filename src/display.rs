@@ -325,6 +325,13 @@ impl App for Desktop {
 
     fn menu_action(&mut self, action: MenuAction) {
         match action {
+            MenuAction::SaveScreenshot(path) => {
+                self.render();
+                self.status = match save_screenshot(&path, self.frame()) {
+                    Ok(()) => "Screenshot saved".into(),
+                    Err(error) => format!("Screenshot failed: {error}"),
+                };
+            }
             MenuAction::Mount { drive, source, .. } if !self.running => {
                 self.status = match Mount::open(source)
                     .map_err(|error| -> Box<dyn std::error::Error> { error.into() })
@@ -435,6 +442,20 @@ impl App for Desktop {
     }
 }
 
+fn save_screenshot(
+    path: &std::path::Path,
+    frame: Frame<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = std::fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), frame.width, frame.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(frame.rgba)?;
+    writer.finish()?;
+    Ok(())
+}
+
 fn cpu_profile(mode: CpuMode) -> CpuProfile {
     match mode {
         CpuMode::I8086 => CpuProfile::I8086,
@@ -534,6 +555,29 @@ fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screenshot_round_trips_guest_rgba_pixels() {
+        let path = std::env::temp_dir().join(format!("dosa-capture-{}.png", std::process::id()));
+        let rgba = [10, 20, 30, 255, 40, 50, 60, 255];
+        save_screenshot(
+            &path,
+            Frame {
+                width: 2,
+                height: 1,
+                rgba: &rgba,
+            },
+        )
+        .unwrap();
+        let decoder =
+            png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut decoded = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut decoded).unwrap();
+        assert_eq!((info.width, info.height), (2, 1));
+        assert_eq!(&decoded[..info.buffer_size()], &rgba);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn menu_selects_profiles_speed_and_text_geometry() {
