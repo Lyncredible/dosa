@@ -13,11 +13,11 @@ The first milestone is a GPU-rendered DOS prompt that can mount host content and
 | [07 · CGA and planar VGA](docs/tasks/07-video.md) | 03, 04 | Initial modes complete |
 | [08 · Guest keyboard interrupts](docs/tasks/08-keyboard.md) | 04 | Initial IRQ1 delivery complete |
 | [09 · Guest timer interrupts](docs/tasks/09-timer.md) | 04, 08 | Initial PIT channel 0 and IRQ0 delivery complete |
-| [10 · Desktop controls](docs/tasks/10-desktop-controls.md) | 02, 03 | In progress |
-| [11 · CPU speed and instruction profiles](docs/tasks/11-cpu-controls.md) | 01, 09 | In progress |
-| [12 · Seamless mouse](docs/tasks/12-mouse.md) | 03, 04 | In progress |
-| [13 · More DOS text rows and columns](docs/tasks/13-text-modes.md) | 03, 04 | In progress |
-| [14 · Windows integration and UI verification](docs/tasks/14-integration.md) | 10, 11, 12, 13 | Planned |
+| [10 · Desktop controls](docs/tasks/10-desktop-controls.md) | 02, 03 | Initial controls complete |
+| [11 · CPU speed and instruction profiles](docs/tasks/11-cpu-controls.md) | 01, 09 | Initial profiles and speed controls complete |
+| [12 · Seamless mouse](docs/tasks/12-mouse.md) | 03, 04 | Initial implementation complete |
+| [13 · More DOS text rows and columns](docs/tasks/13-text-modes.md) | 03, 04 | Initial implementation complete |
+| [14 · Windows integration and UI verification](docs/tasks/14-integration.md) | 10, 11, 12, 13 | Windows integration smoke passed |
 | [15 · Reusable launch settings and fullscreen](docs/tasks/15-launch-and-view.md) | 03, 10 | Planned |
 | [16 · Compatibility roadmap](docs/tasks/16-compatibility-roadmap.md) | 05, 09 | Planned |
 | [17 · DOS batch files](docs/tasks/17-batch-files.md) | 04, 15 | Planned |

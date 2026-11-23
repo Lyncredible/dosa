@@ -68,6 +68,8 @@ View offers pause/resume, fullscreen, and 80-column text presets with 25, 43, or
 
 Keyboard menu access uses Alt+D, Alt+C, Alt+S, and Alt+V, followed by arrow keys and Enter.
 
+The desktop speed presets allow 10,000, 50,000, 100,000, or 250,000 guest instructions per display tick. Native picker interaction and Linux/macOS desktop runtime checks remain open.
+
 ## Compatibility and verification
 
 Windows is the first desktop target and has been tested with Vulkan and Direct3D 12. The workspace type-checks for x86-64 Linux and Apple Silicon macOS. Native desktop testing on those platforms is tracked in the [task list](TASKS.md).
@@ -83,3 +85,5 @@ cargo clippy --workspace --all-targets --locked
 ~~~
 
 See [TASKS.md](TASKS.md) for the architecture and work in progress.
+
+An optional native-window test accepts a local archive through `DOSA_SMOKE_ARCHIVE` and an executable name through `DOSA_SMOKE_PROGRAM`. Set `DOSA_SMOKE_ENTER_COUNT` to the desired number of Enter transitions, then run `cargo test --test desktop_smoke --locked`. The test mounts the archive through the application menu action and checks graphics updates in the live GPU event loop.
