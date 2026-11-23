@@ -99,10 +99,19 @@ impl Settings {
 
 impl Desktop {
     pub fn new(shell: Shell, initial: Option<&str>) -> Self {
-        Self::with_settings(shell, initial, Settings::default())
+        Self::initialize(shell, initial, Settings::default())
     }
 
-    pub fn with_settings(shell: Shell, initial: Option<&str>, settings: Settings) -> Self {
+    pub fn with_settings(
+        mut shell: Shell,
+        initial: Option<&str>,
+        settings: Settings,
+    ) -> Result<Self, dosa_dos::DosError> {
+        settings.apply(&mut shell)?;
+        Ok(Self::initialize(shell, initial, settings))
+    }
+
+    fn initialize(shell: Shell, initial: Option<&str>, settings: Settings) -> Self {
         let mut desktop = Self {
             shell,
             line: String::new(),
@@ -513,6 +522,63 @@ mod tests {
         cursor.cursor_mask[1] = 0x4000;
         draw_mouse_cursor(&mut pixels, 2, 1, &cursor);
         assert_eq!(pixels, [245, 235, 225, 255, 40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn mounted_guest_uses_mouse_and_can_pause_and_resume() {
+        let scratch = std::env::temp_dir().join(format!("dosa-pointer-{}", std::process::id()));
+        std::fs::create_dir(&scratch).unwrap();
+        let path = scratch.join("POINTER.COM");
+        std::fs::write(
+            &path,
+            [
+                0x31, 0xc0, 0xcd, 0x33, // Reset mouse.
+                0xb8, 1, 0, 0xcd, 0x33, // Show cursor.
+                0x31, 0xc0, 0xcd, 0x16, // Wait for a key.
+                0xcd, 0x20, // Exit to the shell.
+            ],
+        )
+        .unwrap();
+
+        let mut desktop = Desktop::new(Shell::new(), None);
+        desktop.menu_action(MenuAction::Mount {
+            drive: 'C',
+            source: path.clone(),
+            kind: dosa_desktop::MountKind::File,
+        });
+        desktop.submit("POINTER");
+        desktop.tick();
+        assert!(desktop.menu().running);
+        assert_eq!(desktop.pointer_mode(), PointerMode::Integrated);
+
+        desktop.pointer(PointerEvent::Moved { x: 0, y: 0 });
+        let cursor = desktop.shell.machine.mouse_cursor().unwrap();
+        assert_eq!((cursor.x, cursor.y), (0, 0));
+        desktop.menu_action(MenuAction::SetPaused(true));
+        assert!(desktop.menu().paused);
+        assert_eq!(desktop.pointer_mode(), PointerMode::Host);
+        desktop.menu_action(MenuAction::SetCpu(CpuMode::I8086));
+        assert_eq!(desktop.menu().cpu, CpuMode::I386);
+
+        let enter = Input {
+            key: Key::Enter,
+            pressed: true,
+            text: None,
+            modifiers: Default::default(),
+            scan_code: 0x1c,
+        };
+        desktop.input(enter.clone());
+        desktop.tick();
+        assert!(desktop.menu().running);
+        desktop.menu_action(MenuAction::SetPaused(false));
+        desktop.input(enter);
+        desktop.tick();
+        assert!(!desktop.menu().running);
+        assert_eq!(desktop.pointer_mode(), PointerMode::Host);
+
+        drop(desktop);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(scratch).unwrap();
     }
 
     #[test]
