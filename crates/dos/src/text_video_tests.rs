@@ -128,6 +128,11 @@ fn mode_twelve_reports_graphics_and_bios_geometry() {
     assert_eq!(cpu.read_u16(0x40, 0x4c), 0xa000);
     assert_eq!(cpu.read_u8(0x40, 0x84), 29);
     assert_eq!(cpu.read_u16(0x40, 0x85), 16);
+    for (index, expected) in [(0x10, 1), (0x12, 15)] {
+        video.port_read(0x3da);
+        video.port_write(0x3c0, index);
+        assert_eq!(video.port_read(0x3c1), Some(expected));
+    }
     video.refresh(&cpu);
     let super::Video::Graphics {
         width,
