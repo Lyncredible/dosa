@@ -1,0 +1,8 @@
+[package]
+name = "dosa-dos"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dosa-cpu = { path = "../cpu" }
+dosa-mount = { path = "../mount" }
