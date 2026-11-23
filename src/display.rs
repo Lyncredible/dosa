@@ -1,8 +1,12 @@
 use std::sync::LazyLock;
 use std::time::Instant;
 
-use dosa_desktop::{App, Frame, Input, Key};
-use dosa_dos::{RunState, TextFrame, Video};
+use dosa_desktop::{
+    App, CpuMode, Frame, Input, Key, MenuAction, MenuState, PointerEvent, PointerMode, Speed,
+    TextMode,
+};
+use dosa_dos::{CpuProfile, MouseCursor, RunState, TextFrame, Video};
+use dosa_mount::Mount;
 use font8x8::{
     BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, LATIN_FONTS, MISC_FONTS, UnicodeFonts,
 };
@@ -58,6 +62,9 @@ pub struct Desktop {
     shell: Shell,
     line: String,
     running: bool,
+    paused: bool,
+    settings: Settings,
+    status: String,
     exit: bool,
     width: u32,
     height: u32,
@@ -65,12 +72,44 @@ pub struct Desktop {
     started: Instant,
 }
 
+#[derive(Clone, Copy)]
+pub struct Settings {
+    pub cpu: CpuMode,
+    pub speed: Speed,
+    pub text_mode: TextMode,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            cpu: CpuMode::I386,
+            speed: Speed::Normal,
+            text_mode: TextMode::Rows25,
+        }
+    }
+}
+
+impl Settings {
+    pub fn apply(self, shell: &mut Shell) -> Result<(), dosa_dos::DosError> {
+        shell.machine.set_cpu_profile(cpu_profile(self.cpu))?;
+        shell.machine.set_text_rows(text_rows(self.text_mode));
+        Ok(())
+    }
+}
+
 impl Desktop {
     pub fn new(shell: Shell, initial: Option<&str>) -> Self {
+        Self::with_settings(shell, initial, Settings::default())
+    }
+
+    pub fn with_settings(shell: Shell, initial: Option<&str>, settings: Settings) -> Self {
         let mut desktop = Self {
             shell,
             line: String::new(),
             running: false,
+            paused: false,
+            settings,
+            status: String::new(),
             exit: false,
             width: 640,
             height: 400,
@@ -117,6 +156,7 @@ impl Desktop {
             }
             Ok(Command::Launched) => {
                 self.running = true;
+                self.status = String::new();
                 return;
             }
             Err(error) => self
@@ -131,7 +171,7 @@ impl Desktop {
         match self.shell.machine.video() {
             Video::Text(frame) => {
                 self.width = u32::from(frame.columns) * 8;
-                self.height = u32::from(frame.rows) * 16;
+                self.height = u32::from(frame.rows) * u32::from(frame.character_height);
                 self.pixels
                     .resize((self.width * self.height * 4) as usize, 0);
                 let blink = self.started.elapsed().as_millis() % 1000 < 500;
@@ -152,13 +192,38 @@ impl Desktop {
                 }
             }
         }
+        if self.running
+            && !self.paused
+            && let Some(cursor) = self.shell.machine.mouse_cursor()
+        {
+            draw_mouse_cursor(&mut self.pixels, self.width, self.height, &cursor);
+        }
+    }
+
+    fn set_text_mode(&mut self, mode: TextMode) {
+        if mode == self.settings.text_mode {
+            return;
+        }
+        if !self.shell.machine.set_text_rows(text_rows(mode)) {
+            return;
+        }
+        self.settings.text_mode = mode;
+        self.shell.machine.clear_console();
+        self.write_prompt();
+        for character in self.line.chars() {
+            self.shell.machine.write_console(&[encode_cp437(character)]);
+        }
     }
 }
 
 impl App for Desktop {
     fn tick(&mut self) {
-        if self.running {
-            match self.shell.machine.run(50_000) {
+        if self.running && !self.paused {
+            match self
+                .shell
+                .machine
+                .run(instructions_per_tick(self.settings.speed))
+            {
                 Ok(RunState::Idle | RunState::Exited(_)) => {
                     self.running = false;
                     self.shell.machine.write_console(b"\r\n");
@@ -196,6 +261,75 @@ impl App for Desktop {
         self.exit
     }
 
+    fn menu(&self) -> MenuState {
+        MenuState {
+            enabled: true,
+            active_drive: self.shell.current_drive(),
+            cpu: self.settings.cpu,
+            speed: self.settings.speed,
+            text_mode: self.settings.text_mode,
+            running: self.running,
+            paused: self.paused,
+            status: self.status.clone(),
+        }
+    }
+
+    fn menu_action(&mut self, action: MenuAction) {
+        match action {
+            MenuAction::Mount { drive, source, .. } if !self.running => {
+                self.status = match Mount::open(source)
+                    .map_err(|error| -> Box<dyn std::error::Error> { error.into() })
+                    .and_then(|mount| self.shell.mount(drive, mount))
+                {
+                    Ok(()) => format!("Mounted {drive}:"),
+                    Err(error) => format!("Mount failed: {error}"),
+                };
+            }
+            MenuAction::SetCpu(mode) if !self.running => {
+                if self
+                    .shell
+                    .machine
+                    .set_cpu_profile(cpu_profile(mode))
+                    .is_ok()
+                {
+                    self.settings.cpu = mode;
+                }
+            }
+            MenuAction::SetSpeed(speed) => self.settings.speed = speed,
+            MenuAction::SetPaused(paused) if self.running => {
+                self.paused = paused;
+                self.shell.machine.set_paused(paused);
+                if paused {
+                    self.shell.machine.mouse_buttons(0);
+                }
+            }
+            MenuAction::SetTextMode(mode) if !self.running => self.set_text_mode(mode),
+            MenuAction::Exit => self.exit = true,
+            _ => {}
+        }
+    }
+
+    fn pointer(&mut self, event: PointerEvent) {
+        match event {
+            PointerEvent::Moved { x, y } if self.running && !self.paused => {
+                self.shell.machine.mouse_move(x, y);
+            }
+            PointerEvent::Buttons { mask } if self.running && !self.paused => {
+                self.shell.machine.mouse_buttons(mask);
+            }
+            PointerEvent::Deactivated => self.shell.machine.mouse_buttons(0),
+            _ => {}
+        }
+    }
+
+    fn pointer_mode(&self) -> PointerMode {
+        if self.running && !self.paused && self.shell.machine.mouse_active() {
+            PointerMode::Integrated
+        } else {
+            PointerMode::Host
+        }
+    }
+
     fn input(&mut self, event: Input) {
         if !event.pressed {
             if self.running {
@@ -204,6 +338,9 @@ impl App for Desktop {
             return;
         }
         if self.running {
+            if self.paused {
+                return;
+            }
             let ascii = match event.key {
                 Key::Enter => 13,
                 Key::Backspace => 8,
@@ -246,6 +383,61 @@ impl App for Desktop {
     }
 }
 
+fn cpu_profile(mode: CpuMode) -> CpuProfile {
+    match mode {
+        CpuMode::I8086 => CpuProfile::I8086,
+        CpuMode::I286 => CpuProfile::I286,
+        CpuMode::I386 => CpuProfile::I386,
+    }
+}
+
+fn text_rows(mode: TextMode) -> u8 {
+    match mode {
+        TextMode::Rows25 => 25,
+        TextMode::Rows43 => 43,
+        TextMode::Rows50 => 50,
+    }
+}
+
+pub fn instructions_per_tick(speed: Speed) -> usize {
+    match speed {
+        Speed::Slow => 10_000,
+        Speed::Normal => 50_000,
+        Speed::Fast => 100_000,
+        Speed::Maximum => 250_000,
+    }
+}
+
+fn draw_mouse_cursor(pixels: &mut [u8], width: u32, height: u32, cursor: &MouseCursor) {
+    let origin_x = (u32::from(cursor.x) * (width - 1) / 65535) as i32 - i32::from(cursor.hotspot_x);
+    let origin_y =
+        (u32::from(cursor.y) * (height - 1) / 65535) as i32 - i32::from(cursor.hotspot_y);
+    for (row, (&screen, &shape)) in cursor
+        .screen_mask
+        .iter()
+        .zip(&cursor.cursor_mask)
+        .enumerate()
+    {
+        let y = origin_y + row as i32;
+        if !(0..height as i32).contains(&y) {
+            continue;
+        }
+        for column in 0..16 {
+            let x = origin_x + column;
+            if !(0..width as i32).contains(&x) {
+                continue;
+            }
+            let bit = 0x8000u16 >> column;
+            let keep = if screen & bit != 0 { 255 } else { 0 };
+            let invert = if shape & bit != 0 { 255 } else { 0 };
+            let offset = ((y as u32 * width + x as u32) * 4) as usize;
+            for channel in &mut pixels[offset..offset + 3] {
+                *channel = (*channel & keep) ^ invert;
+            }
+        }
+    }
+}
+
 fn encode_cp437(character: char) -> u8 {
     if character.is_ascii() {
         return character as u8;
@@ -258,6 +450,7 @@ fn encode_cp437(character: char) -> u8 {
 
 fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: bool) {
     let columns = usize::from(frame.columns);
+    let height = usize::from(frame.character_height);
     for (cell, data) in frame.cells.as_chunks::<2>().0.iter().enumerate() {
         let (column, row) = (cell % columns, cell / columns);
         let cursor = blink && frame.cursor == Some((column as u16, row as u16));
@@ -265,15 +458,17 @@ fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: boo
         let color = VGA[usize::from(data[1] & 0x0f)];
         let background = VGA[usize::from(data[1] >> 4 & 0x07)];
         let visible = data[1] & 0x80 == 0 || blink;
-        for y in 0..16 {
-            let start = ((row * 16 + y) * width + column * 8) * 4;
+        for y in 0..height {
+            let start = ((row * height + y) * width + column * 8) * 4;
             for (x, pixel) in pixels[start..start + 32]
                 .as_chunks_mut::<4>()
                 .0
                 .iter_mut()
                 .enumerate()
             {
-                let [r, g, b] = if cursor && y >= 14 || visible && glyph[y / 2] & (1 << x) != 0 {
+                let [r, g, b] = if cursor && y + 2 >= height
+                    || visible && glyph[y * 8 / height] & (1 << x) != 0
+                {
                     color
                 } else {
                     background
@@ -287,6 +482,38 @@ fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_selects_profiles_speed_and_text_geometry() {
+        let mut desktop = Desktop::new(Shell::new(), None);
+        desktop.menu_action(MenuAction::SetCpu(CpuMode::I286));
+        desktop.menu_action(MenuAction::SetSpeed(Speed::Fast));
+        desktop.menu_action(MenuAction::SetTextMode(TextMode::Rows43));
+        desktop.tick();
+
+        let menu = desktop.menu();
+        assert_eq!(menu.cpu, CpuMode::I286);
+        assert_eq!(menu.speed, Speed::Fast);
+        assert_eq!(menu.text_mode, TextMode::Rows43);
+        assert_eq!((desktop.frame().width, desktop.frame().height), (640, 344));
+        assert!(instructions_per_tick(Speed::Fast) > instructions_per_tick(Speed::Normal));
+    }
+
+    #[test]
+    fn mouse_overlay_clips_top_left_and_keeps_alpha() {
+        let mut pixels = [10, 20, 30, 255, 40, 50, 60, 255];
+        let mut cursor = MouseCursor {
+            x: 0,
+            y: 0,
+            hotspot_x: 1,
+            hotspot_y: 1,
+            screen_mask: [u16::MAX; 16],
+            cursor_mask: [0; 16],
+        };
+        cursor.cursor_mask[1] = 0x4000;
+        draw_mouse_cursor(&mut pixels, 2, 1, &cursor);
+        assert_eq!(pixels, [245, 235, 225, 255, 40, 50, 60, 255]);
+    }
 
     #[test]
     fn shell_backspace_erases_across_wrap_and_preserves_the_prompt() {

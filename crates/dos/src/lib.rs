@@ -16,6 +16,7 @@ mod tests;
 pub use mouse::MouseCursor;
 pub use video::{TextFrame, Video};
 
+pub use dosa_cpu::CpuProfile;
 use dosa_cpu::{Cpu, CpuError, Step};
 use dosa_mount::{Mount, MountError};
 use files::DosFiles;
@@ -87,6 +88,7 @@ enum Pending {
 
 pub struct Machine {
     cpu: Cpu,
+    cpu_profile: CpuProfile,
     video: Adapter,
     mounts: BTreeMap<char, Mount>,
     files: DosFiles,
@@ -101,6 +103,7 @@ pub struct Machine {
     locks: u8,
     output: Vec<u8>,
     clock: Instant,
+    paused_since: Option<Instant>,
     dta: (u16, u16),
     blocks: BTreeMap<u16, u16>,
     line: Vec<u8>,
@@ -120,6 +123,7 @@ impl Machine {
         Mouse::install(&mut cpu);
         Self {
             cpu,
+            cpu_profile: CpuProfile::default(),
             video,
             mounts: BTreeMap::new(),
             files: DosFiles::new('C', String::new()),
@@ -134,6 +138,7 @@ impl Machine {
             locks: 0,
             output: Vec::new(),
             clock: Instant::now(),
+            paused_since: None,
             dta: (PSP, 0x80),
             blocks: BTreeMap::new(),
             line: Vec::new(),
@@ -150,6 +155,22 @@ impl Machine {
 
     pub fn drive(&self, drive: char) -> Option<&Mount> {
         self.mounts.get(&drive.to_ascii_uppercase())
+    }
+
+    pub fn set_cpu_profile(&mut self, profile: CpuProfile) -> Result<(), DosError> {
+        if matches!(self.state, RunState::Running | RunState::WaitingForKey) {
+            return Err(DosError::Busy);
+        }
+        self.cpu_profile = profile;
+        Ok(())
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        if paused && matches!(self.state, RunState::Running | RunState::WaitingForKey) {
+            self.paused_since.get_or_insert_with(Instant::now);
+        } else if !paused && let Some(since) = self.paused_since.take() {
+            self.clock += since.elapsed();
+        }
     }
 
     pub fn launch(&mut self, drive: char, path: &str, args: &str) -> Result<(), DosError> {
@@ -170,7 +191,7 @@ impl Machine {
         } else {
             format!("{drive}:\\{cwd}\\{}", entry.name)
         };
-        let mut cpu = loader::load(&bytes, &name, args)?;
+        let mut cpu = loader::load(&bytes, &name, args, self.cpu_profile)?;
         let mut video = Adapter::new();
         video::initialize(&mut cpu, &mut video);
         Mouse::install(&mut cpu);
@@ -319,6 +340,9 @@ impl Machine {
     }
 
     pub fn run(&mut self, budget: usize) -> Result<RunState, DosError> {
+        if self.paused_since.is_some() {
+            return Ok(self.state);
+        }
         if matches!(self.state, RunState::Idle | RunState::Exited(_)) {
             return Ok(self.state);
         }
@@ -429,6 +453,7 @@ impl Machine {
     }
 
     fn exit(&mut self, code: u8) {
+        self.set_paused(false);
         self.state = RunState::Exited(code);
         self.pending = None;
         self.files.close_all();
