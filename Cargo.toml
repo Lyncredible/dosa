@@ -13,6 +13,8 @@ dosa-desktop = { path = "crates/desktop" }
 dosa-dos = { path = "crates/dos" }
 dosa-mount = { path = "crates/mount" }
 font8x8 = "0.3.1"
+serde = { version = "1", features = ["derive"] }
+toml = { version = "1.2", default-features = false, features = ["parse", "serde", "std"] }
 
 [dev-dependencies]
 zip = { version = "9.8.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }

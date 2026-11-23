@@ -30,6 +30,36 @@ DIR
 
 Mounts are read-only. Headless execution returns the program's DOS exit code. It reports an error if the guest needs keyboard input or reaches the instruction limit.
 
+## Launch profiles
+
+Save the settings for a program in a TOML file and load it with `--profile`.
+All fields are optional. Mounts are listed in startup order.
+
+~~~toml
+exec = "C:\\DEMO.COM"
+cpu = 386
+speed = "normal"
+text_rows = 25
+
+[[mounts]]
+drive = "C"
+path = "games.zip"
+
+[[mounts]]
+drive = "D"
+path = "tools"
+~~~
+
+~~~console
+dosa --profile profiles/demo.toml
+dosa --profile profiles/demo.toml --headless
+dosa --profile profiles/demo.toml --cpu 286 --speed fast --text-rows 43
+~~~
+
+Relative TOML mount paths resolve from the profile's directory. Relative `--mount` paths resolve from the working directory. `--mount` replaces a profile mount on the same drive and adds mounts on new drives. Explicit `--exec`, `--cpu`, `--speed`, and `--text-rows` override the corresponding saved values.
+
+CPU profiles are `8086`, `286`, and `386`. Text modes have 25, 43, or 50 rows. Desktop execution speeds are `slow`, `normal`, `fast`, and `maximum` (`max` also works). Headless mode uses the same mounts, CPU, text rows, and command with its fixed instruction limit. Its command can come from `--exec` or the profile's `exec` field.
+
 ## Compatibility
 
 Windows is the first desktop target and has been tested with Vulkan and Direct3D 12. The workspace type-checks for x86-64 Linux and Apple Silicon macOS. Native desktop testing on those platforms is tracked in the [task list](TASKS.md).
