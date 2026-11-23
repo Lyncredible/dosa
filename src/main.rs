@@ -1,6 +1,3 @@
-mod display;
-mod shell;
-
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -9,8 +6,8 @@ use std::process::ExitCode;
 use dosa_dos::RunState;
 use dosa_mount::Mount;
 
-use crate::display::Desktop;
-use crate::shell::{Command, Shell};
+use dosa::display::Desktop;
+use dosa::shell::{Command, Shell};
 
 const USAGE: &str = "\
 Usage: dosa [--mount DRIVE=PATH]... [--exec COMMAND] [--headless]
