@@ -142,7 +142,7 @@ impl Desktop {
                 self.width = width;
                 self.height = height;
                 self.pixels.resize((width * height * 4) as usize, 0);
-                for (&index, pixel) in indices.iter().zip(self.pixels.chunks_exact_mut(4)) {
+                for (&index, pixel) in indices.iter().zip(self.pixels.as_chunks_mut::<4>().0) {
                     let [r, g, b] = palette[usize::from(index)];
                     pixel.copy_from_slice(&[r, g, b, 255]);
                 }
@@ -254,7 +254,7 @@ fn encode_cp437(character: char) -> u8 {
 
 fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: bool) {
     let columns = usize::from(frame.columns);
-    for (cell, data) in frame.cells.chunks_exact(2).enumerate() {
+    for (cell, data) in frame.cells.as_chunks::<2>().0.iter().enumerate() {
         let (column, row) = (cell % columns, cell / columns);
         let cursor = blink && frame.cursor == Some((column as u16, row as u16));
         let glyph = GLYPHS[usize::from(data[0])];
@@ -263,7 +263,12 @@ fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: boo
         let visible = data[1] & 0x80 == 0 || blink;
         for y in 0..16 {
             let start = ((row * 16 + y) * width + column * 8) * 4;
-            for (x, pixel) in pixels[start..start + 32].chunks_exact_mut(4).enumerate() {
+            for (x, pixel) in pixels[start..start + 32]
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
                 let [r, g, b] = if cursor && y >= 14 || visible && glyph[y / 2] & (1 << x) != 0 {
                     color
                 } else {
