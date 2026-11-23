@@ -16,4 +16,4 @@ The first milestone is a GPU-rendered DOS prompt that can mount host content and
 
 See [architecture](docs/architecture.md) for the library boundaries and execution model.
 
-Use one branch and worktree per task. Open a PR against the default branch and include its task, scope, and verification. A separate reviewer checks the diff and runs relevant tests before merging or sending findings back for revision. Update the linked task when work merges or its scope changes. Keep local fixtures and host paths out of commits, CI, and PR descriptions.
+Use one branch and worktree per task. Open a PR against the default branch and include its task, scope, and verification. A separate reviewer checks the diff and runs relevant tests before merging or sending findings back for revision. Use GitHub's **Rebase and merge** option or `gh pr merge --rebase` for every approved PR. Update the linked task when work merges or its scope changes. Keep local fixtures and host paths out of commits, CI, and PR descriptions.
