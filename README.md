@@ -60,7 +60,15 @@ Relative TOML mount paths resolve from the profile's directory. Relative `--moun
 
 CPU profiles are `8086`, `286`, and `386`. Text modes have 25, 43, or 50 rows. Desktop execution speeds are `slow`, `normal`, `fast`, and `maximum` (`max` also works). Headless mode uses the same mounts, CPU, text rows, and command with its fixed instruction limit. Its command can come from `--exec` or the profile's `exec` field.
 
-## Compatibility
+## Desktop controls
+
+Use Drives to select a drive letter and mount a file, folder, or ZIP through a native picker. CPU selects the 8086, 286, or 386 instruction profile while the shell is idle. Speed adjusts the guest instruction budget during execution.
+
+View offers pause/resume, fullscreen, and 80-column text presets with 25, 43, or 50 rows. DOS mouse support maps the host pointer into the guest viewport and releases held buttons when leaving the viewport or opening a menu.
+
+Keyboard menu access uses Alt+D, Alt+C, Alt+S, and Alt+V, followed by arrow keys and Enter.
+
+## Compatibility and verification
 
 Windows is the first desktop target and has been tested with Vulkan and Direct3D 12. The workspace type-checks for x86-64 Linux and Apple Silicon macOS. Native desktop testing on those platforms is tracked in the [task list](TASKS.md).
 
