@@ -257,6 +257,14 @@ impl Machine {
         self.video.clear(&mut self.cpu);
     }
 
+    /// Select a shell text geometry and retain it across guest programs.
+    pub fn set_text_rows(&mut self, rows: u8) -> bool {
+        if matches!(self.state, RunState::Running | RunState::WaitingForKey) {
+            return false;
+        }
+        self.video.set_console_rows(&mut self.cpu, rows)
+    }
+
     pub fn take_output(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.output)
     }

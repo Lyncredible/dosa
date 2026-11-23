@@ -1,11 +1,14 @@
 use crate::vga::{Vga, WIDTH as VGA_WIDTH};
 use dosa_cpu::Cpu;
 
+#[cfg(test)]
+#[path = "text_video_tests.rs"]
+mod text_tests;
+
 const TEXT: usize = 0xb8000;
 const COLS: usize = 80;
-const ROWS: usize = 25;
 const ROW_BYTES: usize = COLS * 2;
-const TEXT_BYTES: usize = ROW_BYTES * ROWS;
+const MAX_TEXT_BYTES: usize = ROW_BYTES * 50;
 const CGA_WIDTH: usize = 640;
 const CGA_HEIGHT: usize = 200;
 const CGA_STRIDE: usize = CGA_WIDTH / 8;
@@ -15,6 +18,7 @@ const CGA_BANK: usize = 0x2000;
 pub struct TextFrame<'a> {
     pub columns: u16,
     pub rows: u16,
+    pub character_height: u16,
     pub cells: &'a [u8],
     pub cursor: Option<(u16, u16)>,
 }
@@ -29,11 +33,48 @@ pub enum Video<'a> {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TextGeometry {
+    scan_lines: u16,
+    character_height: u16,
+}
+
+impl TextGeometry {
+    const VGA_DEFAULT: Self = Self::standard(400);
+
+    const fn standard(scan_lines: u16) -> Self {
+        let character_height = match scan_lines {
+            200 => 8,
+            350 => 14,
+            _ => 16,
+        };
+        Self {
+            scan_lines,
+            character_height,
+        }
+    }
+
+    const fn rows(self) -> usize {
+        (self.scan_lines / self.character_height) as usize
+    }
+
+    const fn text_bytes(self) -> usize {
+        ROW_BYTES * self.rows()
+    }
+
+    const fn cursor_shape(self) -> u16 {
+        (self.character_height - 2) << 8 | (self.character_height - 1)
+    }
+}
+
 pub(crate) struct Adapter {
     mode: u8,
     col: usize,
     row: usize,
-    cursor: bool,
+    cursor_shape: u16,
+    text: TextGeometry,
+    console: TextGeometry,
+    next_scan_lines: u16,
     palette: [[u8; 3]; 256],
     dac_read: usize,
     dac_write: usize,
@@ -50,7 +91,10 @@ impl Adapter {
             mode: 3,
             col: 0,
             row: 0,
-            cursor: true,
+            cursor_shape: TextGeometry::VGA_DEFAULT.cursor_shape(),
+            text: TextGeometry::VGA_DEFAULT,
+            console: TextGeometry::VGA_DEFAULT,
+            next_scan_lines: TextGeometry::VGA_DEFAULT.scan_lines,
             palette: default_palette(),
             dac_read: 0,
             dac_write: 0,
@@ -78,9 +122,11 @@ impl Adapter {
             },
             _ => Video::Text(TextFrame {
                 columns: COLS as u16,
-                rows: ROWS as u16,
-                cells: &cpu.memory[TEXT..TEXT + TEXT_BYTES],
-                cursor: self.cursor.then_some((self.col as u16, self.row as u16)),
+                rows: self.text.rows() as u16,
+                character_height: self.text.character_height,
+                cells: &cpu.memory[TEXT..TEXT + self.text.text_bytes()],
+                cursor: (self.cursor_shape & 0x2000 == 0)
+                    .then_some((self.col as u16, self.row as u16)),
             }),
         }
     }
@@ -113,17 +159,45 @@ impl Adapter {
     }
 
     pub(crate) fn restore_text(&mut self, cpu: &mut Cpu) {
+        let row = self.row;
         if self.mode != 3 {
             self.set_mode(cpu, 0x83);
         }
-        self.cursor = true;
+        self.next_scan_lines = self.console.scan_lines;
+        if self.text != self.console {
+            self.row = row;
+            self.set_text_geometry(cpu, self.console);
+        }
+        self.set_cursor_shape(cpu, self.cursor_shape & !0x2000);
+        self.update_scan_line_selection(cpu);
     }
 
     pub(crate) fn copy_console(&mut self, previous: &Self, from: &Cpu, to: &mut Cpu) {
-        to.memory[TEXT..TEXT + TEXT_BYTES].copy_from_slice(&from.memory[TEXT..TEXT + TEXT_BYTES]);
+        to.memory[TEXT..TEXT + MAX_TEXT_BYTES]
+            .copy_from_slice(&from.memory[TEXT..TEXT + MAX_TEXT_BYTES]);
+        self.console = previous.console;
+        self.next_scan_lines = self.console.scan_lines;
         self.col = previous.col;
         self.row = previous.row;
-        self.update_cursor(to);
+        self.set_text_geometry(to, self.console);
+        self.update_scan_line_selection(to);
+    }
+
+    pub(crate) fn set_console_rows(&mut self, cpu: &mut Cpu, rows: u8) -> bool {
+        self.console = match rows {
+            25 => TextGeometry::VGA_DEFAULT,
+            43 => TextGeometry {
+                scan_lines: 350,
+                character_height: 8,
+            },
+            50 => TextGeometry {
+                scan_lines: 400,
+                character_height: 8,
+            },
+            _ => return false,
+        };
+        self.restore_text(cpu);
+        true
     }
 
     fn set_mode(&mut self, cpu: &mut Cpu, value: u8) -> bool {
@@ -133,14 +207,14 @@ impl Adapter {
         }
         if mode == 6 && self.mode != 6 {
             self.saved_text = Some(
-                cpu.memory[TEXT..TEXT + TEXT_BYTES]
+                cpu.memory[TEXT..TEXT + MAX_TEXT_BYTES]
                     .to_vec()
                     .into_boxed_slice(),
             );
         } else if mode != 6
             && let Some(text) = self.saved_text.take()
         {
-            cpu.memory[TEXT..TEXT + TEXT_BYTES].copy_from_slice(&text);
+            cpu.memory[TEXT..TEXT + MAX_TEXT_BYTES].copy_from_slice(&text);
         }
         let clear = value & 0x80 == 0;
         if mode == 0x13 {
@@ -151,6 +225,9 @@ impl Adapter {
         self.mode = mode;
         self.palette = default_palette();
         self.cga_color = 15;
+        if mode == 3 {
+            self.set_text_geometry(cpu, TextGeometry::standard(self.next_scan_lines));
+        }
         if clear {
             match mode {
                 3 => self.clear(cpu),
@@ -160,23 +237,16 @@ impl Adapter {
         }
         cpu.write_u8(0x40, 0x49, mode);
         cpu.write_u16(0x40, 0x4a, self.columns().into());
-        cpu.write_u16(
-            0x40,
-            0x4c,
-            match mode {
-                3 => 0x1000,
-                6 => 0x4000,
-                _ => 0xfa00,
-            },
-        );
-        cpu.write_u8(0x40, 0x84, 24);
+        if mode != 3 {
+            cpu.write_u16(0x40, 0x4c, if mode == 6 { 0x4000 } else { 0xfa00 });
+            cpu.write_u8(0x40, 0x84, 24);
+            cpu.write_u16(0x40, 0x85, 8);
+        }
         true
     }
 
     pub(crate) fn clear(&mut self, cpu: &mut Cpu) {
-        for cell in cpu.memory[TEXT..TEXT + TEXT_BYTES].as_chunks_mut::<2>().0 {
-            *cell = [b' ', 0x07];
-        }
+        blank_text(&mut cpu.memory[TEXT..TEXT + self.text.text_bytes()]);
         self.col = 0;
         self.row = 0;
         self.update_cursor(cpu);
@@ -184,6 +254,36 @@ impl Adapter {
 
     fn update_cursor(&self, cpu: &mut Cpu) {
         cpu.write_u16(0x40, 0x50, (self.row as u16) << 8 | self.col as u16);
+    }
+
+    fn set_cursor_shape(&mut self, cpu: &mut Cpu, shape: u16) {
+        self.cursor_shape = shape & 0x3f1f;
+        cpu.write_u16(0x40, 0x60, self.cursor_shape);
+    }
+
+    fn set_text_geometry(&mut self, cpu: &mut Cpu, geometry: TextGeometry) {
+        self.text = geometry;
+        self.row = self.row.min(geometry.rows() - 1);
+        let page_bytes = if geometry.rows() == 25 {
+            0x1000
+        } else {
+            geometry.text_bytes() as u16
+        };
+        cpu.write_u16(0x40, 0x4c, page_bytes);
+        cpu.write_u8(0x40, 0x84, (geometry.rows() - 1) as u8);
+        cpu.write_u16(0x40, 0x85, geometry.character_height);
+        self.set_cursor_shape(cpu, geometry.cursor_shape() | (self.cursor_shape & 0x2000));
+        self.update_cursor(cpu);
+    }
+
+    fn update_scan_line_selection(&self, cpu: &mut Cpu) {
+        let previous = cpu.read_u8(0x40, 0x89) & !0x90;
+        let selection = match self.next_scan_lines {
+            200 => 0x80,
+            400 => 0x10,
+            _ => 0,
+        };
+        cpu.write_u8(0x40, 0x89, previous | selection);
     }
 
     pub(crate) fn erase_previous(&mut self, cpu: &mut Cpu) {
@@ -221,9 +321,10 @@ impl Adapter {
                     }
                 }
             }
-            if self.row == ROWS {
-                self.scroll(cpu, [0, 0, 24, 79], 1, 0x07, false);
-                self.row = ROWS - 1;
+            if self.row == self.text.rows() {
+                let bottom = self.text.rows() - 1;
+                self.scroll(cpu, [0, 0, bottom as u8, (COLS - 1) as u8], 1, 0x07, false);
+                self.row = bottom;
             }
         }
         self.update_cursor(cpu);
@@ -240,7 +341,7 @@ impl Adapter {
         let (top, left, bottom, right) = (
             usize::from(top),
             usize::from(left),
-            usize::from(bottom).min(ROWS - 1),
+            usize::from(bottom).min(self.text.rows() - 1),
             usize::from(right).min(COLS - 1),
         );
         if top > bottom || left > right {
@@ -274,15 +375,15 @@ impl Adapter {
         let [dl, dh] = cpu.regs.dx.to_le_bytes();
         match ah {
             0x00 => return self.set_mode(cpu, al),
-            0x01 => self.cursor = ch & 0x20 == 0,
+            0x01 => self.set_cursor_shape(cpu, cpu.regs.cx),
             0x02 => {
                 self.col = usize::from(dl).min(COLS - 1);
-                self.row = usize::from(dh).min(ROWS - 1);
+                self.row = usize::from(dh).min(self.text.rows() - 1);
                 self.update_cursor(cpu);
             }
             0x03 => {
                 cpu.regs.dx = (self.row as u16) << 8 | self.col as u16;
-                cpu.regs.cx = if self.cursor { 0x0607 } else { 0x2007 };
+                cpu.regs.cx = self.cursor_shape;
             }
             0x05 => {}
             0x06 | 0x07 if self.mode == 3 => {
@@ -294,7 +395,7 @@ impl Adapter {
             }
             0x09 | 0x0a if self.mode == 3 => {
                 let start = self.row * COLS + self.col;
-                let end = (start + usize::from(cpu.regs.cx)).min(COLS * ROWS);
+                let end = (start + usize::from(cpu.regs.cx)).min(COLS * self.text.rows());
                 for cell in start..end {
                     cpu.memory[TEXT + cell * 2] = al;
                     if ah == 0x09 {
@@ -351,9 +452,28 @@ impl Adapter {
                         .map(expand_dac);
                 }
             }
+            0x11 if self.mode == 3 && matches!(al, 0x11 | 0x12 | 0x14) => {
+                let character_height = match al {
+                    0x11 => 14,
+                    0x12 => 8,
+                    _ => 16,
+                };
+                self.set_text_geometry(
+                    cpu,
+                    TextGeometry {
+                        character_height,
+                        ..self.text
+                    },
+                );
+            }
             0x12 if bl == 0x10 => {
                 cpu.regs.bx = 3;
                 cpu.regs.cx = 0;
+            }
+            0x12 if bl == 0x30 && al <= 2 => {
+                self.next_scan_lines = [200, 350, 400][usize::from(al)];
+                self.update_scan_line_selection(cpu);
+                cpu.regs.ax = u16::from_le_bytes([0x12, ah]);
             }
             0x1a if al == 0 => {
                 cpu.regs.ax = 0x1a;
@@ -402,8 +522,16 @@ fn cga_scanline(y: usize) -> usize {
 }
 
 pub(crate) fn initialize(cpu: &mut Cpu, video: &mut Adapter) {
+    blank_text(&mut cpu.memory[TEXT..TEXT + MAX_TEXT_BYTES]);
     video.set_mode(cpu, 3);
+    video.update_scan_line_selection(cpu);
     cpu.write_u16(0x40, 0x13, 640);
+}
+
+fn blank_text(memory: &mut [u8]) {
+    for cell in memory.as_chunks_mut::<2>().0 {
+        *cell = [b' ', 0x07];
+    }
 }
 
 fn expand_dac(value: u8) -> u8 {
