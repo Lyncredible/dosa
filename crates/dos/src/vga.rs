@@ -13,6 +13,7 @@ const CRTC_MODE_13: [u8; 25] = [
 ];
 
 pub(crate) struct Vga {
+    planar16: bool,
     ram: Arc<Mutex<PlaneRam>>,
     sequencer_index: u8,
     graphics_index: u8,
@@ -24,6 +25,7 @@ pub(crate) struct Vga {
 impl Vga {
     pub(crate) fn new() -> Self {
         Self {
+            planar16: false,
             ram: Arc::new(Mutex::new(PlaneRam::new())),
             sequencer_index: 0,
             graphics_index: 0,
@@ -33,14 +35,25 @@ impl Vga {
         }
     }
 
-    pub(crate) fn enter(&mut self, cpu: &mut Cpu, already_vga: bool, clear: bool) {
+    pub(crate) fn enter(&mut self, cpu: &mut Cpu, already_vga: bool, clear: bool, planar16: bool) {
+        self.planar16 = planar16;
         self.sequencer_index = 0;
         self.graphics_index = 0;
         self.crtc_index = 0;
         self.crtc = CRTC_MODE_13;
+        if planar16 {
+            self.crtc[7] = 0x3e;
+            self.crtc[9] = 0;
+            self.crtc[0x12] = 0xdf;
+            self.crtc[0x13] = 40;
+        }
         {
             let mut ram = lock(&self.ram);
             ram.reset_registers();
+            if planar16 {
+                ram.sequencer[4] = 6;
+                ram.graphics[5] = 0;
+            }
             if clear {
                 ram.cells.fill([0; 4]);
                 self.frame.fill(0);
@@ -62,9 +75,21 @@ impl Vga {
     }
 
     pub(crate) fn refresh(&mut self) {
-        self.frame.resize(WIDTH * self.height(), 0);
+        let width = self.width();
+        self.frame.resize(width * self.height(), 0);
         let ram = lock(&self.ram);
         let (start, stride) = self.start_and_stride();
+        if self.planar16 {
+            for (y, row) in self.frame.chunks_exact_mut(width).enumerate() {
+                for (x, pixel) in row.iter_mut().enumerate() {
+                    let planes = ram.cells[(start + y * stride + x / 8) % PLANE_BYTES];
+                    *pixel = planes.iter().enumerate().fold(0, |color, (plane, byte)| {
+                        color | ((byte >> (7 - x % 8)) & 1) << plane
+                    });
+                }
+            }
+            return;
+        }
         for (y, scanline) in self.frame.as_chunks_mut::<WIDTH>().0.iter_mut().enumerate() {
             let address = start + y * stride;
             for (x, pixels) in scanline.as_chunks_mut::<4>().0.iter_mut().enumerate() {
@@ -83,8 +108,31 @@ impl Vga {
         (display_end + 1).div_ceil(repeat * double_scan)
     }
 
+    pub(crate) fn width(&self) -> usize {
+        if self.planar16 { 640 } else { WIDTH }
+    }
+
     pub(crate) fn pixel(&self, x: usize, y: usize, write: Option<u8>) -> u8 {
         let (start, stride) = self.start_and_stride();
+        if self.planar16 {
+            let mut ram = lock(&self.ram);
+            let planes = &mut ram.cells[(start + y * stride + x / 8) % PLANE_BYTES];
+            let bit = 0x80 >> (x % 8);
+            let previous = planes.iter().enumerate().fold(0, |color, (plane, byte)| {
+                color | (u8::from(byte & bit != 0) << plane)
+            });
+            if let Some(value) = write {
+                let color = if value & 0x80 != 0 {
+                    previous ^ value
+                } else {
+                    value
+                };
+                for (plane, byte) in planes.iter_mut().enumerate() {
+                    *byte = (*byte & !bit) | if color & (1 << plane) != 0 { bit } else { 0 };
+                }
+            }
+            return previous;
+        }
         let address = (start + y * stride + x / 4) % PLANE_BYTES;
         let mut ram = lock(&self.ram);
         let pixel = &mut ram.cells[address][x % 4];
@@ -271,10 +319,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn planar_sixteen_color_mode_combines_bits_and_supports_bios_xor() {
+        let mut vga = Vga::new();
+        let mut cpu = Cpu::new();
+        vga.enter(&mut cpu, false, true, true);
+        vga.write_port(0x3c4, 2);
+        vga.write_port(0x3c5, 5);
+        cpu.write_u8(0xa000, 0, 0x80);
+        vga.refresh();
+        assert_eq!((vga.width(), vga.height()), (640, 480));
+        assert_eq!(&vga.frame()[..2], &[5, 0]);
+        vga.pixel(639, 479, Some(15));
+        assert_eq!(vga.pixel(639, 479, None), 15);
+        vga.pixel(639, 479, Some(0x83));
+        assert_eq!(vga.pixel(639, 479, None), 12);
+        vga.refresh();
+        assert_eq!(vga.frame()[640 * 480 - 1], 12);
+    }
+
+    #[test]
     fn planar_writes_latch_copies_and_scanout_share_video_memory() {
         let mut vga = Vga::new();
         let mut cpu = Cpu::new();
-        vga.enter(&mut cpu, false, true);
+        vga.enter(&mut cpu, false, true, false);
         let ram = 0xa000;
         cpu.write_u16(ram, 0, 0x0201);
         vga.refresh();

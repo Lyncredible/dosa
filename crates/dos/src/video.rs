@@ -1,4 +1,4 @@
-use crate::vga::{Vga, WIDTH as VGA_WIDTH};
+use crate::vga::Vga;
 use dosa_cpu::Cpu;
 
 #[cfg(test)]
@@ -127,9 +127,9 @@ impl Adapter {
                 indices: &self.cga_pixels,
                 palette: &self.palette,
             },
-            0x13 => Video::Graphics {
-                width: VGA_WIDTH as u32,
-                height: (self.vga.frame().len() / VGA_WIDTH) as u32,
+            0x12 | 0x13 => Video::Graphics {
+                width: self.vga.width() as u32,
+                height: (self.vga.frame().len() / self.vga.width()) as u32,
                 indices: self.vga.frame(),
                 palette: &self.palette,
             },
@@ -145,7 +145,7 @@ impl Adapter {
     }
 
     pub(crate) fn refresh(&mut self, cpu: &Cpu) {
-        if self.mode == 0x13 {
+        if matches!(self.mode, 0x12 | 0x13) {
             self.vga.refresh();
             return;
         }
@@ -213,7 +213,7 @@ impl Adapter {
 
     fn set_mode(&mut self, cpu: &mut Cpu, value: u8) -> bool {
         let mode = value & 0x7f;
-        if !matches!(mode, 0x03 | 0x06 | 0x13) {
+        if !matches!(mode, 0x03 | 0x06 | 0x12 | 0x13) {
             return false;
         }
         if mode == 6 && self.mode != 6 {
@@ -228,9 +228,10 @@ impl Adapter {
             cpu.memory[TEXT..TEXT + MAX_TEXT_BYTES].copy_from_slice(&text);
         }
         let clear = value & 0x80 == 0;
-        if mode == 0x13 {
-            self.vga.enter(cpu, self.mode == 0x13, clear);
-        } else if self.mode == 0x13 {
+        if matches!(mode, 0x12 | 0x13) {
+            self.vga
+                .enter(cpu, matches!(self.mode, 0x12 | 0x13), clear, mode == 0x12);
+        } else if matches!(self.mode, 0x12 | 0x13) {
             self.vga.leave(cpu);
         }
         self.mode = mode;
@@ -426,10 +427,10 @@ impl Adapter {
                     }
                 }
             }
-            0x0c | 0x0d if self.mode == 0x13 => {
+            0x0c | 0x0d if matches!(self.mode, 0x12 | 0x13) => {
                 let x = usize::from(cpu.regs.cx);
                 let y = usize::from(cpu.regs.dx);
-                if x < VGA_WIDTH && y < self.vga.height() {
+                if x < self.vga.width() && y < self.vga.height() {
                     let pixel = self.vga.pixel(x, y, (ah == 0x0c).then_some(al));
                     if ah == 0x0d {
                         cpu.regs.ax = u16::from_le_bytes([pixel, ah]);
