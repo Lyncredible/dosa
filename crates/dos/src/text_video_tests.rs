@@ -22,7 +22,7 @@ fn bios(video: &mut Adapter, cpu: &mut Cpu, ax: u16, bx: u16, cx: u16, dx: u16) 
     assert!(video.bios(cpu));
 }
 
-fn expect_geometry(video: &Adapter, cpu: &Cpu, rows: u16, height: u16) {
+fn expect_geometry(video: &Adapter, cpu: &Cpu, rows: u16, height: u16, page_bytes: u16) {
     let frame = text(video, cpu);
     assert_eq!(
         (frame.columns, frame.rows, frame.character_height),
@@ -32,31 +32,32 @@ fn expect_geometry(video: &Adapter, cpu: &Cpu, rows: u16, height: u16) {
     assert_eq!(cpu.read_u16(0x40, 0x4a), 80);
     assert_eq!(cpu.read_u8(0x40, 0x84), (rows - 1) as u8);
     assert_eq!(cpu.read_u16(0x40, 0x85), height);
-    let page_bytes = if rows == 25 { 0x1000 } else { rows * 160 };
     assert_eq!(cpu.read_u16(0x40, 0x4c), page_bytes);
 }
 
 #[test]
 fn bios_scan_line_selection_and_font_height_update_geometry() {
     let (mut cpu, mut video) = setup();
-    expect_geometry(&video, &cpu, 25, 16);
+    expect_geometry(&video, &cpu, 25, 16, 0x1000);
 
     bios(&mut video, &mut cpu, 0x1201, 0x0030, 0, 0);
     assert_eq!(cpu.regs.ax, 0x1212);
     assert_eq!(cpu.read_u8(0x40, 0x89) & 0x90, 0);
-    expect_geometry(&video, &cpu, 25, 16);
+    expect_geometry(&video, &cpu, 25, 16, 0x1000);
     bios(&mut video, &mut cpu, 0x0083, 0, 0, 0);
-    expect_geometry(&video, &cpu, 25, 14);
+    expect_geometry(&video, &cpu, 25, 14, 0x1000);
     bios(&mut video, &mut cpu, 0x1112, 0, 0, 0);
-    expect_geometry(&video, &cpu, 43, 8);
+    expect_geometry(&video, &cpu, 43, 8, 0x1be0);
 
     bios(&mut video, &mut cpu, 0x1202, 0x0030, 0, 0);
     bios(&mut video, &mut cpu, 0x0083, 0, 0, 0);
     bios(&mut video, &mut cpu, 0x1112, 0, 0, 0);
-    expect_geometry(&video, &cpu, 50, 8);
+    expect_geometry(&video, &cpu, 50, 8, 0x2040);
     bios(&mut video, &mut cpu, 0x1114, 0, 0, 0);
-    expect_geometry(&video, &cpu, 25, 16);
+    expect_geometry(&video, &cpu, 25, 16, 0x10a0);
     assert_eq!(cpu.read_u8(0x40, 0x89) & 0x90, 0x10);
+    video.restore_text(&mut cpu);
+    expect_geometry(&video, &cpu, 25, 16, 0x1000);
 }
 
 #[test]
@@ -98,7 +99,7 @@ fn console_geometry_and_tail_cells_survive_copy_and_graphics() {
 
     let (mut cpu, mut video) = setup();
     video.copy_console(&previous, &from, &mut cpu);
-    expect_geometry(&video, &cpu, 50, 8);
+    expect_geometry(&video, &cpu, 50, 8, 0x2040);
     let index = (49 * COLS + 5) * 2;
     assert_eq!(text(&video, &cpu).cells[index], b'Y');
     assert_eq!(text(&video, &cpu).cursor, Some((6, 49)));
@@ -106,14 +107,14 @@ fn console_geometry_and_tail_cells_survive_copy_and_graphics() {
     bios(&mut video, &mut cpu, 0x0006, 0, 0, 0);
     assert!(matches!(video.frame(&cpu), Video::Graphics { .. }));
     video.restore_text(&mut cpu);
-    expect_geometry(&video, &cpu, 50, 8);
+    expect_geometry(&video, &cpu, 50, 8, 0x2040);
     assert_eq!(text(&video, &cpu).cells[index], b'Y');
     assert_eq!(text(&video, &cpu).cursor, Some((6, 49)));
 
     bios(&mut video, &mut cpu, 0x0083, 0, 0, 0);
-    expect_geometry(&video, &cpu, 25, 16);
+    expect_geometry(&video, &cpu, 25, 16, 0x1000);
     assert_eq!(text(&video, &cpu).cursor, Some((6, 24)));
     video.restore_text(&mut cpu);
-    expect_geometry(&video, &cpu, 50, 8);
+    expect_geometry(&video, &cpu, 50, 8, 0x2040);
     assert_eq!(text(&video, &cpu).cells[index], b'Y');
 }
