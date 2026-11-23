@@ -14,6 +14,9 @@ const CRTC_MODE_13: [u8; 25] = [
 
 pub(crate) struct Vga {
     planar16: bool,
+    attribute_index: u8,
+    attribute_data: bool,
+    attributes: [u8; 0x15],
     ram: Arc<Mutex<PlaneRam>>,
     sequencer_index: u8,
     graphics_index: u8,
@@ -26,6 +29,9 @@ impl Vga {
     pub(crate) fn new() -> Self {
         Self {
             planar16: false,
+            attribute_index: 0,
+            attribute_data: false,
+            attributes: [0; 0x15],
             ram: Arc::new(Mutex::new(PlaneRam::new())),
             sequencer_index: 0,
             graphics_index: 0,
@@ -37,6 +43,18 @@ impl Vga {
 
     pub(crate) fn enter(&mut self, cpu: &mut Cpu, already_vga: bool, clear: bool, planar16: bool) {
         self.planar16 = planar16;
+        self.attribute_index = 0;
+        self.attribute_data = false;
+        self.attributes.fill(0);
+        for (index, register) in self.attributes[..16].iter_mut().enumerate() {
+            *register = index as u8;
+        }
+        if planar16 {
+            self.attributes[6] = 0x14;
+            for (index, register) in self.attributes[8..16].iter_mut().enumerate() {
+                *register = 0x38 + index as u8;
+            }
+        }
         self.sequencer_index = 0;
         self.graphics_index = 0;
         self.crtc_index = 0;
@@ -83,9 +101,16 @@ impl Vga {
             for (y, row) in self.frame.chunks_exact_mut(width).enumerate() {
                 for (x, pixel) in row.iter_mut().enumerate() {
                     let planes = ram.cells[(start + y * stride + x / 8) % PLANE_BYTES];
-                    *pixel = planes.iter().enumerate().fold(0, |color, (plane, byte)| {
+                    let color = planes.iter().enumerate().fold(0, |color, (plane, byte)| {
                         color | ((byte >> (7 - x % 8)) & 1) << plane
                     });
+                    let attribute = self.attributes[usize::from(color)];
+                    let low = if self.attributes[0x10] & 0x80 != 0 {
+                        (attribute & 0x0f) | ((self.attributes[0x14] & 3) << 4)
+                    } else {
+                        attribute & 0x3f
+                    };
+                    *pixel = low | ((self.attributes[0x14] & 0x0c) << 4);
                 }
             }
             return;
@@ -110,6 +135,16 @@ impl Vga {
 
     pub(crate) fn width(&self) -> usize {
         if self.planar16 { 640 } else { WIDTH }
+    }
+
+    pub(crate) fn reset_attribute_latch(&mut self) {
+        self.attribute_data = false;
+    }
+
+    pub(crate) fn set_attribute(&mut self, index: u8, value: u8) {
+        if let Some(register) = self.attributes.get_mut(usize::from(index)) {
+            *register = value;
+        }
     }
 
     pub(crate) fn pixel(&self, x: usize, y: usize, write: Option<u8>) -> u8 {
@@ -149,6 +184,11 @@ impl Vga {
 
     pub(crate) fn read_port(&self, port: u16) -> Option<u8> {
         match port {
+            0x3c0 => Some(self.attribute_index),
+            0x3c1 => self
+                .attributes
+                .get(usize::from(self.attribute_index & 0x1f))
+                .copied(),
             0x3c4 => Some(self.sequencer_index),
             0x3c5 => lock(&self.ram)
                 .sequencer
@@ -167,6 +207,14 @@ impl Vga {
 
     pub(crate) fn write_port(&mut self, port: u16, value: u8) {
         match port {
+            0x3c0 => {
+                if self.attribute_data {
+                    self.set_attribute(self.attribute_index & 0x1f, value);
+                } else {
+                    self.attribute_index = value;
+                }
+                self.attribute_data = !self.attribute_data;
+            }
             0x3c4 => self.sequencer_index = value,
             0x3c5 => {
                 if let Some(reg) = lock(&self.ram)
@@ -334,7 +382,15 @@ mod tests {
         vga.pixel(639, 479, Some(0x83));
         assert_eq!(vga.pixel(639, 479, None), 12);
         vga.refresh();
-        assert_eq!(vga.frame()[640 * 480 - 1], 12);
+        assert_eq!(vga.frame()[640 * 480 - 1], 60);
+        vga.write_port(0x3c0, 5);
+        vga.write_port(0x3c0, 0x21);
+        vga.refresh();
+        assert_eq!(vga.frame()[0], 0x21);
+        vga.write_port(0x3c0, 9);
+        vga.reset_attribute_latch();
+        vga.write_port(0x3c0, 5);
+        assert_eq!(vga.read_port(0x3c1), Some(0x21));
     }
 
     #[test]
