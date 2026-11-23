@@ -65,6 +65,8 @@ pub struct RegisterSnapshot {
     high: [u16; 8],
     fs: u16,
     gs: u16,
+    interrupt_shadow: bool,
+    halted: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -144,6 +146,8 @@ pub struct Cpu {
     high: [u16; 8],
     fs: u16,
     gs: u16,
+    interrupt_shadow: bool,
+    halted: bool,
 }
 
 impl Default for Cpu {
@@ -159,6 +163,8 @@ impl Cpu {
             high: self.high,
             fs: self.fs,
             gs: self.gs,
+            interrupt_shadow: self.interrupt_shadow,
+            halted: self.halted,
         }
     }
 
@@ -167,6 +173,8 @@ impl Cpu {
         self.high = snapshot.high;
         self.fs = snapshot.fs;
         self.gs = snapshot.gs;
+        self.interrupt_shadow = snapshot.interrupt_shadow;
+        self.halted = snapshot.halted;
     }
 
     pub fn new() -> Self {
@@ -185,11 +193,23 @@ impl Cpu {
             high: [0; 8],
             fs: 0,
             gs: 0,
+            interrupt_shadow: false,
+            halted: false,
         }
     }
 
     pub fn profile(&self) -> CpuProfile {
         self.profile
+    }
+
+    /// Whether a maskable interrupt can be accepted at this instruction boundary.
+    pub fn can_accept_maskable_interrupt(&self) -> bool {
+        self.flag(IF) && !self.interrupt_shadow
+    }
+
+    /// A halted processor will resume at the next instruction after interrupt return.
+    pub fn is_halted(&self) -> bool {
+        self.halted
     }
 
     /// Install or replace a device mapping within the 1 MiB physical address
@@ -239,6 +259,9 @@ impl Cpu {
     }
 
     pub fn step(&mut self) -> Result<Step, CpuError> {
+        if self.halted {
+            return Ok(Step::Halt);
+        }
         let cs = self.regs.cs;
         let ip = self.regs.ip;
         let address = Self::linear(cs, ip.into());
@@ -269,8 +292,19 @@ impl Cpu {
                 kind: CpuErrorKind::UnavailableOnProfile(self.profile),
             });
         }
+        // STI delays IRQs only when it sets IF. A stack-segment load also
+        // suppresses IRQs until the instruction that follows it has executed.
+        let new_shadow = !self.interrupt_shadow
+            && match instruction.mnemonic() {
+                Mnemonic::Sti => !self.flag(IF),
+                Mnemonic::Mov | Mnemonic::Pop => {
+                    instruction.op0_kind() == OpKind::Register
+                        && instruction.op0_register() == Register::SS
+                }
+                _ => false,
+            };
         self.regs.ip = instruction.next_ip16();
-        self.execute(&instruction, ip).ok_or_else(|| {
+        let step = self.execute(&instruction, ip).ok_or_else(|| {
             self.regs.ip = ip;
             CpuError {
                 cs,
@@ -278,7 +312,10 @@ impl Cpu {
                 mnemonic: instruction.mnemonic(),
                 kind: CpuErrorKind::Unsupported,
             }
-        })
+        })?;
+        self.interrupt_shadow = new_shadow;
+        self.halted = step == Step::Halt;
+        Ok(step)
     }
 
     pub fn enter_interrupt(&mut self, vector: u8) {
@@ -289,6 +326,8 @@ impl Cpu {
         self.push(2, u32::from(self.regs.cs));
         self.push(2, u32::from(self.regs.ip));
         self.regs.flags &= !(IF | TF);
+        self.interrupt_shadow = false;
+        self.halted = false;
         self.regs.cs = target_cs;
         self.regs.ip = target_ip;
     }

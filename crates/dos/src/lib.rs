@@ -32,7 +32,6 @@ use video::Adapter;
 
 const CARRY: u16 = 1;
 const ZERO: u16 = 0x40;
-const INTERRUPT_ENABLE: u16 = 0x0200;
 const TIMER_VECTOR: u8 = 0x08;
 const TIMER_SAMPLE_INTERVAL: usize = 256;
 
@@ -370,7 +369,7 @@ impl Machine {
     }
 
     fn step(&mut self) -> Result<(), DosError> {
-        let interrupts_enabled = self.cpu.regs.flags & INTERRUPT_ENABLE != 0;
+        let interrupts_enabled = self.cpu.can_accept_maskable_interrupt();
         self.mouse
             .dispatch_callback(&mut self.cpu, interrupts_enabled);
         self.service_hardware_interrupt();
@@ -418,7 +417,7 @@ impl Machine {
     }
 
     fn service_hardware_interrupt(&mut self) {
-        if self.cpu.regs.flags & INTERRUPT_ENABLE == 0 {
+        if !self.cpu.can_accept_maskable_interrupt() {
             return;
         }
         let Some(irq) = self.pic.next_irq(self.irq_requests()) else {
