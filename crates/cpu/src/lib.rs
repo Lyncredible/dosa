@@ -4,6 +4,9 @@ use std::fmt;
 
 mod arithmetic;
 mod execute;
+mod profile;
+
+pub use profile::CpuProfile;
 
 const MEMORY_SIZE: usize = 1 << 20;
 const CF: u16 = 1;
@@ -74,19 +77,34 @@ pub enum Step {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CpuErrorKind {
+    Unsupported,
+    UnavailableOnProfile(CpuProfile),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CpuError {
     pub cs: u16,
     pub ip: u16,
     pub mnemonic: Mnemonic,
+    pub kind: CpuErrorKind,
 }
 
 impl fmt::Display for CpuError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "unsupported {:?} instruction or operand at {:04X}:{:04X}",
-            self.mnemonic, self.cs, self.ip
-        )
+        match self.kind {
+            CpuErrorKind::Unsupported => {
+                write!(f, "unsupported {:?} instruction or operand", self.mnemonic)?;
+            }
+            CpuErrorKind::UnavailableOnProfile(profile) => {
+                write!(
+                    f,
+                    "{:?} encoding unavailable on the {profile} CPU profile",
+                    self.mnemonic
+                )?;
+            }
+        }
+        write!(f, " at {:04X}:{:04X}", self.cs, self.ip)
     }
 }
 
@@ -113,6 +131,7 @@ pub struct Cpu {
     /// Backing RAM with A20 disabled. Direct accesses bypass mapped devices.
     pub memory: Box<[u8]>,
     mapping: Option<MemoryMapping>,
+    profile: CpuProfile,
     high: [u16; 8],
     fs: u16,
     gs: u16,
@@ -126,14 +145,26 @@ impl Default for Cpu {
 
 impl Cpu {
     pub fn new() -> Self {
+        Self::with_profile(CpuProfile::default())
+    }
+
+    pub fn with_profile(profile: CpuProfile) -> Self {
         Self {
-            regs: Registers::default(),
+            regs: Registers {
+                flags: profile.normalize_flags(0),
+                ..Registers::default()
+            },
             memory: vec![0; MEMORY_SIZE].into_boxed_slice(),
             mapping: None,
+            profile,
             high: [0; 8],
             fs: 0,
             gs: 0,
         }
+    }
+
+    pub fn profile(&self) -> CpuProfile {
+        self.profile
     }
 
     /// Install or replace a device mapping within the 1 MiB physical address
@@ -198,7 +229,21 @@ impl Cpu {
             tail = std::array::from_fn(|index| self.read_u8(cs, ip.wrapping_add(index as u16)));
             &tail
         };
-        let instruction = Decoder::with_ip(16, code, u64::from(ip), DecoderOptions::NONE).decode();
+        // Prior to SSE2, the PAUSE encoding was a REP NOP.
+        let instruction =
+            Decoder::with_ip(16, code, u64::from(ip), DecoderOptions::NO_PAUSE).decode();
+        if !instruction.is_invalid()
+            && !self
+                .profile
+                .allows(&instruction, &code[..instruction.len()])
+        {
+            return Err(CpuError {
+                cs,
+                ip,
+                mnemonic: instruction.mnemonic(),
+                kind: CpuErrorKind::UnavailableOnProfile(self.profile),
+            });
+        }
         self.regs.ip = instruction.next_ip16();
         self.execute(&instruction, ip).ok_or_else(|| {
             self.regs.ip = ip;
@@ -206,6 +251,7 @@ impl Cpu {
                 cs,
                 ip,
                 mnemonic: instruction.mnemonic(),
+                kind: CpuErrorKind::Unsupported,
             }
         })
     }
@@ -214,7 +260,7 @@ impl Cpu {
         let offset = u16::from(vector) * 4;
         let target_ip = self.read_u16(0, offset);
         let target_cs = self.read_u16(0, offset + 2);
-        self.push(2, u32::from(self.regs.flags | 2));
+        self.push(2, u32::from(self.profile.normalize_flags(self.regs.flags)));
         self.push(2, u32::from(self.regs.cs));
         self.push(2, u32::from(self.regs.ip));
         self.regs.flags &= !(IF | TF);

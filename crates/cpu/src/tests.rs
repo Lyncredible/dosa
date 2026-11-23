@@ -1,7 +1,11 @@
 use super::*;
 
 fn program(code: &[u8]) -> Cpu {
-    let mut cpu = Cpu::new();
+    program_for(CpuProfile::default(), code)
+}
+
+fn program_for(profile: CpuProfile, code: &[u8]) -> Cpu {
+    let mut cpu = Cpu::with_profile(profile);
     cpu.regs.cs = 0x1200;
     cpu.regs.ds = 0x1300;
     cpu.regs.es = 0x1400;
@@ -216,4 +220,92 @@ fn wrapped_instruction_fetch_and_bus_access_find_the_mapping() {
     assert_eq!(cpu.regs.ip, 0x0011);
     assert_eq!(cpu.memory[0xfffff], 0xb0);
     assert_eq!(device.0.lock().unwrap()[0], 0x2a);
+}
+
+#[test]
+fn cpu_profiles_reject_later_generations_before_execution() {
+    // PUSHA was introduced with the 186.
+    let mut early = program_for(CpuProfile::I8086, &[0x60]);
+    let initial = early.regs;
+    let error = early.step().unwrap_err();
+    assert_eq!(error.mnemonic, Mnemonic::Pusha);
+    assert_eq!(
+        error.kind,
+        CpuErrorKind::UnavailableOnProfile(CpuProfile::I8086)
+    );
+    assert_eq!(early.regs, initial);
+
+    // PUSHA / PUSH FS, which requires a 386.
+    let mut middle = program_for(CpuProfile::I286, &[0x60, 0x0f, 0xa0]);
+    advance(&mut middle, 1);
+    assert_eq!(middle.regs.sp, 0xffee);
+    assert_eq!(
+        middle.step().unwrap_err().kind,
+        CpuErrorKind::UnavailableOnProfile(CpuProfile::I286)
+    );
+    assert_eq!(middle.regs.ip, 0x0101);
+    assert_eq!(middle.regs.sp, 0xffee);
+
+    let mut late = program(&[0x60, 0x0f, 0xa0, 0x0f, 0xa2]); // CPUID is newer than a 386.
+    advance(&mut late, 2);
+    assert_eq!(late.profile(), CpuProfile::I386);
+    assert_eq!(
+        late.step().unwrap_err().kind,
+        CpuErrorKind::UnavailableOnProfile(CpuProfile::I386)
+    );
+}
+
+#[test]
+fn cpu_profiles_gate_prefixes_even_when_the_decoder_can_discard_them() {
+    for profile in [CpuProfile::I8086, CpuProfile::I286, CpuProfile::I386] {
+        // MOV AL,66h and REP NOP are valid on every profile. Each remaining
+        // encoding has a segment, operand, or address prefix from the 386.
+        for prefix in [0x64, 0x65, 0x66, 0x67] {
+            let mut cpu = program_for(profile, &[0xb0, 0x66, 0xf3, 0x90, 0x26, prefix, 0x90]);
+            advance(&mut cpu, 2);
+            assert_eq!(cpu.regs.ax, 0x66);
+            if profile == CpuProfile::I386 {
+                advance(&mut cpu, 1);
+            } else {
+                assert_eq!(
+                    cpu.step().unwrap_err().kind,
+                    CpuErrorKind::UnavailableOnProfile(profile)
+                );
+                assert_eq!(cpu.regs.ip, 0x0104);
+            }
+        }
+    }
+}
+
+#[test]
+fn cpu_profiles_expose_different_real_mode_flags_and_stack_behavior() {
+    for (profile, initial, after_popf, pushed_sp, shifted_ax) in [
+        (CpuProfile::I8086, 0xf002, 0xffd7, 0xfffc, 0),
+        (CpuProfile::I286, 0x0002, 0x0fd7, 0xfffe, 1),
+        (CpuProfile::I386, 0x0002, 0x7fd7, 0xfffe, 1),
+    ] {
+        // PUSHF / POP BX / PUSH AX / POPF / PUSHF / POP DX / PUSH SP / SHL AX,CL
+        let mut cpu = program_for(
+            profile,
+            &[0x9c, 0x5b, 0x50, 0x9d, 0x9c, 0x5a, 0x54, 0xd3, 0xe0],
+        );
+        cpu.regs.ax = 0xffff;
+        cpu.regs.cx = 32;
+        advance(&mut cpu, 7);
+        assert_eq!(cpu.regs.bx, initial);
+        assert_eq!(cpu.regs.dx, after_popf);
+        assert_eq!(cpu.read_u16(cpu.regs.ss, cpu.regs.sp), pushed_sp);
+        cpu.regs.ax = 1;
+        advance(&mut cpu, 1);
+        assert_eq!(cpu.regs.ax, shifted_ax);
+    }
+}
+
+#[test]
+fn supported_cpu_generation_can_still_report_unimplemented_instructions() {
+    let mut cpu = program_for(CpuProfile::I286, &[0x0f, 0x01, 0xe0]); // SMSW AX
+    let error = cpu.step().unwrap_err();
+    assert_eq!(error.mnemonic, Mnemonic::Smsw);
+    assert_eq!(error.kind, CpuErrorKind::Unsupported);
+    assert_eq!(cpu.regs.ip, 0x0100);
 }
