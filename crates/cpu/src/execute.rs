@@ -96,7 +96,15 @@ impl Cpu {
             }
             Push => {
                 let width = push_pop_width(ins)?;
-                let value = self.read_op(ins, 0)?;
+                let value = if self.profile == CpuProfile::I8086
+                    && ins.op0_kind() == OpKind::Register
+                    && ins.op0_register() == Register::SP
+                {
+                    // The 8086 pushes the decremented value of SP.
+                    self.regs.sp.wrapping_sub(2).into()
+                } else {
+                    self.read_op(ins, 0)?
+                };
                 self.push(width, value);
             }
             Pop => {
@@ -106,11 +114,12 @@ impl Cpu {
             Pushf | Pushfd => {
                 self.push(
                     if op == Pushf { 2 } else { 4 },
-                    u32::from(self.regs.flags | 2),
+                    u32::from(self.profile.normalize_flags(self.regs.flags)),
                 );
             }
             Popf | Popfd => {
-                self.regs.flags = (self.pop(if op == Popf { 2 } else { 4 }) as u16 & 0x7fd5) | 2;
+                let flags = self.pop(if op == Popf { 2 } else { 4 }) as u16;
+                self.regs.flags = self.profile.normalize_flags(flags);
             }
             Pusha | Pushad => self.push_all(if op == Pusha { 2 } else { 4 })?,
             Popa | Popad => self.pop_all(if op == Popa { 2 } else { 4 })?,
@@ -248,7 +257,8 @@ impl Cpu {
             self.regs.cs = self.pop(width) as u16;
         }
         if matches!(ins.mnemonic(), Mnemonic::Iret | Mnemonic::Iretd) {
-            self.regs.flags = (self.pop(width) as u16 & 0x7fd5) | 2;
+            let flags = self.pop(width) as u16;
+            self.regs.flags = self.profile.normalize_flags(flags);
         }
         if ins.op_count() == 1 {
             self.regs.sp = self.regs.sp.wrapping_add(ins.immediate16());

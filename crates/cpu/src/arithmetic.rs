@@ -65,7 +65,11 @@ impl Cpu {
         use Mnemonic::*;
         let bits = u32::from(width * 8);
         let sign = sign_bit(width);
-        let count = count & 31;
+        let count = if self.profile == CpuProfile::I8086 {
+            count & 0xff
+        } else {
+            count & 31
+        };
         let iterations = match op {
             Rol | Ror => count % bits,
             Rcl | Rcr => count % (bits + 1),
