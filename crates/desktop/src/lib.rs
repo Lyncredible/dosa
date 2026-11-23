@@ -13,10 +13,12 @@ use winit::window::{Fullscreen, Theme, Window, WindowId};
 
 mod input;
 mod menu;
+mod pointer;
 mod renderer;
 
 pub use input::{Input, Key, Modifiers};
 pub use menu::{CpuMode, MenuAction, MenuState, MountKind, Speed, TextMode};
+pub use pointer::{PointerEvent, PointerMode};
 use renderer::Renderer;
 
 const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
@@ -29,6 +31,12 @@ pub trait App {
     fn frame(&self) -> Frame<'_>;
 
     fn input(&mut self, event: Input);
+
+    fn pointer(&mut self, _event: PointerEvent) {}
+
+    fn pointer_mode(&self) -> PointerMode {
+        PointerMode::Host
+    }
 
     /// Controls and current guest settings shown in the desktop toolbar.
     fn menu(&self) -> MenuState {
@@ -63,6 +71,7 @@ pub fn run(app: impl App + 'static) -> Result<(), Box<dyn Error>> {
         renderer: None,
         next_tick: Instant::now(),
         keyboard: input::Keyboard::default(),
+        pointer: pointer::Pointer::default(),
         menu: menu::Menu::default(),
         menu_keys: HashSet::new(),
         error: None,
@@ -81,6 +90,7 @@ struct Desktop<A> {
     renderer: Option<Renderer>,
     next_tick: Instant,
     keyboard: input::Keyboard,
+    pointer: pointer::Pointer,
     menu: menu::Menu,
     menu_keys: HashSet<PhysicalKey>,
     error: Option<Box<dyn Error>>,
@@ -106,6 +116,7 @@ impl<A: App> Desktop<A> {
             event_loop.owned_display_handle(),
         ))?);
         window.set_visible(true);
+        self.pointer.set_focus(window.has_focus());
         window.request_redraw();
         self.window = Some(window);
         self.next_tick = Instant::now();
@@ -120,6 +131,8 @@ impl<A: App> Desktop<A> {
     fn use_menu_command(&mut self, window: &Window, command: Option<menu::Command>) {
         match command {
             Some(menu::Command::Mount(kind, drive)) => {
+                self.pointer.set_position(None);
+                self.sync_pointer(window, true);
                 if let Some(source) = menu::pick_path(window, kind) {
                     self.app.menu_action(MenuAction::Mount {
                         drive,
@@ -140,6 +153,25 @@ impl<A: App> Desktop<A> {
         }
         window.request_redraw();
     }
+
+    fn sync_pointer(&mut self, window: &Window, blocked: bool) {
+        let blocked = blocked || self.menu.blocks_pointer() && self.app.menu().enabled;
+        let mode = if blocked {
+            PointerMode::Host
+        } else {
+            self.app.pointer_mode()
+        };
+        let viewport = self
+            .renderer
+            .as_ref()
+            .filter(|_| mode != PointerMode::Host)
+            .map(|renderer| {
+                renderer.display_viewport(window, &self.app.frame(), self.app.display_aspect())
+            });
+        if let Some(event) = self.pointer.update(window, mode, viewport) {
+            self.app.pointer(event);
+        }
+    }
 }
 
 impl<A: App> ApplicationHandler for Desktop<A> {
@@ -152,6 +184,10 @@ impl<A: App> ApplicationHandler for Desktop<A> {
     }
 
     fn suspended(&mut self, _: &ActiveEventLoop) {
+        self.pointer.set_focus(false);
+        if let Some(window) = self.window.clone() {
+            self.sync_pointer(&window, true);
+        }
         self.renderer = None;
         self.menu.close();
         self.menu.leave();
@@ -172,7 +208,11 @@ impl<A: App> ApplicationHandler for Desktop<A> {
             return;
         };
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.sync_pointer(&window, true);
+                event_loop.exit();
+                return;
+            }
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size);
@@ -224,32 +264,45 @@ impl<A: App> ApplicationHandler for Desktop<A> {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.menu.move_pointer(position, window.scale_factor());
+                self.pointer.set_position(Some(position));
                 window.request_redraw();
             }
             WindowEvent::CursorLeft { .. } => {
                 self.menu.leave();
+                self.pointer.set_position(None);
                 window.request_redraw();
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let menu_state = self.app.menu();
-                if menu_state.enabled {
-                    let (_, command) = self.menu.mouse(
+                let (handled, command) = if menu_state.enabled {
+                    self.menu.mouse(
                         state.is_pressed(),
                         button == MouseButton::Left,
                         menu::logical_width(window.inner_size(), window.scale_factor()),
                         &menu_state,
                         window.fullscreen().is_some(),
-                    );
+                    )
+                } else {
+                    (false, None)
+                };
+                self.sync_pointer(&window, handled);
+                if handled {
                     self.use_menu_command(&window, command);
-                    if self.app.should_exit() {
-                        event_loop.exit();
-                    }
+                } else if let Some(event) = self.pointer.button(button, state) {
+                    self.app.pointer(event);
                 }
+                if self.app.should_exit() {
+                    event_loop.exit();
+                }
+                return;
             }
-            WindowEvent::Focused(false) => {
-                self.menu.close();
-                for event in self.keyboard.release_all() {
-                    self.app.input(event);
+            WindowEvent::Focused(focused) => {
+                self.pointer.set_focus(focused);
+                if !focused {
+                    self.menu.close();
+                    for event in self.keyboard.release_all() {
+                        self.app.input(event);
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -275,10 +328,11 @@ impl<A: App> ApplicationHandler for Desktop<A> {
             }
             _ => {}
         }
+        self.sync_pointer(&window, false);
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(window) = &self.window else {
+        let Some(window) = self.window.clone() else {
             return;
         };
         if self.renderer.is_none() {
@@ -289,6 +343,7 @@ impl<A: App> ApplicationHandler for Desktop<A> {
         let now = Instant::now();
         if now >= self.next_tick {
             self.app.tick();
+            self.sync_pointer(&window, false);
             if self.app.should_exit() {
                 event_loop.exit();
                 return;
