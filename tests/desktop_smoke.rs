@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use dosa::display::Desktop;
 use dosa::shell::Shell;
-use dosa_desktop::{App, Frame, Input, Key};
-use dosa_mount::Mount;
+use dosa_desktop::{
+    App, Frame, Input, Key, MenuAction, MenuState, MountKind, PointerEvent, PointerMode,
+};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let Some(archive) = std::env::var_os("DOSA_SMOKE_ARCHIVE") else {
@@ -47,9 +48,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         "archive listing does not contain the selected program"
     );
 
-    let mut shell = Shell::new();
-    shell.mount('C', Mount::open(archive)?)?;
-    let desktop = Desktop::new(shell, Some(&program));
+    let mut desktop = Desktop::new(Shell::new(), None);
+    desktop.menu_action(MenuAction::Mount {
+        drive: 'C',
+        source: archive.into(),
+        kind: MountKind::Zip,
+    });
+    let status = desktop.menu().status;
+    assert_eq!(status, "Mounted C:", "desktop mount failed");
+    desktop.input(key_event(Key::Character(' '), Some(program), true));
+    desktop.input(key_event(Key::Enter, None, true));
     let result = Rc::new(Cell::new(None));
     let now = Instant::now();
     dosa_desktop::run(Smoke {
@@ -131,13 +139,7 @@ impl App for Smoke {
         self.key_frame = Some(hash);
         self.changed_at = now;
         for pressed in [true, false] {
-            self.desktop.input(Input {
-                key: Key::Enter,
-                pressed,
-                text: None,
-                modifiers: Default::default(),
-                scan_code: 0x1c,
-            });
+            self.desktop.input(key_event(Key::Enter, None, pressed));
         }
     }
 
@@ -155,5 +157,31 @@ impl App for Smoke {
 
     fn display_aspect(&self) -> Option<f32> {
         self.desktop.display_aspect()
+    }
+
+    fn menu(&self) -> MenuState {
+        self.desktop.menu()
+    }
+
+    fn menu_action(&mut self, action: MenuAction) {
+        self.desktop.menu_action(action);
+    }
+
+    fn pointer(&mut self, event: PointerEvent) {
+        self.desktop.pointer(event);
+    }
+
+    fn pointer_mode(&self) -> PointerMode {
+        self.desktop.pointer_mode()
+    }
+}
+
+fn key_event(key: Key, text: Option<String>, pressed: bool) -> Input {
+    Input {
+        scan_code: if key == Key::Enter { 0x1c } else { 0 },
+        key,
+        pressed,
+        text,
+        modifiers: Default::default(),
     }
 }
