@@ -431,6 +431,7 @@ dependencies = [
  "font8x8",
  "png",
  "serde",
+ "tempfile",
  "toml",
  "zip",
 ]

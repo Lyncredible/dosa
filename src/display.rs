@@ -446,13 +446,18 @@ fn save_screenshot(
     path: &std::path::Path,
     frame: Frame<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let file = std::fs::File::create(path)?;
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), frame.width, frame.height);
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    let mut encoder = png::Encoder::new(file.as_file_mut(), frame.width, frame.height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header()?;
     writer.write_image_data(frame.rgba)?;
     writer.finish()?;
+    file.persist(path)?;
     Ok(())
 }
 
@@ -577,6 +582,25 @@ mod tests {
         assert_eq!((info.width, info.height), (2, 1));
         assert_eq!(&decoded[..info.buffer_size()], &rgba);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn invalid_capture_preserves_the_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("existing.png");
+        std::fs::write(&path, b"existing image").unwrap();
+        assert!(
+            save_screenshot(
+                &path,
+                Frame {
+                    width: 2,
+                    height: 1,
+                    rgba: &[0]
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"existing image");
     }
 
     #[test]
