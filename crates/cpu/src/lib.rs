@@ -92,10 +92,27 @@ impl fmt::Display for CpuError {
 
 impl std::error::Error for CpuError {}
 
+/// A byte-addressed device in the guest's physical memory space.
+///
+/// Offsets are relative to the mapping base. Multi-byte guest accesses reach
+/// the device in ascending address order, one byte at a time.
+/// Instruction fetch can read ahead up to the 15-byte decoder window.
+pub trait MemoryDevice: Send + Sync {
+    fn read(&self, offset: usize) -> u8;
+    fn write(&self, offset: usize, value: u8);
+}
+
+struct MemoryMapping {
+    start: usize,
+    end: usize,
+    device: Box<dyn MemoryDevice>,
+}
+
 pub struct Cpu {
     pub regs: Registers,
-    /// Physical RAM with A20 disabled.
+    /// Backing RAM with A20 disabled. Direct accesses bypass mapped devices.
     pub memory: Box<[u8]>,
+    mapping: Option<MemoryMapping>,
     high: [u16; 8],
     fs: u16,
     gs: u16,
@@ -112,14 +129,37 @@ impl Cpu {
         Self {
             regs: Registers::default(),
             memory: vec![0; MEMORY_SIZE].into_boxed_slice(),
+            mapping: None,
             high: [0; 8],
             fs: 0,
             gs: 0,
         }
     }
 
+    /// Install or replace a device mapping within the 1 MiB physical address
+    /// space. An empty or out-of-range mapping leaves the current mapping in
+    /// place and returns false.
+    pub fn map_memory(&mut self, base: usize, len: usize, device: Box<dyn MemoryDevice>) -> bool {
+        let Some(end) = base
+            .checked_add(len)
+            .filter(|&end| len != 0 && end <= MEMORY_SIZE)
+        else {
+            return false;
+        };
+        self.mapping = Some(MemoryMapping {
+            start: base,
+            end,
+            device,
+        });
+        true
+    }
+
+    pub fn unmap_memory(&mut self) {
+        self.mapping = None;
+    }
+
     pub fn read_u8(&self, segment: u16, offset: u16) -> u8 {
-        self.memory[Self::linear(segment, offset.into())]
+        self.read_byte(Self::linear(segment, offset.into()))
     }
 
     pub fn read_u16(&self, segment: u16, offset: u16) -> u16 {
@@ -127,27 +167,38 @@ impl Cpu {
     }
 
     pub fn write_u8(&mut self, segment: u16, offset: u16, value: u8) {
-        self.memory[Self::linear(segment, offset.into())] = value;
+        self.write_byte(Self::linear(segment, offset.into()), value);
     }
 
     pub fn write_u16(&mut self, segment: u16, offset: u16, value: u16) {
         self.write_mem(Self::linear(segment, offset.into()), 2, value.into());
     }
 
-    /// Copy contiguous bytes to a physical address with 20-bit wraparound.
+    /// Copy contiguous bytes through the guest bus with 20-bit wraparound.
     pub fn load(&mut self, segment: u16, offset: u16, bytes: &[u8]) {
         let address = Self::linear(segment, offset.into());
         for (index, &byte) in bytes.iter().enumerate() {
-            self.memory[address.wrapping_add(index) & (MEMORY_SIZE - 1)] = byte;
+            self.write_byte(address.wrapping_add(index) & (MEMORY_SIZE - 1), byte);
         }
     }
 
     pub fn step(&mut self) -> Result<Step, CpuError> {
         let cs = self.regs.cs;
         let ip = self.regs.ip;
-        let code: [u8; 15] =
-            std::array::from_fn(|index| self.read_u8(cs, ip.wrapping_add(index as u16)));
-        let instruction = Decoder::with_ip(16, &code, u64::from(ip), DecoderOptions::NONE).decode();
+        let address = Self::linear(cs, ip.into());
+        let unwrapped_ip = usize::from(ip) + 15 <= 1 << 16;
+        let ram_only = self
+            .mapping
+            .as_ref()
+            .is_none_or(|map| address >= map.end || address + 15 <= map.start);
+        let tail: [u8; 15];
+        let code = if unwrapped_ip && ram_only && address + 15 <= MEMORY_SIZE {
+            &self.memory[address..address + 15]
+        } else {
+            tail = std::array::from_fn(|index| self.read_u8(cs, ip.wrapping_add(index as u16)));
+            &tail
+        };
+        let instruction = Decoder::with_ip(16, code, u64::from(ip), DecoderOptions::NONE).decode();
         self.regs.ip = instruction.next_ip16();
         self.execute(&instruction, ip).ok_or_else(|| {
             self.regs.ip = ip;
@@ -190,17 +241,37 @@ impl Cpu {
         (((u32::from(segment) << 4).wrapping_add(offset)) as usize) & (MEMORY_SIZE - 1)
     }
 
+    fn read_byte(&self, address: usize) -> u8 {
+        if let Some(map) = &self.mapping
+            && (map.start..map.end).contains(&address)
+        {
+            map.device.read(address - map.start)
+        } else {
+            self.memory[address]
+        }
+    }
+
+    fn write_byte(&mut self, address: usize, value: u8) {
+        if let Some(map) = &self.mapping
+            && (map.start..map.end).contains(&address)
+        {
+            map.device.write(address - map.start, value);
+        } else {
+            self.memory[address] = value;
+        }
+    }
+
     fn read_mem(&self, address: usize, width: u8) -> u32 {
         let mut bytes = [0; 4];
         for (index, byte) in bytes[..usize::from(width)].iter_mut().enumerate() {
-            *byte = self.memory[(address + index) & (MEMORY_SIZE - 1)];
+            *byte = self.read_byte((address + index) & (MEMORY_SIZE - 1));
         }
         u32::from_le_bytes(bytes)
     }
 
     fn write_mem(&mut self, address: usize, width: u8, value: u32) {
         for (index, &byte) in value.to_le_bytes()[..usize::from(width)].iter().enumerate() {
-            self.memory[(address + index) & (MEMORY_SIZE - 1)] = byte;
+            self.write_byte((address + index) & (MEMORY_SIZE - 1), byte);
         }
     }
 
