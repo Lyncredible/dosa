@@ -166,3 +166,54 @@ fn rotate_by_a_full_operand_updates_carry() {
     assert!(!cpu.flag(CF));
     assert_eq!(cpu.regs.ax, 0x81);
 }
+
+#[derive(Clone)]
+struct TestDevice(std::sync::Arc<std::sync::Mutex<[u8; 4]>>);
+
+impl MemoryDevice for TestDevice {
+    fn read(&self, offset: usize) -> u8 {
+        self.0.lock().unwrap()[offset]
+    }
+
+    fn write(&self, offset: usize, value: u8) {
+        self.0.lock().unwrap()[offset] = value;
+    }
+}
+
+#[test]
+fn memory_device_handles_string_and_boundary_accesses() {
+    // MOVSW / MOVSW / MOV AX,[DI-3]
+    let mut cpu = program(&[0xa5, 0xa5, 0x8b, 0x45, 0xfd]);
+    let device = TestDevice(Default::default());
+    cpu.regs.ds = 0xa000;
+    cpu.regs.es = 0xa000;
+    cpu.regs.si = 0;
+    cpu.regs.di = 2;
+    cpu.load(0xa000, 0, &[9, 8, 7, 6, 5, 4, 3]);
+    assert!(cpu.map_memory(0xa0000, 4, Box::new(device.clone())));
+    cpu.load(0xa000, 0, &[1, 2]);
+    assert!(!cpu.map_memory(usize::MAX, 8, Box::new(device.clone())));
+    advance(&mut cpu, 3);
+    assert_eq!(*device.0.lock().unwrap(), [1, 2, 1, 2]);
+    assert_eq!(cpu.regs.ax, 0x0102);
+    cpu.write_u16(0xa000, 3, 0x8877);
+    assert_eq!(cpu.read_u16(0xa000, 3), 0x8877);
+    cpu.unmap_memory();
+    assert_eq!(cpu.read_u16(0xa000, 3), 0x8806);
+    assert_eq!(cpu.read_u16(0xa000, 0), 0x0809);
+}
+
+#[test]
+fn wrapped_instruction_fetch_and_bus_access_find_the_mapping() {
+    let mut cpu = Cpu::new();
+    let device = TestDevice(Default::default());
+    cpu.regs.cs = 0xffff;
+    cpu.regs.ip = 0x000f;
+    assert!(cpu.map_memory(0, 4, Box::new(device.clone())));
+    cpu.write_u16(0xffff, 0x000f, 0x2ab0); // MOV AL,2Ah crosses A20.
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.regs.ax, 0x2a);
+    assert_eq!(cpu.regs.ip, 0x0011);
+    assert_eq!(cpu.memory[0xfffff], 0xb0);
+    assert_eq!(device.0.lock().unwrap()[0], 0x2a);
+}
