@@ -20,7 +20,10 @@ The first milestone is a GPU-rendered DOS prompt that can mount host content and
 | [14 · Windows integration and UI verification](docs/tasks/14-integration.md) | 10, 11, 12, 13 | Planned |
 | [15 · Reusable launch settings and fullscreen](docs/tasks/15-launch-and-view.md) | 03, 10 | Planned |
 | [16 · Compatibility roadmap](docs/tasks/16-compatibility-roadmap.md) | 05, 09 | Planned |
+| [17 · DOS batch files](docs/tasks/17-batch-files.md) | 04, 15 | Planned |
 
 See [architecture](docs/architecture.md) for the library boundaries and execution model.
+
+Keep at most two workers active at a time. Each worker takes one implementation or review task before moving to the next.
 
 Use one branch and worktree per task. Open a PR against the default branch and include its task, scope, and verification. A separate reviewer checks the diff and runs relevant tests before merging or sending findings back for revision. Use GitHub's **Rebase and merge** option or `gh pr merge --rebase` for every approved PR. Update the linked task when work merges or its scope changes. Keep local fixtures and host paths out of commits, CI, and PR descriptions.
