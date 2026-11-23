@@ -7,6 +7,10 @@ const ROWS: usize = 25;
 const ROW_BYTES: usize = COLS * 2;
 const TEXT_BYTES: usize = ROW_BYTES * ROWS;
 const GRAPHICS_BYTES: usize = 320 * 200;
+const CGA_WIDTH: usize = 640;
+const CGA_HEIGHT: usize = 200;
+const CGA_STRIDE: usize = CGA_WIDTH / 8;
+const CGA_BANK: usize = 0x2000;
 
 #[derive(Clone, Copy)]
 pub struct TextFrame<'a> {
@@ -35,6 +39,9 @@ pub(crate) struct Adapter {
     dac_read: usize,
     dac_write: usize,
     retrace: bool,
+    cga_pixels: Box<[u8]>,
+    cga_color: u8,
+    saved_text: Option<Box<[u8]>>,
 }
 
 impl Adapter {
@@ -48,24 +55,55 @@ impl Adapter {
             dac_read: 0,
             dac_write: 0,
             retrace: false,
+            cga_pixels: vec![0; CGA_WIDTH * CGA_HEIGHT].into_boxed_slice(),
+            cga_color: 15,
+            saved_text: None,
         }
     }
 
     pub(crate) fn frame<'a>(&'a self, cpu: &'a Cpu) -> Video<'a> {
-        if self.mode == 0x13 {
-            Video::Graphics {
+        match self.mode {
+            6 => Video::Graphics {
+                width: CGA_WIDTH as u32,
+                height: CGA_HEIGHT as u32,
+                indices: &self.cga_pixels,
+                palette: &self.palette,
+            },
+            0x13 => Video::Graphics {
                 width: 320,
                 height: 200,
                 indices: &cpu.memory[GRAPHICS..GRAPHICS + GRAPHICS_BYTES],
                 palette: &self.palette,
-            }
-        } else {
-            Video::Text(TextFrame {
+            },
+            _ => Video::Text(TextFrame {
                 columns: COLS as u16,
                 rows: ROWS as u16,
                 cells: &cpu.memory[TEXT..TEXT + TEXT_BYTES],
                 cursor: self.cursor.then_some((self.col as u16, self.row as u16)),
-            })
+            }),
+        }
+    }
+
+    pub(crate) fn refresh(&mut self, cpu: &Cpu) {
+        if self.mode != 6 {
+            return;
+        }
+        for (y, pixels) in self
+            .cga_pixels
+            .as_chunks_mut::<CGA_WIDTH>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
+            let start = cga_scanline(y);
+            for (byte, group) in cpu.memory[start..start + CGA_STRIDE]
+                .iter()
+                .zip(pixels.as_chunks_mut::<8>().0)
+            {
+                for (x, pixel) in group.iter_mut().enumerate() {
+                    *pixel = ((byte >> (7 - x)) & 1) * self.cga_color;
+                }
+            }
         }
     }
 
@@ -85,20 +123,41 @@ impl Adapter {
 
     fn set_mode(&mut self, cpu: &mut Cpu, value: u8) -> bool {
         let mode = value & 0x7f;
-        if !matches!(mode, 0x03 | 0x13) {
+        if !matches!(mode, 0x03 | 0x06 | 0x13) {
             return false;
+        }
+        if mode == 6 && self.mode != 6 {
+            self.saved_text = Some(
+                cpu.memory[TEXT..TEXT + TEXT_BYTES]
+                    .to_vec()
+                    .into_boxed_slice(),
+            );
+        } else if mode != 6
+            && let Some(text) = self.saved_text.take()
+        {
+            cpu.memory[TEXT..TEXT + TEXT_BYTES].copy_from_slice(&text);
         }
         self.mode = mode;
         self.palette = default_palette();
+        self.cga_color = 15;
         if value & 0x80 == 0 {
-            if mode == 3 {
-                self.clear(cpu);
-            } else {
-                cpu.memory[GRAPHICS..GRAPHICS + GRAPHICS_BYTES].fill(0);
+            match mode {
+                3 => self.clear(cpu),
+                6 => cpu.memory[TEXT..TEXT + 2 * CGA_BANK].fill(0),
+                _ => cpu.memory[GRAPHICS..GRAPHICS + GRAPHICS_BYTES].fill(0),
             }
         }
         cpu.write_u8(0x40, 0x49, mode);
-        cpu.write_u16(0x40, 0x4a, if mode == 3 { 80 } else { 40 });
+        cpu.write_u16(0x40, 0x4a, self.columns().into());
+        cpu.write_u16(
+            0x40,
+            0x4c,
+            match mode {
+                3 => 0x1000,
+                6 => 0x4000,
+                _ => 0xfa00,
+            },
+        );
         cpu.write_u8(0x40, 0x84, 24);
         true
     }
@@ -117,6 +176,9 @@ impl Adapter {
     }
 
     pub(crate) fn write(&mut self, cpu: &mut Cpu, bytes: &[u8]) {
+        if self.mode == 6 {
+            return;
+        }
         for &byte in bytes {
             match byte {
                 b'\r' => self.col = 0,
@@ -218,6 +280,23 @@ impl Adapter {
                     }
                 }
             }
+            0x0b if self.mode == 6 && bh == 0 => self.cga_color = bl & 15,
+            0x0c | 0x0d if self.mode == 6 => {
+                let x = usize::from(cpu.regs.cx);
+                let y = usize::from(cpu.regs.dx);
+                if x < CGA_WIDTH && y < CGA_HEIGHT {
+                    let byte = &mut cpu.memory[cga_scanline(y) + x / 8];
+                    let mask = 1 << (7 - x % 8);
+                    let color = (al & 1) * mask;
+                    if ah == 0x0d {
+                        cpu.regs.ax = u16::from_le_bytes([u8::from(*byte & mask != 0), ah]);
+                    } else if al & 0x80 != 0 {
+                        *byte ^= color;
+                    } else {
+                        *byte = (*byte & !mask) | color;
+                    }
+                }
+            }
             0x0c | 0x0d if self.mode == 0x13 => {
                 let x = usize::from(cpu.regs.cx);
                 let y = usize::from(cpu.regs.dx);
@@ -232,7 +311,7 @@ impl Adapter {
             }
             0x0e => self.write(cpu, &[al]),
             0x0f => {
-                cpu.regs.ax = u16::from_le_bytes([self.mode, if self.mode == 3 { 80 } else { 40 }]);
+                cpu.regs.ax = u16::from_le_bytes([self.mode, self.columns()]);
                 cpu.regs.bx &= 0x00ff;
             }
             0x10 if al == 0x10 && cpu.regs.bx < 256 => {
@@ -252,6 +331,10 @@ impl Adapter {
                         .map(expand_dac);
                 }
             }
+            0x12 if bl == 0x10 => {
+                cpu.regs.bx = 3;
+                cpu.regs.cx = 0;
+            }
             0x1a if al == 0 => {
                 cpu.regs.ax = 0x1a;
                 cpu.regs.bx = 8;
@@ -259,6 +342,10 @@ impl Adapter {
             _ => return false,
         }
         true
+    }
+
+    fn columns(&self) -> u8 {
+        if self.mode == 0x13 { 40 } else { 80 }
     }
 
     pub(crate) fn port_read(&mut self, port: u16) -> Option<u8> {
@@ -284,9 +371,14 @@ impl Adapter {
                 self.palette[self.dac_write / 3][self.dac_write % 3] = expand_dac(value);
                 self.dac_write = (self.dac_write + 1) % 768;
             }
+            0x3d9 if self.mode == 6 => self.cga_color = value & 15,
             _ => {}
         }
     }
+}
+
+fn cga_scanline(y: usize) -> usize {
+    TEXT + (y % 2) * CGA_BANK + (y / 2) * CGA_STRIDE
 }
 
 pub(crate) fn initialize(cpu: &mut Cpu, video: &mut Adapter) {

@@ -82,6 +82,8 @@ pub struct Machine {
     pending: Option<Pending>,
     keys: VecDeque<(u8, u8)>,
     scancodes: VecDeque<u8>,
+    modifiers: u8,
+    locks: u8,
     output: Vec<u8>,
     clock: Instant,
     dta: (u16, u16),
@@ -109,6 +111,8 @@ impl Machine {
             pending: None,
             keys: VecDeque::new(),
             scancodes: VecDeque::new(),
+            modifiers: 0,
+            locks: 0,
             output: Vec::new(),
             clock: Instant::now(),
             dta: (PSP, 0x80),
@@ -157,6 +161,8 @@ impl Machine {
         self.pending = None;
         self.keys.clear();
         self.scancodes.clear();
+        self.modifiers = 0;
+        self.locks = 0;
         self.output.clear();
         self.dta = (PSP, 0x80);
         self.blocks = BTreeMap::from([(PSP, CONVENTIONAL_END - PSP)]);
@@ -166,7 +172,10 @@ impl Machine {
     }
 
     pub fn key(&mut self, ascii: u8, scan: u8) {
-        if self.keys.len() < MAX_KEYS {
+        if !self.update_modifier(scan, true)
+            && (ascii != 0 || scan != 0)
+            && self.keys.len() < MAX_KEYS
+        {
             self.keys.push_back((ascii, scan));
         }
         self.raw_key(scan);
@@ -174,8 +183,38 @@ impl Machine {
 
     pub fn key_up(&mut self, scan: u8) {
         if scan != 0 {
+            self.update_modifier(scan, false);
             self.raw_key(scan | 0x80);
         }
+    }
+
+    fn update_modifier(&mut self, scan: u8, pressed: bool) -> bool {
+        let mask = match scan {
+            0x36 => 0x01, // right shift
+            0x2a => 0x02, // left shift
+            0x1d => 0x04, // control
+            0x38 => 0x08, // alt
+            0x46 => 0x10, // scroll lock
+            0x45 => 0x20, // num lock
+            0x3a => 0x40, // caps lock
+            _ => return false,
+        };
+        if pressed {
+            if self.modifiers & mask == 0 && mask & 0x70 != 0 {
+                self.locks ^= mask;
+            }
+            self.modifiers |= mask;
+        } else {
+            self.modifiers &= !mask;
+        }
+        self.cpu
+            .write_u8(0x40, 0x17, self.modifiers & 0x0f | self.locks);
+        self.cpu.write_u8(
+            0x40,
+            0x18,
+            self.modifiers & 0x70 | (self.modifiers & 0x0c) >> 2,
+        );
+        true
     }
 
     fn raw_key(&mut self, scan: u8) {
@@ -224,6 +263,7 @@ impl Machine {
                 return Err(error);
             }
         }
+        self.video.refresh(&self.cpu);
         Ok(self.state)
     }
 

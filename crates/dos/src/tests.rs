@@ -40,6 +40,11 @@ fn com_reads_key_then_prints_and_exits() {
     machine.write_console(b"> ");
     machine.launch('c', "key.com", "").unwrap();
     assert_eq!(machine.run(100).unwrap(), RunState::WaitingForKey);
+    machine.key(0, 0x2a);
+    assert_eq!(machine.run(100).unwrap(), RunState::WaitingForKey);
+    assert_eq!(machine.cpu.read_u8(0x40, 0x17), 2);
+    machine.key_up(0x2a);
+    assert_eq!(machine.cpu.read_u8(0x40, 0x17), 0);
     machine.key(b'Y', 0x15);
     assert_eq!(machine.run(100).unwrap(), RunState::Exited(7));
     assert_eq!(machine.take_output(), b"Y");
@@ -116,4 +121,42 @@ fn guest_opens_file_relative_to_nested_executable() {
     machine.launch('C', "programs/read.com", "").unwrap();
     assert_eq!(machine.run(100).unwrap(), RunState::Exited(0));
     assert_eq!(machine.take_output(), b"abc");
+}
+
+#[test]
+fn cga_graphics_reads_both_interleaved_scanline_banks() {
+    let directory = Directory::new("cga");
+    fs::write(
+        directory.0.join("CGA.COM"),
+        [
+            0xb8, 0x06, 0x00, 0xcd, 0x10, // set CGA mode 6
+            0xba, 0x00, 0xb8, 0x8e, 0xc2, // ES = video memory
+            0xb0, 0x80, 0x26, 0xa2, 0x00, 0x00, // first even pixel
+            0xb0, 0x01, 0x26, 0xa2, 0x00, 0x20, // eighth odd pixel
+            0xeb, 0xfe, // stay in graphics mode
+        ],
+    )
+    .unwrap();
+    let mut machine = directory.machine();
+    machine.write_console(b">");
+    machine.launch('C', "CGA.COM", "").unwrap();
+    assert_eq!(machine.run(30).unwrap(), RunState::Running);
+    let Video::Graphics {
+        width,
+        height,
+        indices,
+        palette,
+    } = machine.video()
+    else {
+        panic!("expected CGA graphics");
+    };
+    assert_eq!((width, height), (640, 200));
+    assert_eq!(&indices[..8], &[15, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(&indices[640..648], &[0, 0, 0, 0, 0, 0, 0, 15]);
+    assert_eq!(palette[15], [255; 3]);
+    machine.stop();
+    let Video::Text(frame) = machine.video() else {
+        panic!("expected restored console")
+    };
+    assert_eq!(&frame.cells[..2], &[b'>', 7]);
 }

@@ -25,7 +25,12 @@ impl Machine {
                         self.cpu.regs.flags &= !ZERO;
                     }
                 }
-                2 | 0x12 => self.cpu.regs.ax &= 0xff00,
+                2 => self.set_al(self.cpu.read_u8(0x40, 0x17)),
+                0x12 => {
+                    let flags = self.cpu.read_u8(0x40, 0x17);
+                    let extended = self.cpu.read_u8(0x40, 0x18);
+                    self.cpu.regs.ax = u16::from_le_bytes([flags, extended]);
+                }
                 3 => {}
                 _ => return Err(DosError::Interrupt { vector, ax }),
             },
