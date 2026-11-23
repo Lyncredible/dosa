@@ -1,0 +1,18 @@
+[package]
+name = "dosa"
+version = "0.1.0"
+edition = "2024"
+description = "A GPU-rendered DOS emulator"
+
+[workspace]
+members = ["crates/cpu", "crates/desktop", "crates/dos", "crates/mount"]
+resolver = "3"
+
+[dependencies]
+dosa-desktop = { path = "crates/desktop" }
+dosa-dos = { path = "crates/dos" }
+dosa-mount = { path = "crates/mount" }
+font8x8 = "0.3.1"
+
+[dev-dependencies]
+zip = { version = "9.8.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
