@@ -126,12 +126,11 @@ fn guest_timer_runs_repeatedly_with_programmed_pit_period() {
     machine.pit = crate::pit::Pit::new(0);
     let segment = machine.cpu.regs.cs;
     let initial_stack = machine.cpu.regs.sp;
-    assert_eq!(machine.bios_ticks_at(crate::pit::BIOS_DIVISOR * 3), 3);
+    crate::bios::install(&mut machine.cpu, crate::pit::BIOS_DIVISOR * 3);
     assert_eq!(machine.cpu.read_u16(0x40, 0x6c), 3);
     for _ in 0..9 {
         machine.step().unwrap();
     }
-    assert_eq!(machine.bios_ticks_at(crate::pit::BIOS_DIVISOR * 4), 3);
 
     machine.pit.advance(15);
     machine.step().unwrap();
@@ -145,6 +144,8 @@ fn guest_timer_runs_repeatedly_with_programmed_pit_period() {
     }
     assert_eq!(machine.cpu.read_u8(segment, 0x180), 2);
     assert_eq!(machine.cpu.regs.sp, initial_stack);
+    // The guest calls INT 1Ch itself but never chains BIOS IRQ0.
+    assert_eq!(machine.cpu.read_u16(0x40, 0x6c), 3);
 }
 
 #[test]
@@ -252,4 +253,132 @@ fn cga_graphics_reads_both_interleaved_scanline_banks() {
         panic!("expected restored console")
     };
     assert_eq!(&frame.cells[..2], &[b'>', 7]);
+}
+
+#[test]
+fn chained_default_timer_updates_bda_calls_int1c_and_acknowledges_irq() {
+    let directory = Directory::new("chained-timer");
+    fs::write(directory.0.join("TIMER.COM"), [0xeb, 0xfe]).unwrap();
+    let mut machine = directory.machine();
+    machine.launch('C', "timer.com", "").unwrap();
+    let segment = machine.cpu.regs.cs;
+
+    // Obtain the callable default handler via DOS and chain from a guest ISR.
+    machine.cpu.regs.ax = 0x3508;
+    machine.interrupt(0x21).unwrap();
+    let old = (machine.cpu.regs.es, machine.cpu.regs.bx);
+    assert_ne!(old, (0, 0));
+    machine.cpu.write_u16(segment, 0x180, old.1);
+    machine.cpu.write_u16(segment, 0x182, old.0);
+    machine.cpu.load(
+        segment,
+        0x120,
+        &[0x9c, 0xff, 0x1e, 0x80, 0x01, 0xcf], // PUSHF / CALL FAR [0180h] / IRET
+    );
+    machine.cpu.write_u16(0, 0x08 * 4, 0x120);
+    machine.cpu.write_u16(0, 0x08 * 4 + 2, segment);
+    machine.cpu.load(
+        segment,
+        0x140,
+        &[0x2e, 0xfe, 0x06, 0x60, 0x01, 0xcf], // INC BYTE PTR CS:[0160h] / IRET
+    );
+    machine.cpu.write_u16(0, 0x1c * 4, 0x140);
+    machine.cpu.write_u16(0, 0x1c * 4 + 2, segment);
+    machine.cpu.write_u16(0x40, 0x6c, 0x00af);
+    machine.cpu.write_u16(0x40, 0x6e, 0x0018);
+
+    let before = machine.cpu.regs;
+    let divisor = crate::pit::BIOS_DIVISOR;
+    machine.pit = crate::pit::Pit::new(0);
+    machine.pit.advance(divisor);
+    for _ in 0..16 {
+        machine.step().unwrap();
+    }
+    assert_eq!(machine.cpu.regs, before);
+    assert_eq!(machine.cpu.read_u8(segment, 0x160), 1);
+    assert_eq!(machine.cpu.read_u16(0x40, 0x6c), 0);
+    assert_eq!(machine.cpu.read_u16(0x40, 0x6e), 0);
+    assert_eq!(machine.cpu.read_u8(0x40, 0x70), 1);
+    machine.pic.port_write(0x20, 0x0b);
+    assert_eq!(machine.pic.port_read(0x20, 0), Some(0));
+
+    machine.cpu.regs.ax = 0;
+    machine.interrupt(0x1a).unwrap();
+    assert_eq!(machine.cpu.regs.ax, 1);
+    assert_eq!(machine.cpu.regs.cx, 0);
+    assert_eq!(machine.cpu.regs.dx, 0);
+    assert_eq!(machine.cpu.read_u8(0x40, 0x70), 0);
+    machine.pit.advance(divisor * 2);
+    for _ in 0..16 {
+        machine.step().unwrap();
+    }
+    assert_eq!(machine.cpu.read_u8(segment, 0x160), 2);
+    assert_eq!(machine.cpu.read_u16(0x40, 0x6c), 1);
+}
+
+#[test]
+fn chained_default_keyboard_handler_completes_irq_and_delivers_a_key_once() {
+    let directory = Directory::new("chained-keyboard");
+    fs::write(directory.0.join("KEYBOARD.COM"), [0xeb, 0xfe]).unwrap();
+    let mut machine = directory.machine();
+    machine.launch('C', "keyboard.com", "").unwrap();
+    let segment = machine.cpu.regs.cs;
+
+    machine.cpu.regs.ax = 0x3509;
+    machine.interrupt(0x21).unwrap();
+    let old = (machine.cpu.regs.es, machine.cpu.regs.bx);
+    assert_ne!(old, (0, 0));
+    machine.cpu.write_u16(segment, 0x180, old.1);
+    machine.cpu.write_u16(segment, 0x182, old.0);
+    machine.cpu.load(
+        segment,
+        0x120,
+        &[0x9c, 0xff, 0x1e, 0x80, 0x01, 0xcf], // PUSHF / CALL FAR [0180h] / IRET
+    );
+    machine.cpu.write_u16(0, 0x09 * 4, 0x120);
+    machine.cpu.write_u16(0, 0x09 * 4 + 2, segment);
+
+    let before = machine.cpu.regs;
+    machine.key(b'K', 0x25);
+    machine.key_up(0x25);
+    assert!(machine.keys.is_empty());
+    for _ in 0..20 {
+        machine.step().unwrap();
+    }
+    assert_eq!(machine.cpu.regs, before);
+    assert_eq!(machine.keys.len(), 1);
+    machine.pic.port_write(0x20, 0x0b);
+    assert_eq!(machine.pic.port_read(0x20, 0), Some(0));
+    assert_eq!(machine.keyboard.port_read(0x64), Some(0));
+
+    machine.cpu.regs.ax = 0;
+    machine.interrupt(0x16).unwrap();
+    assert_eq!(machine.cpu.regs.ax, 0x254b);
+    assert!(machine.keys.is_empty());
+}
+
+#[test]
+fn halted_guest_stays_active_and_resumes_only_after_an_enabled_irq() {
+    let directory = Directory::new("halt");
+    fs::write(
+        directory.0.join("HALT.COM"),
+        [0xfa, 0xf4, 0xb8, 7, 0x4c, 0xcd, 0x21], // CLI / HLT / MOV AX,4C07h / INT 21h
+    )
+    .unwrap();
+    let mut machine = directory.machine();
+    machine.launch('C', "halt.com", "").unwrap();
+    assert_eq!(machine.run(256).unwrap(), RunState::WaitingForInterrupt);
+    let halted_ip = machine.cpu.regs.ip;
+    machine.key(b'A', 0x1e);
+    assert_eq!(machine.run(0).unwrap(), RunState::WaitingForInterrupt);
+    assert_eq!(machine.run(256).unwrap(), RunState::WaitingForInterrupt);
+    assert_eq!(machine.cpu.regs.ip, halted_ip);
+    assert!(matches!(
+        machine.launch('C', "halt.com", ""),
+        Err(crate::DosError::Busy)
+    ));
+
+    // Externally enabling IF lets the already pending keyboard IRQ wake HLT.
+    machine.cpu.regs.flags |= 0x200;
+    assert_eq!(machine.run(256).unwrap(), RunState::Exited(7));
 }

@@ -274,7 +274,8 @@ impl App for Desktop {
                         self.write_prompt();
                     }
                 }
-                Ok(RunState::Running | RunState::WaitingForKey) => {}
+                Ok(RunState::Running | RunState::WaitingForKey | RunState::WaitingForInterrupt) => {
+                }
                 Err(error) => {
                     self.running = false;
                     self.shell.machine.stop();

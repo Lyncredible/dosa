@@ -6,6 +6,7 @@ pub(super) const MAX_KEYS: usize = 32;
 struct Scancode {
     value: u8,
     requested: bool,
+    bios_key: Option<(u8, u8)>,
 }
 
 #[derive(Default)]
@@ -17,7 +18,7 @@ pub(super) struct Keyboard {
 }
 
 impl Keyboard {
-    pub fn push(&mut self, value: u8, guest_handler: bool) {
+    pub fn push(&mut self, value: u8, guest_handler: bool, bios_key: Option<(u8, u8)>) {
         if self.guest_handler != guest_handler {
             // BIOS input is delivered separately. Do not replay copies retained for
             // raw polling when a program takes over the IRQ1 vector.
@@ -27,9 +28,14 @@ impl Keyboard {
         if value != 0 && self.output.len() < MAX_KEYS {
             self.output.push_back(Scancode {
                 value,
-                requested: guest_handler,
+                requested: true,
+                bios_key,
             });
         }
+    }
+
+    pub fn read_bios_key(&mut self) -> Option<(u8, u8)> {
+        self.output.pop_front().and_then(|code| code.bios_key)
     }
 
     pub fn irq_requested(&self) -> bool {
@@ -72,8 +78,8 @@ mod tests {
     #[test]
     fn each_scancode_requests_only_one_irq() {
         let mut keyboard = Keyboard::default();
-        keyboard.push(0x1e, true);
-        keyboard.push(0x9e, true);
+        keyboard.push(0x1e, true, Some((b'a', 0x1e)));
+        keyboard.push(0x9e, true, None);
         assert!(keyboard.irq_requested());
         keyboard.acknowledge_irq();
         assert!(
@@ -90,12 +96,12 @@ mod tests {
     #[test]
     fn raw_polling_works_without_replaying_bios_input_to_a_later_handler() {
         let mut keyboard = Keyboard::default();
-        keyboard.push(0x30, false);
-        assert!(!keyboard.irq_requested());
+        keyboard.push(0x30, false, None);
+        assert!(keyboard.irq_requested());
         assert_eq!(keyboard.port_read(0x64), Some(1));
         assert_eq!(keyboard.port_read(0x60), Some(0x30));
-        keyboard.push(0xb0, false);
-        keyboard.push(0x1e, true);
+        keyboard.push(0xb0, false, None);
+        keyboard.push(0x1e, true, Some((b'a', 0x1e)));
         assert!(keyboard.irq_requested());
         assert_eq!(keyboard.port_read(0x60), Some(0x1e));
         assert_eq!(keyboard.port_read(0x64), Some(0));

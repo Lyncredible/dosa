@@ -37,10 +37,10 @@ impl Machine {
                 _ => return Err(DosError::Interrupt { vector, ax }),
             },
             0x1a if ah == 0 => {
-                let ticks = self.update_clock();
+                let (ticks, midnight) = crate::bios::take_timer(&mut self.cpu);
                 self.cpu.regs.cx = (ticks >> 16) as u16;
                 self.cpu.regs.dx = ticks as u16;
-                self.cpu.regs.ax &= 0xff00;
+                self.set_al(midnight);
                 self.success();
             }
             0x1c => {}
