@@ -4,6 +4,11 @@ use std::error::Error;
 use dosa_dos::Machine;
 use dosa_mount::{Entry, Mount};
 
+mod batch;
+
+use batch::Batch;
+pub use batch::BatchStep;
+
 pub enum Command {
     Print(Vec<u8>),
     Launched,
@@ -16,6 +21,8 @@ pub struct Shell {
     pub machine: Machine,
     drive: char,
     directories: BTreeMap<char, String>,
+    batch: Option<Batch>,
+    errorlevel: u8,
 }
 
 impl Default for Shell {
@@ -30,6 +37,8 @@ impl Shell {
             machine: Machine::new(),
             drive: 'C',
             directories: BTreeMap::new(),
+            batch: None,
+            errorlevel: 0,
         }
     }
 
@@ -58,6 +67,8 @@ impl Shell {
             "" => return Ok(Command::Prompt),
             "CLS" => return Ok(Command::Clear),
             "EXIT" => return Ok(Command::Exit),
+            "ECHO" => format!("{args}\r\n").into_bytes(),
+            "REM" => return Ok(Command::Prompt),
             "HELP" => b"DIR [path]   List files\r\n\
                 CD [path]    Show or change directory\r\n\
                 TYPE file    Print a file\r\n\
@@ -65,7 +76,7 @@ impl Shell {
                 C:           Switch drives\r\n\
                 CLS          Clear the screen\r\n\
                 EXIT         Close dosa\r\n\
-                To run a program, enter its DOS name and arguments.\r\n"
+                Enter a COM, EXE, or BAT name and arguments to run it.\r\n"
                 .to_vec(),
             "DIR" => {
                 let (drive, path) = self.resolve(unquote(args))?;
@@ -132,6 +143,10 @@ impl Shell {
                 }
                 let (drive, path) = self.resolve(word)?;
                 let executable = self.find_program(drive, path)?;
+                if batch::is_batch(&executable) {
+                    self.launch_batch(drive, &executable, word, args, false)?;
+                    return Ok(Command::Prompt);
+                }
                 self.machine.launch(drive, &executable, args)?;
                 return Ok(Command::Launched);
             }
@@ -148,7 +163,7 @@ impl Shell {
         {
             return Ok(path);
         }
-        for extension in ["COM", "EXE"] {
+        for extension in ["COM", "EXE", "BAT"] {
             let candidate = format!("{path}.{extension}");
             match mount.metadata(&candidate) {
                 Ok(entry) if !entry.is_dir => return Ok(candidate),

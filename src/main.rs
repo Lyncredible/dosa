@@ -139,26 +139,43 @@ fn parse_mount(value: &std::ffi::OsStr) -> Result<(char, PathBuf), &'static str>
 
 fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::error::Error>> {
     let mut output = io::stdout().lock();
-    match shell.execute(command)? {
-        Command::Print(text) => output.write_all(&text)?,
-        Command::Launched => {
-            for _ in 0..1000 {
+    let mut remaining_slices = 1000;
+    let mut command = shell.execute(command)?;
+    loop {
+        match command {
+            Command::Print(text) => output.write_all(&text)?,
+            Command::Launched => loop {
+                if remaining_slices == 0 {
+                    return Err(shell
+                        .guest_failed("program exceeded the headless instruction budget".into()));
+                }
+                remaining_slices -= 1;
                 let state = shell.machine.run(20_000);
                 output.write_all(&shell.machine.take_output())?;
-                match state? {
-                    RunState::Exited(code) => return Ok(code),
-                    RunState::WaitingForKey => {
-                        return Err("program is waiting for keyboard input".into());
+                match state.map_err(|error| shell.guest_failed(error.into()))? {
+                    RunState::Exited(code) => {
+                        shell.guest_finished(code);
+                        break;
                     }
-                    RunState::Idle => return Ok(0),
+                    RunState::WaitingForKey => {
+                        return Err(
+                            shell.guest_failed("program is waiting for keyboard input".into())
+                        );
+                    }
+                    RunState::Idle => break,
                     RunState::Running => {}
                 }
-            }
-            return Err("program exceeded the headless instruction budget".into());
+            },
+            Command::Clear | Command::Prompt | Command::Exit => {}
         }
-        Command::Clear | Command::Prompt | Command::Exit => {}
+        let Some(step) = shell.step_batch()? else {
+            return Ok(shell.errorlevel());
+        };
+        if let Some(echo) = step.echo {
+            output.write_all(echo.as_bytes())?;
+        }
+        command = step.command;
     }
-    Ok(0)
 }
 
 #[cfg(test)]
