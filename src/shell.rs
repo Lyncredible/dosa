@@ -18,6 +18,12 @@ pub struct Shell {
     directories: BTreeMap<char, String>,
 }
 
+impl Default for Shell {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Shell {
     pub fn new() -> Self {
         Self {
