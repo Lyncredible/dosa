@@ -1,6 +1,6 @@
 # dosa
 
-dosa is a Rust DOS emulator with a GPU-rendered desktop window and a built-in DOS shell. It runs supported real-mode DOS programs with text or VGA mode 13h graphics. The same emulator core drives the desktop and the headless command line.
+dosa is a Rust DOS emulator with a GPU-rendered desktop window and a built-in DOS shell. It runs supported real-mode COM and MZ programs with text, CGA mode 06h, VGA mode 13h, or planar VGA (Mode X) graphics. The same emulator core drives the desktop and the headless command line.
 
 ## Build and run
 
@@ -32,7 +32,7 @@ Mounts are read-only. Headless execution returns the program's DOS exit code. It
 
 ## Compatibility
 
-Windows is the first desktop target. The platform-independent core and winit/wgpu desktop are organized for Linux and macOS. Consult the [task list](TASKS.md) for platform verification and DOS compatibility work.
+Windows is the first desktop target and has been tested with Vulkan and Direct3D 12. The workspace type-checks for x86-64 Linux and Apple Silicon macOS. Native desktop testing on those platforms is tracked in the [task list](TASKS.md).
 
 The built-in DOS services provide a subset of DOS and BIOS behavior. Compatibility depends on each program's CPU, video, file system, sound, and peripheral requirements.
 
