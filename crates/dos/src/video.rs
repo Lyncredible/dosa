@@ -236,6 +236,16 @@ impl Adapter {
         }
         self.mode = mode;
         self.palette = default_palette();
+        if mode == 0x12 {
+            for (index, color) in self.palette[..64].iter_mut().enumerate() {
+                *color = std::array::from_fn(|channel| {
+                    let low_bit = 2 - channel;
+                    let high_bit = 5 - channel;
+                    u8::from(index & (1 << low_bit) != 0) * 170
+                        + u8::from(index & (1 << high_bit) != 0) * 85
+                });
+            }
+        }
         self.cga_color = 15;
         if mode == 3 {
             self.set_text_geometry(cpu, TextGeometry::standard(self.next_scan_lines), 0x1000);
@@ -450,6 +460,18 @@ impl Adapter {
             0x10 if al == 0x10 && cpu.regs.bx < 256 => {
                 self.palette[usize::from(cpu.regs.bx)] = [dh, ch, cl].map(expand_dac);
             }
+            0x10 if al == 0 && bl < 16 => self.vga.set_attribute(bl, bh),
+            0x10 if al == 1 => self.vga.set_attribute(0x11, bh),
+            0x10 if al == 2 => {
+                for index in 0..16 {
+                    self.vga.set_attribute(
+                        index,
+                        cpu.read_u8(cpu.regs.es, cpu.regs.dx.wrapping_add(u16::from(index))),
+                    );
+                }
+                self.vga
+                    .set_attribute(0x11, cpu.read_u8(cpu.regs.es, cpu.regs.dx.wrapping_add(16)));
+            }
             0x10 if al == 0x12 => {
                 let start = usize::from(cpu.regs.bx).min(256);
                 let count = usize::from(cpu.regs.cx).min(256 - start);
@@ -506,6 +528,7 @@ impl Adapter {
                 Some(byte)
             }
             0x3da => {
+                self.vga.reset_attribute_latch();
                 self.retrace = !self.retrace;
                 Some(if self.retrace { 0x09 } else { 0 })
             }
