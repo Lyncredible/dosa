@@ -6,6 +6,10 @@ impl Machine {
     pub(crate) fn interrupt(&mut self, vector: u8) -> Result<(), DosError> {
         let ax = self.cpu.regs.ax;
         let [al, ah] = ax.to_le_bytes();
+        if self.mouse.owns_vector(&self.cpu, vector) {
+            self.mouse_interrupt();
+            return Ok(());
+        }
         if self.has_interrupt_handler(vector) {
             self.cpu.enter_interrupt(vector);
             return Ok(());

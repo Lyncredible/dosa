@@ -55,6 +55,15 @@ impl Default for Registers {
     }
 }
 
+/// The complete guest register state saved across a host-serviced callback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegisterSnapshot {
+    registers: Registers,
+    high: [u16; 8],
+    fs: u16,
+    gs: u16,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Step {
     Continue,
@@ -125,6 +134,22 @@ impl Default for Cpu {
 }
 
 impl Cpu {
+    pub fn save_registers(&self) -> RegisterSnapshot {
+        RegisterSnapshot {
+            registers: self.regs,
+            high: self.high,
+            fs: self.fs,
+            gs: self.gs,
+        }
+    }
+
+    pub fn restore_registers(&mut self, snapshot: RegisterSnapshot) {
+        self.regs = snapshot.registers;
+        self.high = snapshot.high;
+        self.fs = snapshot.fs;
+        self.gs = snapshot.gs;
+    }
+
     pub fn new() -> Self {
         Self {
             regs: Registers::default(),
