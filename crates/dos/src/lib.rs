@@ -3,6 +3,7 @@
 mod files;
 mod keyboard;
 mod loader;
+mod mouse;
 mod pic;
 mod pit;
 mod services;
@@ -12,6 +13,7 @@ mod video;
 #[cfg(test)]
 mod tests;
 
+pub use mouse::MouseCursor;
 pub use video::{TextFrame, Video};
 
 use dosa_cpu::{Cpu, CpuError, Step};
@@ -19,6 +21,7 @@ use dosa_mount::{Mount, MountError};
 use files::DosFiles;
 use keyboard::{KEYBOARD_VECTOR, Keyboard, MAX_KEYS};
 use loader::{CONVENTIONAL_END, PSP};
+use mouse::Mouse;
 use pic::Pic;
 use pit::{BIOS_DIVISOR, Pit};
 use std::collections::{BTreeMap, VecDeque};
@@ -91,6 +94,7 @@ pub struct Machine {
     pending: Option<Pending>,
     keys: VecDeque<(u8, u8)>,
     keyboard: Keyboard,
+    mouse: Mouse,
     pic: Pic,
     pit: Pit,
     modifiers: u8,
@@ -113,6 +117,7 @@ impl Machine {
         let mut cpu = Cpu::new();
         let mut video = Adapter::new();
         video::initialize(&mut cpu, &mut video);
+        Mouse::install(&mut cpu);
         Self {
             cpu,
             video,
@@ -122,6 +127,7 @@ impl Machine {
             pending: None,
             keys: VecDeque::new(),
             keyboard: Keyboard::default(),
+            mouse: Mouse::default(),
             pic: Pic::default(),
             pit: Pit::new(0),
             modifiers: 0,
@@ -167,6 +173,7 @@ impl Machine {
         let mut cpu = loader::load(&bytes, &name, args)?;
         let mut video = Adapter::new();
         video::initialize(&mut cpu, &mut video);
+        Mouse::install(&mut cpu);
         video.copy_console(&self.video, &self.cpu, &mut cpu);
         self.cpu = cpu;
         self.video = video;
@@ -174,6 +181,7 @@ impl Machine {
         self.pending = None;
         self.keys.clear();
         self.keyboard = Keyboard::default();
+        self.mouse = Mouse::default();
         self.pic = Pic::default();
         self.pit = Pit::new(pit::ticks(self.clock.elapsed()));
         self.modifiers = 0;
@@ -244,6 +252,41 @@ impl Machine {
         self.video.frame(&self.cpu)
     }
 
+    /// Whether the running guest has called the integrated DOS mouse driver.
+    pub fn mouse_active(&self) -> bool {
+        self.mouse.active() && matches!(self.state, RunState::Running | RunState::WaitingForKey)
+    }
+
+    /// Update the integrated mouse from coordinates normalized to the displayed viewport.
+    pub fn mouse_move(&mut self, x: u16, y: u16) {
+        self.mouse.move_to(x, y);
+    }
+
+    /// Set the left, right, and middle button bits, in that order from bit 0.
+    pub fn mouse_buttons(&mut self, mask: u8) {
+        self.mouse.buttons(mask);
+    }
+
+    /// Return the guest cursor overlay without altering the guest video memory.
+    pub fn mouse_cursor(&self) -> Option<MouseCursor> {
+        if self.mouse_active() {
+            self.mouse.cursor()
+        } else {
+            None
+        }
+    }
+
+    fn mouse_interrupt(&mut self) {
+        let bounds = match self.video() {
+            Video::Text(frame) => (frame.columns * 8, frame.rows * 8),
+            Video::Graphics { width, height, .. } => (
+                width.max(640).min(u16::MAX.into()) as u16,
+                height.min(u16::MAX.into()) as u16,
+            ),
+        };
+        self.mouse.interrupt(&mut self.cpu, bounds);
+    }
+
     pub fn write_console(&mut self, bytes: &[u8]) {
         self.video.write(&mut self.cpu, bytes);
     }
@@ -303,7 +346,13 @@ impl Machine {
     }
 
     fn step(&mut self) -> Result<(), DosError> {
+        let interrupts_enabled = self.cpu.regs.flags & INTERRUPT_ENABLE != 0;
+        self.mouse
+            .dispatch_callback(&mut self.cpu, interrupts_enabled);
         self.service_hardware_interrupt();
+        if self.mouse.at_driver_entry(&self.cpu) {
+            self.mouse_interrupt();
+        }
         match self.cpu.step().map_err(DosError::Cpu)? {
             Step::Continue => {}
             Step::Interrupt(vector) => self.interrupt(vector)?,
