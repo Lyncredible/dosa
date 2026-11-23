@@ -12,6 +12,7 @@ The first milestone is a GPU-rendered DOS prompt that can mount host content and
 | [06 · Platform validation](docs/tasks/06-platforms.md) | 04 | Windows tested, Linux and macOS type-checked |
 | [07 · CGA and planar VGA](docs/tasks/07-video.md) | 03, 04 | Initial modes complete |
 | [08 · Guest keyboard interrupts](docs/tasks/08-keyboard.md) | 04 | Initial IRQ1 delivery complete |
+| [09 · Guest timer interrupts](docs/tasks/09-timer.md) | 04, 08 | Initial PIT channel 0 and IRQ0 delivery complete |
 
 See [architecture](docs/architecture.md) for the library boundaries and execution model.
 

@@ -3,8 +3,6 @@ use std::collections::VecDeque;
 pub(super) const KEYBOARD_VECTOR: u8 = 0x09;
 pub(super) const MAX_KEYS: usize = 32;
 
-const IRQ1: u8 = 1 << 1;
-
 struct Scancode {
     value: u8,
     requested: bool,
@@ -14,9 +12,6 @@ struct Scancode {
 pub(super) struct Keyboard {
     output: VecDeque<Scancode>,
     guest_handler: bool,
-    mask: u8,
-    in_service: bool,
-    read_isr: bool,
     system_control: u8,
     interface_disabled: bool,
 }
@@ -37,35 +32,18 @@ impl Keyboard {
         }
     }
 
-    pub fn irq_ready(&self) -> bool {
-        self.mask & IRQ1 == 0
-            && !self.in_service
-            && !self.interface_disabled
-            && self.request_pending()
-    }
-
-    fn request_pending(&self) -> bool {
-        self.output.front().is_some_and(|code| code.requested)
+    pub fn irq_requested(&self) -> bool {
+        !self.interface_disabled && self.output.front().is_some_and(|code| code.requested)
     }
 
     pub fn acknowledge_irq(&mut self) {
         if let Some(code) = self.output.front_mut() {
             code.requested = false;
         }
-        self.in_service = true;
     }
 
     pub fn port_read(&mut self, port: u16) -> Option<u8> {
         Some(match port {
-            0x20 => {
-                let active = if self.read_isr {
-                    self.in_service
-                } else {
-                    self.request_pending()
-                };
-                u8::from(active) * IRQ1
-            }
-            0x21 => self.mask,
             0x60 => self.output.pop_front().map_or(0, |code| code.value),
             0x61 => self.system_control,
             0x64 => u8::from(!self.output.is_empty()),
@@ -75,13 +53,6 @@ impl Keyboard {
 
     pub fn port_write(&mut self, port: u16, value: u8) -> bool {
         match port {
-            0x20 => match value {
-                0x0a => self.read_isr = false,
-                0x0b => self.read_isr = true,
-                0x20 | 0xa0 | 0x61 | 0xe1 => self.in_service = false,
-                _ => {}
-            },
-            0x21 => self.mask = value,
             0x61 => self.system_control = value,
             0x64 => match value {
                 0xad => self.interface_disabled = true,
@@ -99,37 +70,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn irq_is_requested_once_per_byte_and_waits_for_pic_eoi() {
+    fn each_scancode_requests_only_one_irq() {
         let mut keyboard = Keyboard::default();
         keyboard.push(0x1e, true);
         keyboard.push(0x9e, true);
-        assert!(keyboard.irq_ready());
+        assert!(keyboard.irq_requested());
         keyboard.acknowledge_irq();
-        assert!(!keyboard.irq_ready());
-        keyboard.port_write(0x20, 0x20);
-        assert!(!keyboard.irq_ready(), "EOI does not replay unread data");
+        assert!(
+            !keyboard.irq_requested(),
+            "unread data does not request another IRQ"
+        );
         assert_eq!(keyboard.port_read(0x60), Some(0x1e));
-        assert!(keyboard.irq_ready());
+        assert!(keyboard.irq_requested());
         keyboard.acknowledge_irq();
         assert_eq!(keyboard.port_read(0x60), Some(0x9e));
-        keyboard.push(0x1e, true);
-        assert!(!keyboard.irq_ready());
-        keyboard.port_write(0x20, 0x60);
-        assert!(!keyboard.irq_ready(), "EOI for IRQ0 does not clear IRQ1");
-        keyboard.port_write(0x20, 0x61);
-        assert!(keyboard.irq_ready());
+        assert!(!keyboard.irq_requested());
     }
 
     #[test]
     fn raw_polling_works_without_replaying_bios_input_to_a_later_handler() {
         let mut keyboard = Keyboard::default();
         keyboard.push(0x30, false);
-        assert!(!keyboard.irq_ready());
+        assert!(!keyboard.irq_requested());
         assert_eq!(keyboard.port_read(0x64), Some(1));
         assert_eq!(keyboard.port_read(0x60), Some(0x30));
         keyboard.push(0xb0, false);
         keyboard.push(0x1e, true);
-        assert!(keyboard.irq_ready());
+        assert!(keyboard.irq_requested());
         assert_eq!(keyboard.port_read(0x60), Some(0x1e));
         assert_eq!(keyboard.port_read(0x64), Some(0));
     }
