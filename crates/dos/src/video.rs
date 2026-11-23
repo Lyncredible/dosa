@@ -250,9 +250,14 @@ impl Adapter {
         cpu.write_u8(0x40, 0x49, mode);
         cpu.write_u16(0x40, 0x4a, self.columns().into());
         if mode != 3 {
-            cpu.write_u16(0x40, 0x4c, if mode == 6 { 0x4000 } else { 0xfa00 });
-            cpu.write_u8(0x40, 0x84, 24);
-            cpu.write_u16(0x40, 0x85, 8);
+            let page_bytes = match mode {
+                6 => 0x4000,
+                0x12 => 0xa000,
+                _ => 0xfa00,
+            };
+            cpu.write_u16(0x40, 0x4c, page_bytes);
+            cpu.write_u8(0x40, 0x84, if mode == 0x12 { 29 } else { 24 });
+            cpu.write_u16(0x40, 0x85, if mode == 0x12 { 16 } else { 8 });
         }
         true
     }

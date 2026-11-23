@@ -118,3 +118,28 @@ fn console_geometry_and_tail_cells_survive_copy_and_graphics() {
     expect_geometry(&video, &cpu, 50, 8, 0x2040);
     assert_eq!(text(&video, &cpu).cells[index], b'Y');
 }
+#[test]
+fn mode_twelve_reports_graphics_and_bios_geometry() {
+    let mut cpu = dosa_cpu::Cpu::new();
+    let mut video = super::Adapter::new();
+    cpu.regs.ax = 0x12;
+    assert!(video.bios(&mut cpu));
+    assert_eq!(cpu.read_u16(0x40, 0x4a), 80);
+    assert_eq!(cpu.read_u16(0x40, 0x4c), 0xa000);
+    assert_eq!(cpu.read_u8(0x40, 0x84), 29);
+    assert_eq!(cpu.read_u16(0x40, 0x85), 16);
+    video.refresh(&cpu);
+    let super::Video::Graphics {
+        width,
+        height,
+        indices,
+        ..
+    } = video.frame(&cpu)
+    else {
+        panic!("expected graphics");
+    };
+    assert_eq!((width, height, indices.len()), (640, 480, 640 * 480));
+    cpu.regs.ax = 3;
+    assert!(video.bios(&mut cpu));
+    assert_eq!(cpu.read_u8(0x40, 0x84), 24);
+}
