@@ -1,6 +1,7 @@
 //! A headless DOS process runtime with a BIOS text and VGA display.
 
 mod files;
+mod keyboard;
 mod loader;
 mod services;
 mod video;
@@ -13,6 +14,7 @@ pub use video::{TextFrame, Video};
 use dosa_cpu::{Cpu, CpuError, Step};
 use dosa_mount::{Mount, MountError};
 use files::DosFiles;
+use keyboard::{KEYBOARD_VECTOR, Keyboard, MAX_KEYS};
 use loader::{CONVENTIONAL_END, PSP};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -21,7 +23,7 @@ use video::Adapter;
 
 const CARRY: u16 = 1;
 const ZERO: u16 = 0x40;
-const MAX_KEYS: usize = 32;
+const INTERRUPT_ENABLE: u16 = 0x0200;
 
 #[derive(Debug)]
 pub enum DosError {
@@ -81,7 +83,7 @@ pub struct Machine {
     state: RunState,
     pending: Option<Pending>,
     keys: VecDeque<(u8, u8)>,
-    scancodes: VecDeque<u8>,
+    keyboard: Keyboard,
     modifiers: u8,
     locks: u8,
     output: Vec<u8>,
@@ -110,7 +112,7 @@ impl Machine {
             state: RunState::Idle,
             pending: None,
             keys: VecDeque::new(),
-            scancodes: VecDeque::new(),
+            keyboard: Keyboard::default(),
             modifiers: 0,
             locks: 0,
             output: Vec::new(),
@@ -160,7 +162,7 @@ impl Machine {
         self.files = DosFiles::new(drive, cwd.to_owned());
         self.pending = None;
         self.keys.clear();
-        self.scancodes.clear();
+        self.keyboard = Keyboard::default();
         self.modifiers = 0;
         self.locks = 0;
         self.output.clear();
@@ -172,19 +174,22 @@ impl Machine {
     }
 
     pub fn key(&mut self, ascii: u8, scan: u8) {
+        let guest_handler = self.has_interrupt_handler(KEYBOARD_VECTOR);
         if !self.update_modifier(scan, true)
+            && (!guest_handler || scan == 0)
             && (ascii != 0 || scan != 0)
             && self.keys.len() < MAX_KEYS
         {
             self.keys.push_back((ascii, scan));
         }
-        self.raw_key(scan);
+        self.keyboard.push(scan, guest_handler);
     }
 
     pub fn key_up(&mut self, scan: u8) {
         if scan != 0 {
             self.update_modifier(scan, false);
-            self.raw_key(scan | 0x80);
+            let guest_handler = self.has_interrupt_handler(KEYBOARD_VECTOR);
+            self.keyboard.push(scan | 0x80, guest_handler);
         }
     }
 
@@ -217,10 +222,9 @@ impl Machine {
         true
     }
 
-    fn raw_key(&mut self, scan: u8) {
-        if scan != 0 && self.scancodes.len() < MAX_KEYS {
-            self.scancodes.push_back(scan);
-        }
+    fn has_interrupt_handler(&self, vector: u8) -> bool {
+        let entry = u16::from(vector) * 4;
+        self.cpu.read_u16(0, entry) != 0 || self.cpu.read_u16(0, entry + 2) != 0
     }
 
     pub fn video(&self) -> Video<'_> {
@@ -268,6 +272,13 @@ impl Machine {
     }
 
     fn step(&mut self) -> Result<(), DosError> {
+        if self.cpu.regs.flags & INTERRUPT_ENABLE != 0
+            && self.keyboard.irq_ready()
+            && self.has_interrupt_handler(KEYBOARD_VECTOR)
+        {
+            self.keyboard.acknowledge_irq();
+            self.cpu.enter_interrupt(KEYBOARD_VECTOR);
+        }
         match self.cpu.step().map_err(DosError::Cpu)? {
             Step::Continue => {}
             Step::Interrupt(vector) => self.interrupt(vector)?,
@@ -275,21 +286,22 @@ impl Machine {
                 let mut value = 0;
                 for byte in 0..width {
                     let port = port.wrapping_add(u16::from(byte));
-                    let part = match port {
-                        0x60 => self.scancodes.pop_front().unwrap_or(0),
-                        0x64 => u8::from(!self.scancodes.is_empty()),
-                        _ => self.video.port_read(port).unwrap_or(0xff),
-                    };
+                    let part = self
+                        .keyboard
+                        .port_read(port)
+                        .or_else(|| self.video.port_read(port))
+                        .unwrap_or(0xff);
                     value |= u32::from(part) << (u32::from(byte) * 8);
                 }
                 self.cpu.complete_port_read(width, value);
             }
             Step::PortWrite { port, width, value } => {
                 for byte in 0..width {
-                    self.video.port_write(
-                        port.wrapping_add(u16::from(byte)),
-                        (value >> (byte * 8)) as u8,
-                    );
+                    let port = port.wrapping_add(u16::from(byte));
+                    let value = (value >> (byte * 8)) as u8;
+                    if !self.keyboard.port_write(port, value) {
+                        self.video.port_write(port, value);
+                    }
                 }
             }
             Step::Halt => self.exit(0),

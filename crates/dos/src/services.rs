@@ -6,9 +6,7 @@ impl Machine {
     pub(crate) fn interrupt(&mut self, vector: u8) -> Result<(), DosError> {
         let ax = self.cpu.regs.ax;
         let [al, ah] = ax.to_le_bytes();
-        if self.cpu.read_u16(0, u16::from(vector) * 4) != 0
-            || self.cpu.read_u16(0, u16::from(vector) * 4 + 2) != 0
-        {
+        if self.has_interrupt_handler(vector) {
             self.cpu.enter_interrupt(vector);
             return Ok(());
         }
