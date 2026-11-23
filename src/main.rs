@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use dosa::display::Desktop;
 use dosa::shell::{Command, Shell};
@@ -27,6 +28,8 @@ Usage: dosa [OPTIONS]
   --version            Show the version
 
 Explicit options override values from the launch profile.";
+const HEADLESS_IRQ_WAIT: Duration = Duration::from_secs(2);
+const HALT_TIMEOUT: &str = "program did not resume from HLT within the headless wait limit";
 
 fn main() -> ExitCode {
     match run() {
@@ -144,28 +147,42 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
     loop {
         match command {
             Command::Print(text) => output.write_all(&text)?,
-            Command::Launched => loop {
-                if remaining_slices == 0 {
-                    return Err(shell
-                        .guest_failed("program exceeded the headless instruction budget".into()));
-                }
-                remaining_slices -= 1;
-                let state = shell.machine.run(20_000);
-                output.write_all(&shell.machine.take_output())?;
-                match state.map_err(|error| shell.guest_failed(error.into()))? {
-                    RunState::Exited(code) => {
-                        shell.guest_finished(code);
-                        break;
+            Command::Launched => {
+                let mut halted_since = None;
+                loop {
+                    if remaining_slices == 0 {
+                        let message = if halted_since.is_some() {
+                            HALT_TIMEOUT
+                        } else {
+                            "program exceeded the headless instruction budget"
+                        };
+                        return Err(shell.guest_failed(message.into()));
                     }
-                    RunState::WaitingForKey => {
-                        return Err(
-                            shell.guest_failed("program is waiting for keyboard input".into())
-                        );
+                    remaining_slices -= 1;
+                    let state = shell.machine.run(20_000);
+                    output.write_all(&shell.machine.take_output())?;
+                    match state.map_err(|error| shell.guest_failed(error.into()))? {
+                        RunState::Exited(code) => {
+                            shell.guest_finished(code);
+                            break;
+                        }
+                        RunState::WaitingForKey => {
+                            return Err(
+                                shell.guest_failed("program is waiting for keyboard input".into())
+                            );
+                        }
+                        RunState::WaitingForInterrupt => {
+                            let since = halted_since.get_or_insert_with(Instant::now);
+                            if since.elapsed() >= HEADLESS_IRQ_WAIT {
+                                return Err(shell.guest_failed(HALT_TIMEOUT.into()));
+                            }
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        RunState::Idle => break,
+                        RunState::Running => halted_since = None,
                     }
-                    RunState::Idle => break,
-                    RunState::Running => {}
                 }
-            },
+            }
             Command::Clear | Command::Prompt | Command::Exit => {}
         }
         let Some(step) = shell.step_batch()? else {

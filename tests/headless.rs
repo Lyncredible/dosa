@@ -347,3 +347,23 @@ fn batch_files_cannot_mount_a_host_path_even_from_a_nested_call() {
     );
     assert!(output.stdout.is_empty());
 }
+
+#[test]
+fn headless_hlt_can_wait_for_default_timer_without_spinning() {
+    let dir = Fixture::new();
+    let program = dir.0.join("WAIT.COM");
+    for (opcode, status) in [(0xfb, 7), (0xfa, 1)] {
+        // STI or CLI, followed by HLT and a normal DOS exit.
+        fs::write(&program, [opcode, 0xf4, 0xb8, 7, 0x4c, 0xcd, 0x21]).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .arg("--mount")
+            .arg(format!("C={}", dir.0.display()))
+            .args(["--headless", "--exec", "wait"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(status), "{output:?}");
+        if status == 1 {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("did not resume from HLT"));
+        }
+    }
+}

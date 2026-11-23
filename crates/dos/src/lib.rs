@@ -1,5 +1,6 @@
 //! A headless DOS process runtime with a BIOS text and VGA display.
 
+mod bios;
 mod files;
 mod keyboard;
 mod loader;
@@ -16,6 +17,7 @@ mod tests;
 pub use mouse::MouseCursor;
 pub use video::{TextFrame, Video};
 
+use bios::{Hook, TIMER_VECTOR};
 pub use dosa_cpu::CpuProfile;
 use dosa_cpu::{Cpu, CpuError, Step};
 use dosa_mount::{Mount, MountError};
@@ -24,7 +26,7 @@ use keyboard::{KEYBOARD_VECTOR, Keyboard, MAX_KEYS};
 use loader::{CONVENTIONAL_END, PSP};
 use mouse::Mouse;
 use pic::Pic;
-use pit::{BIOS_DIVISOR, Pit};
+use pit::Pit;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::time::Instant;
@@ -32,7 +34,6 @@ use video::Adapter;
 
 const CARRY: u16 = 1;
 const ZERO: u16 = 0x40;
-const TIMER_VECTOR: u8 = 0x08;
 const TIMER_SAMPLE_INTERVAL: usize = 256;
 
 #[derive(Debug)]
@@ -74,7 +75,17 @@ pub enum RunState {
     Idle,
     Running,
     WaitingForKey,
+    WaitingForInterrupt,
     Exited(u8),
+}
+
+impl RunState {
+    fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Running | Self::WaitingForKey | Self::WaitingForInterrupt
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -119,6 +130,7 @@ impl Machine {
         let mut cpu = Cpu::new();
         let mut video = Adapter::new();
         video::initialize(&mut cpu, &mut video);
+        bios::install(&mut cpu, 0);
         Mouse::install(&mut cpu);
         Self {
             cpu,
@@ -145,7 +157,7 @@ impl Machine {
     }
 
     pub fn mount(&mut self, drive: char, mount: Mount) -> Result<(), DosError> {
-        if matches!(self.state, RunState::Running | RunState::WaitingForKey) {
+        if self.state.is_active() {
             return Err(DosError::Busy);
         }
         self.mounts.insert(normalize_drive(drive)?, mount);
@@ -157,7 +169,7 @@ impl Machine {
     }
 
     pub fn set_cpu_profile(&mut self, profile: CpuProfile) -> Result<(), DosError> {
-        if matches!(self.state, RunState::Running | RunState::WaitingForKey) {
+        if self.state.is_active() {
             return Err(DosError::Busy);
         }
         self.cpu_profile = profile;
@@ -165,7 +177,7 @@ impl Machine {
     }
 
     pub fn set_paused(&mut self, paused: bool) {
-        if paused && matches!(self.state, RunState::Running | RunState::WaitingForKey) {
+        if paused && self.state.is_active() {
             self.paused_since.get_or_insert_with(Instant::now);
         } else if !paused && let Some(since) = self.paused_since.take() {
             self.clock += since.elapsed();
@@ -173,7 +185,7 @@ impl Machine {
     }
 
     pub fn launch(&mut self, drive: char, path: &str, args: &str) -> Result<(), DosError> {
-        if matches!(self.state, RunState::Running | RunState::WaitingForKey) {
+        if self.state.is_active() {
             return Err(DosError::Busy);
         }
         let drive = normalize_drive(drive)?;
@@ -193,6 +205,8 @@ impl Machine {
         let mut cpu = loader::load(&bytes, &name, args, self.cpu_profile)?;
         let mut video = Adapter::new();
         video::initialize(&mut cpu, &mut video);
+        let now = pit::ticks(self.clock.elapsed());
+        bios::install(&mut cpu, now);
         Mouse::install(&mut cpu);
         video.copy_console(&self.video, &self.cpu, &mut cpu);
         self.cpu = cpu;
@@ -203,7 +217,7 @@ impl Machine {
         self.keyboard = Keyboard::default();
         self.mouse = Mouse::default();
         self.pic = Pic::default();
-        self.pit = Pit::new(pit::ticks(self.clock.elapsed()));
+        self.pit = Pit::new(now);
         self.modifiers = 0;
         self.locks = 0;
         self.output.clear();
@@ -215,22 +229,32 @@ impl Machine {
     }
 
     pub fn key(&mut self, ascii: u8, scan: u8) {
-        let guest_handler = self.has_interrupt_handler(KEYBOARD_VECTOR);
-        if !self.update_modifier(scan, true)
-            && (!guest_handler || scan == 0)
-            && (ascii != 0 || scan != 0)
-            && self.keys.len() < MAX_KEYS
-        {
-            self.keys.push_back((ascii, scan));
+        let guest_handler = self.guest_keyboard_handler();
+        let modifier = self.update_modifier(scan, true);
+        let mut bios_key = (!modifier && (ascii != 0 || scan != 0)).then_some((ascii, scan));
+        if !guest_handler || scan == 0 {
+            self.queue_bios_key(bios_key.take());
         }
-        self.keyboard.push(scan, guest_handler);
+        self.keyboard.push(scan, guest_handler, bios_key);
     }
 
     pub fn key_up(&mut self, scan: u8) {
         if scan != 0 {
             self.update_modifier(scan, false);
-            let guest_handler = self.has_interrupt_handler(KEYBOARD_VECTOR);
-            self.keyboard.push(scan | 0x80, guest_handler);
+            let guest_handler = self.guest_keyboard_handler();
+            self.keyboard.push(scan | 0x80, guest_handler, None);
+        }
+    }
+
+    fn guest_keyboard_handler(&self) -> bool {
+        !bios::default_keyboard(&self.cpu) && self.has_interrupt_handler(KEYBOARD_VECTOR)
+    }
+
+    fn queue_bios_key(&mut self, key: Option<(u8, u8)>) {
+        if let Some(key) = key
+            && self.keys.len() < MAX_KEYS
+        {
+            self.keys.push_back(key);
         }
     }
 
@@ -274,7 +298,7 @@ impl Machine {
 
     /// Whether the running guest has called the integrated DOS mouse driver.
     pub fn mouse_active(&self) -> bool {
-        self.mouse.active() && matches!(self.state, RunState::Running | RunState::WaitingForKey)
+        self.mouse.active() && self.state.is_active()
     }
 
     /// Update the integrated mouse from coordinates normalized to the displayed viewport.
@@ -322,7 +346,7 @@ impl Machine {
 
     /// Select a shell text geometry and retain it across guest programs.
     pub fn set_text_rows(&mut self, rows: u8) -> bool {
-        if matches!(self.state, RunState::Running | RunState::WaitingForKey) {
+        if self.state.is_active() {
             return false;
         }
         self.video.set_console_rows(&mut self.cpu, rows)
@@ -333,22 +357,18 @@ impl Machine {
     }
 
     pub fn stop(&mut self) {
-        if matches!(self.state, RunState::Running | RunState::WaitingForKey) {
+        if self.state.is_active() {
             self.exit(3);
         }
     }
 
     pub fn run(&mut self, budget: usize) -> Result<RunState, DosError> {
-        if self.paused_since.is_some() {
-            return Ok(self.state);
-        }
-        if matches!(self.state, RunState::Idle | RunState::Exited(_)) {
+        if budget == 0 || self.paused_since.is_some() || !self.state.is_active() {
             return Ok(self.state);
         }
         self.state = RunState::Running;
         let now = pit::ticks(self.clock.elapsed());
         self.pit.advance(now);
-        self.bios_ticks_at(now);
         if let Some(pending) = self.pending.take() {
             self.resume(pending);
         }
@@ -369,10 +389,20 @@ impl Machine {
     }
 
     fn step(&mut self) -> Result<(), DosError> {
-        let interrupts_enabled = self.cpu.can_accept_maskable_interrupt();
+        let interrupts_enabled = self.cpu.can_accept_maskable_interrupt() && !self.cpu.is_halted();
         self.mouse
             .dispatch_callback(&mut self.cpu, interrupts_enabled);
         self.service_hardware_interrupt();
+        match bios::hook(&self.cpu) {
+            Some(Hook::Tick) => bios::advance_timer(&mut self.cpu),
+            Some(Hook::TimerEoi) => self.pic.end_irq(0),
+            Some(Hook::Keyboard) => {
+                let key = self.keyboard.read_bios_key();
+                self.queue_bios_key(key);
+                self.pic.end_irq(1);
+            }
+            None => {}
+        }
         if self.mouse.at_driver_entry(&self.cpu) {
             self.mouse_interrupt();
         }
@@ -407,7 +437,7 @@ impl Machine {
                     }
                 }
             }
-            Step::Halt => self.exit(0),
+            Step::Halt => self.state = RunState::WaitingForInterrupt,
         }
         Ok(())
     }
@@ -434,21 +464,6 @@ impl Machine {
             self.pic.acknowledge(irq);
             self.cpu.enter_interrupt(vector);
         }
-    }
-
-    fn update_clock(&mut self) -> u32 {
-        self.bios_ticks_at(pit::ticks(self.clock.elapsed()))
-    }
-
-    fn bios_ticks_at(&mut self, now: u64) -> u32 {
-        if self.has_interrupt_handler(TIMER_VECTOR) {
-            return u32::from(self.cpu.read_u16(0x40, 0x6c))
-                | (u32::from(self.cpu.read_u16(0x40, 0x6e)) << 16);
-        }
-        let ticks = (now / BIOS_DIVISOR % 0x1800b0) as u32;
-        self.cpu.write_u16(0x40, 0x6c, ticks as u16);
-        self.cpu.write_u16(0x40, 0x6e, (ticks >> 16) as u16);
-        ticks
     }
 
     fn exit(&mut self, code: u8) {

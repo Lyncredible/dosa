@@ -16,6 +16,10 @@ impl Pic {
         self.in_service |= 1 << irq;
     }
 
+    pub fn end_irq(&mut self, irq: u8) {
+        self.in_service &= !(1 << irq);
+    }
+
     pub fn port_read(&self, port: u16, requests: u8) -> Option<u8> {
         match port {
             0x20 => Some(if self.read_isr {
@@ -34,7 +38,7 @@ impl Pic {
                 0x0a => self.read_isr = false,
                 0x0b => self.read_isr = true,
                 0x20 | 0xa0 => self.in_service &= self.in_service.wrapping_sub(1),
-                0x60..=0x67 | 0xe0..=0xe7 => self.in_service &= !(1 << (value & 7)),
+                0x60..=0x67 | 0xe0..=0xe7 => self.end_irq(value & 7),
                 _ => {}
             },
             0x21 => self.mask = value,
