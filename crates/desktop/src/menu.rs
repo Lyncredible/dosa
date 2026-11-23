@@ -55,6 +55,7 @@ pub enum MountKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MenuAction {
+    SaveScreenshot(PathBuf),
     Mount {
         drive: char,
         source: PathBuf,
@@ -111,6 +112,7 @@ const TABS: [(Tab, &str, u32, u32); 4] = [
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Command {
+    Screenshot,
     Mount(MountKind, char),
     Fullscreen,
     App(MenuAction),
@@ -519,6 +521,7 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
                 state.running,
                 false,
             ));
+            items.push(item("Save screenshot...", Command::Screenshot, true, false));
             items.push(item("Exit", Command::App(MenuAction::Exit), true, false));
             items
         }
