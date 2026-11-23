@@ -175,6 +175,17 @@ impl Adapter {
         cpu.write_u16(0x40, 0x50, (self.row as u16) << 8 | self.col as u16);
     }
 
+    pub(crate) fn erase_previous(&mut self, cpu: &mut Cpu) {
+        let cursor = self.row * COLS + self.col;
+        let Some(previous) = cursor.checked_sub(1) else {
+            return;
+        };
+        self.row = previous / COLS;
+        self.col = previous % COLS;
+        cpu.memory[TEXT + previous * 2] = b' ';
+        self.update_cursor(cpu);
+    }
+
     pub(crate) fn write(&mut self, cpu: &mut Cpu, bytes: &[u8]) {
         if self.mode == 6 {
             return;

@@ -226,7 +226,7 @@ impl App for Desktop {
             }
             Key::Backspace => {
                 if self.line.pop().is_some() {
-                    self.shell.machine.write_console(b"\x08 \x08");
+                    self.shell.machine.erase_console_character();
                 }
             }
             Key::Character(_) if !event.modifiers.ctrl && !event.modifiers.logo => {
@@ -270,6 +270,63 @@ fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: boo
                     background
                 };
                 pixel.copy_from_slice(&[r, g, b, 255]);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_backspace_erases_across_wrap_and_preserves_the_prompt() {
+        for (start_row, visible_row) in [(0, 0), (24, 23)] {
+            let mut desktop = Desktop::new(Shell::new(), None);
+            desktop.shell.machine.clear_console();
+            desktop
+                .shell
+                .machine
+                .write_console(&b"\r\n".repeat(start_row));
+            desktop.write_prompt();
+
+            let prompt = desktop.shell.prompt();
+            let typed = "x".repeat(79 - prompt.len()) + "y";
+            desktop.input(Input {
+                key: Key::Character('x'),
+                pressed: true,
+                text: Some(typed.clone()),
+                modifiers: Default::default(),
+                scan_code: 0x2d,
+            });
+            let backspace = Input {
+                key: Key::Backspace,
+                pressed: true,
+                text: None,
+                modifiers: Default::default(),
+                scan_code: 0x0e,
+            };
+            desktop.input(backspace.clone());
+
+            let Video::Text(frame) = desktop.shell.machine.video() else {
+                panic!("expected shell text mode");
+            };
+            let row_start = usize::from(visible_row) * usize::from(frame.columns) * 2;
+            assert_eq!(frame.cursor, Some((79, visible_row)));
+            assert_eq!(frame.cells[row_start + 78 * 2], b'x');
+            assert_eq!(frame.cells[row_start + 79 * 2], b' ');
+
+            // Erase the remaining input and press Backspace at the empty prompt.
+            for _ in 0..typed.len() {
+                desktop.input(backspace.clone());
+            }
+            assert!(desktop.line.is_empty());
+            let Video::Text(frame) = desktop.shell.machine.video() else {
+                panic!("expected shell text mode");
+            };
+            assert_eq!(frame.cursor, Some((prompt.len() as u16, visible_row)));
+            for (offset, character) in prompt.bytes().enumerate() {
+                assert_eq!(frame.cells[row_start + offset * 2], character);
             }
         }
     }

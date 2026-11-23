@@ -231,6 +231,11 @@ impl Machine {
         self.video.write(&mut self.cpu, bytes);
     }
 
+    /// Erase the character before the shell cursor, including across a wrapped row.
+    pub fn erase_console_character(&mut self) {
+        self.video.erase_previous(&mut self.cpu);
+    }
+
     pub fn clear_console(&mut self) {
         self.video.clear(&mut self.cpu);
     }
