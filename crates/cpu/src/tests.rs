@@ -152,3 +152,17 @@ fn unsupported_instructions_retain_fault_address() {
     assert_eq!(error.ip, 0x100);
     assert_eq!(cpu.regs.ip, 0x100);
 }
+
+#[test]
+fn rotate_by_a_full_operand_updates_carry() {
+    // ROL AL,8 / CLC / ROR AL,8 / CLC / ROL AL,0
+    let mut cpu = program(&[0xc0, 0xc0, 8, 0xf8, 0xc0, 0xc8, 8, 0xf8, 0xc0, 0xc0, 0]);
+    cpu.regs.ax = 0x81;
+    advance(&mut cpu, 1);
+    assert!(cpu.flag(CF));
+    advance(&mut cpu, 2);
+    assert!(cpu.flag(CF));
+    advance(&mut cpu, 2);
+    assert!(!cpu.flag(CF));
+    assert_eq!(cpu.regs.ax, 0x81);
+}

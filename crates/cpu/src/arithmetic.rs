@@ -72,6 +72,9 @@ impl Cpu {
             _ => count,
         };
         if iterations == 0 {
+            if count != 0 && matches!(op, Rol | Ror) {
+                self.set_flag(CF, value & if op == Rol { 1 } else { sign } != 0);
+            }
             return value;
         }
         let original = value;
