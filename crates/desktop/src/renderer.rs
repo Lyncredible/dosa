@@ -8,6 +8,7 @@ use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
 
 use crate::Frame;
+use crate::menu::BAR_HEIGHT;
 
 const MATTE_RGB: [f64; 3] = [0.070, 0.082, 0.102];
 const INSET: f64 = 16.0;
@@ -19,7 +20,10 @@ pub(crate) struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    overlay_pipeline: wgpu::RenderPipeline,
     framebuffer: Option<FramebufferTexture>,
+    overlay: Option<FramebufferTexture>,
+    menu_visible: bool,
     size: PhysicalSize<u32>,
 }
 
@@ -50,27 +54,10 @@ impl Renderer {
             label: Some("Dosa framebuffer shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("frame.wgsl").into()),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Dosa framebuffer pipeline"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vertex"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fragment"),
-                compilation_options: Default::default(),
-                targets: &[Some(config.format.into())],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let (pipeline, overlay_pipeline) = (
+            pipeline(&device, &shader, config.format, false),
+            pipeline(&device, &shader, config.format, true),
+        );
 
         let mut renderer = Self {
             instance,
@@ -79,7 +66,10 @@ impl Renderer {
             queue,
             config,
             pipeline,
+            overlay_pipeline,
             framebuffer: None,
+            overlay: None,
+            menu_visible: false,
             size: PhysicalSize::new(0, 0),
         };
         renderer.resize(size);
@@ -103,7 +93,9 @@ impl Renderer {
         window: &Arc<Window>,
         frame: Frame<'_>,
         aspect: Option<f32>,
+        overlay: Option<Frame<'_>>,
     ) -> Result<(), Box<dyn Error>> {
+        self.menu_visible = overlay.is_some();
         if self.size.width == 0 || self.size.height == 0 {
             return Ok(());
         }
@@ -125,7 +117,30 @@ impl Renderer {
                 return Err(io::Error::other("GPU surface validation failed").into());
             }
         };
-        self.upload(&frame)?;
+        let srgb = self.config.format.is_srgb();
+        upload(
+            &self.device,
+            &self.queue,
+            &self.pipeline,
+            &mut self.framebuffer,
+            &frame,
+            srgb,
+        )?;
+        let overlay_height = if let Some(frame) = overlay {
+            upload(
+                &self.device,
+                &self.queue,
+                &self.overlay_pipeline,
+                &mut self.overlay,
+                &frame,
+                srgb,
+            )?;
+            (f64::from(frame.height) * window.scale_factor())
+                .round()
+                .clamp(1.0, f64::from(self.size.height)) as f32
+        } else {
+            0.0
+        };
 
         let target = output.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -142,16 +157,17 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
-            let [x, y, width, height] = viewport(
-                self.size,
-                (frame.width, frame.height),
-                aspect,
-                window.scale_factor() * INSET,
-            );
+            let [x, y, width, height] = self.display_viewport(window, &frame, aspect);
             pass.set_viewport(x, y, width, height, 0.0, 1.0);
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.framebuffer.as_ref().unwrap().binding, &[]);
             pass.draw(0..3, 0..1);
+            if overlay_height > 0.0 {
+                pass.set_viewport(0.0, 0.0, self.size.width as f32, overlay_height, 0.0, 1.0);
+                pass.set_pipeline(&self.overlay_pipeline);
+                pass.set_bind_group(0, &self.overlay.as_ref().unwrap().binding, &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
         self.queue.submit([encoder.finish()]);
         window.pre_present_notify();
@@ -162,49 +178,113 @@ impl Renderer {
         Ok(())
     }
 
-    fn upload(&mut self, frame: &Frame<'_>) -> io::Result<()> {
-        let extent = wgpu::Extent3d {
-            width: frame.width,
-            height: frame.height,
-            depth_or_array_layers: 1,
+    pub(crate) fn display_viewport(
+        &self,
+        window: &Window,
+        frame: &Frame<'_>,
+        aspect: Option<f32>,
+    ) -> [f32; 4] {
+        if self.size.width == 0 || self.size.height == 0 || frame.width == 0 || frame.height == 0 {
+            return [0.0; 4];
+        }
+        let scale = window.scale_factor();
+        let bar = if self.menu_visible {
+            ((f64::from(BAR_HEIGHT) * scale).round() as u32).min(self.size.height.saturating_sub(1))
+        } else {
+            0
         };
-        let device_max = self.device.limits().max_texture_dimension_2d;
-        let valid_size = |dimension| (1..=device_max).contains(&dimension);
-        if !valid_size(extent.width)
-            || !valid_size(extent.height)
-            || (extent.width as usize) * (extent.height as usize) * 4 != frame.rgba.len()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid RGBA8 framebuffer dimensions or byte count",
-            ));
-        }
-
-        if self
-            .framebuffer
-            .as_ref()
-            .is_none_or(|current| current.extent != extent)
-        {
-            self.framebuffer = Some(FramebufferTexture::new(
-                &self.device,
-                &self.pipeline,
-                extent,
-                self.config.format.is_srgb(),
-            ));
-        }
-        let source = &self.framebuffer.as_ref().unwrap().texture;
-        self.queue.write_texture(
-            source.as_image_copy(),
-            frame.rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(extent.width * 4),
-                rows_per_image: Some(extent.height),
-            },
-            extent,
+        let mut viewport = viewport(
+            PhysicalSize::new(self.size.width, self.size.height - bar),
+            (frame.width, frame.height),
+            aspect,
+            scale * INSET,
         );
-        Ok(())
+        viewport[1] += bar as f32;
+        viewport
     }
+}
+
+fn pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    overlay: bool,
+) -> wgpu::RenderPipeline {
+    let target = wgpu::ColorTargetState {
+        format,
+        blend: overlay.then_some(wgpu::BlendState::ALPHA_BLENDING),
+        write_mask: wgpu::ColorWrites::ALL,
+    };
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Dosa GPU presentation"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vertex"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(if overlay {
+                "overlay_fragment"
+            } else {
+                "fragment"
+            }),
+            compilation_options: Default::default(),
+            targets: &[Some(target)],
+        }),
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn upload(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &wgpu::RenderPipeline,
+    texture: &mut Option<FramebufferTexture>,
+    frame: &Frame<'_>,
+    srgb: bool,
+) -> io::Result<()> {
+    let extent = wgpu::Extent3d {
+        width: frame.width,
+        height: frame.height,
+        depth_or_array_layers: 1,
+    };
+    let device_max = device.limits().max_texture_dimension_2d;
+    let valid_size = |dimension| (1..=device_max).contains(&dimension);
+    if !valid_size(extent.width)
+        || !valid_size(extent.height)
+        || (extent.width as usize) * (extent.height as usize) * 4 != frame.rgba.len()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid RGBA8 framebuffer dimensions or byte count",
+        ));
+    }
+
+    if texture
+        .as_ref()
+        .is_none_or(|current| current.extent != extent)
+    {
+        *texture = Some(FramebufferTexture::new(device, pipeline, extent, srgb));
+    }
+    let source = &texture.as_ref().unwrap().texture;
+    queue.write_texture(
+        source.as_image_copy(),
+        frame.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(extent.width * 4),
+            rows_per_image: Some(extent.height),
+        },
+        extent,
+    );
+    Ok(())
 }
 
 struct FramebufferTexture {

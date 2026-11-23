@@ -1,17 +1,22 @@
+use std::collections::HashSet;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::event::{MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Theme, Window, WindowId};
+use winit::keyboard::{Key as LogicalKey, PhysicalKey};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+use winit::window::{Fullscreen, Theme, Window, WindowId};
 
 mod input;
+mod menu;
 mod renderer;
 
 pub use input::{Input, Key, Modifiers};
+pub use menu::{CpuMode, MenuAction, MenuState, MountKind, Speed, TextMode};
 use renderer::Renderer;
 
 const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
@@ -24,6 +29,13 @@ pub trait App {
     fn frame(&self) -> Frame<'_>;
 
     fn input(&mut self, event: Input);
+
+    /// Controls and current guest settings shown in the desktop toolbar.
+    fn menu(&self) -> MenuState {
+        MenuState::default()
+    }
+
+    fn menu_action(&mut self, _action: MenuAction) {}
 
     fn should_exit(&self) -> bool {
         false
@@ -51,6 +63,8 @@ pub fn run(app: impl App + 'static) -> Result<(), Box<dyn Error>> {
         renderer: None,
         next_tick: Instant::now(),
         keyboard: input::Keyboard::default(),
+        menu: menu::Menu::default(),
+        menu_keys: HashSet::new(),
         error: None,
     };
 
@@ -67,6 +81,8 @@ struct Desktop<A> {
     renderer: Option<Renderer>,
     next_tick: Instant,
     keyboard: input::Keyboard,
+    menu: menu::Menu,
+    menu_keys: HashSet<PhysicalKey>,
     error: Option<Box<dyn Error>>,
 }
 
@@ -100,19 +116,45 @@ impl<A: App> Desktop<A> {
         self.error = Some(error);
         event_loop.exit();
     }
+
+    fn use_menu_command(&mut self, window: &Window, command: Option<menu::Command>) {
+        match command {
+            Some(menu::Command::Mount(kind, drive)) => {
+                if let Some(source) = menu::pick_path(window, kind) {
+                    self.app.menu_action(MenuAction::Mount {
+                        drive,
+                        source,
+                        kind,
+                    });
+                }
+            }
+            Some(menu::Command::Fullscreen) => {
+                window.set_fullscreen(if window.fullscreen().is_some() {
+                    None
+                } else {
+                    Some(Fullscreen::Borderless(None))
+                });
+            }
+            Some(menu::Command::App(action)) => self.app.menu_action(action),
+            None => {}
+        }
+        window.request_redraw();
+    }
 }
 
 impl<A: App> ApplicationHandler for Desktop<A> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.renderer.is_none() {
-            if let Err(error) = self.open(event_loop) {
-                self.fail(event_loop, error);
-            }
+        if self.renderer.is_none()
+            && let Err(error) = self.open(event_loop)
+        {
+            self.fail(event_loop, error);
         }
     }
 
     fn suspended(&mut self, _: &ActiveEventLoop) {
         self.renderer = None;
+        self.menu.close();
+        self.menu.leave();
     }
 
     fn window_event(
@@ -125,6 +167,7 @@ impl<A: App> ApplicationHandler for Desktop<A> {
             .window
             .as_ref()
             .filter(|window| window.id() == window_id)
+            .cloned()
         else {
             return;
         };
@@ -146,22 +189,86 @@ impl<A: App> ApplicationHandler for Desktop<A> {
                 ..
             } => {
                 if !is_synthetic {
-                    self.app.input(self.keyboard.translate(event));
+                    let physical = event.physical_key;
+                    if event.state.is_pressed() {
+                        if event.repeat && self.menu_keys.contains(&physical) {
+                            return;
+                        }
+                        self.menu_keys.remove(&physical);
+                    } else if self.menu_keys.remove(&physical) {
+                        return;
+                    }
+                    let shortcut = match event.key_without_modifiers() {
+                        LogicalKey::Character(text) => text.chars().next(),
+                        _ => None,
+                    };
+                    let input = self.keyboard.translate(event);
+                    let state = self.app.menu();
+                    let (handled, command) = if state.enabled {
+                        self.menu
+                            .key(&input, shortcut, &state, window.fullscreen().is_some())
+                    } else {
+                        (false, None)
+                    };
+                    if handled {
+                        self.menu_keys.insert(physical);
+                        self.keyboard.forget(physical);
+                        self.use_menu_command(&window, command);
+                    } else {
+                        self.app.input(input);
+                    }
+                    if self.app.should_exit() {
+                        event_loop.exit();
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.menu.move_pointer(position, window.scale_factor());
+                window.request_redraw();
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.menu.leave();
+                window.request_redraw();
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let menu_state = self.app.menu();
+                if menu_state.enabled {
+                    let (_, command) = self.menu.mouse(
+                        state.is_pressed(),
+                        button == MouseButton::Left,
+                        menu::logical_width(window.inner_size(), window.scale_factor()),
+                        &menu_state,
+                        window.fullscreen().is_some(),
+                    );
+                    self.use_menu_command(&window, command);
                     if self.app.should_exit() {
                         event_loop.exit();
                     }
                 }
             }
             WindowEvent::Focused(false) => {
+                self.menu.close();
                 for event in self.keyboard.release_all() {
                     self.app.input(event);
                 }
             }
             WindowEvent::RedrawRequested => {
                 if let Some(renderer) = &mut self.renderer {
-                    if let Err(error) =
-                        renderer.draw(window, self.app.frame(), self.app.display_aspect())
-                    {
+                    let state = self.app.menu();
+                    let overlay = state.enabled.then(|| {
+                        self.menu.paint(
+                            window.inner_size(),
+                            window.scale_factor(),
+                            &state,
+                            window.fullscreen().is_some(),
+                        )
+                    });
+                    if let Err(error) = renderer.draw(
+                        &window,
+                        self.app.frame(),
+                        self.app.display_aspect(),
+                        overlay,
+                    ) {
                         self.fail(event_loop, error);
                     }
                 }

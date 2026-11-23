@@ -49,6 +49,10 @@ pub(crate) struct Keyboard {
 }
 
 impl Keyboard {
+    pub(crate) fn forget(&mut self, key: PhysicalKey) {
+        self.held.remove(&key);
+    }
+
     pub(crate) fn set_modifiers(&mut self, state: ModifiersState) {
         self.modifiers = Modifiers {
             shift: state.shift_key(),
