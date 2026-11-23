@@ -20,8 +20,9 @@ The first milestone is a GPU-rendered DOS prompt that can mount host content and
 | [14 · Windows integration and UI verification](docs/tasks/14-integration.md) | 10, 11, 12, 13 | Windows integration smoke passed |
 | [15 · Reusable launch settings and fullscreen](docs/tasks/15-launch-and-view.md) | 03, 10 | Initial profiles and fullscreen complete |
 | [16 · Compatibility roadmap](docs/tasks/16-compatibility-roadmap.md) | 05, 09 | Planned |
-| [17 · DOS batch files](docs/tasks/17-batch-files.md) | 04, 15 | Planned |
+| [17 · DOS batch files](docs/tasks/17-batch-files.md) | 04, 15 | Initial interpreter implemented |
 | [18 · VGA sixteen-color graphics](docs/tasks/18-video16.md) | 07 | In progress |
+| [19 · Remaining feature completion](docs/tasks/19-remaining-features.md) | 05, 06, 16 | In progress |
 
 See [architecture](docs/architecture.md) for the library boundaries and execution model.
 
