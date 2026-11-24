@@ -58,6 +58,13 @@ pub enum TextMode {
     WideRows50,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Scaling {
+    #[default]
+    Fit,
+    Integer,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MountKind {
     File,
@@ -81,6 +88,7 @@ pub enum MenuAction {
     SetVolume(Volume),
     SetMuted(bool),
     SetTextMode(TextMode),
+    SetScaling(Scaling),
     SetPaused(bool),
     Exit,
 }
@@ -95,6 +103,7 @@ pub struct MenuState {
     pub volume: Volume,
     pub muted: bool,
     pub text_mode: TextMode,
+    pub scaling: Scaling,
     pub running: bool,
     pub batch_active: bool,
     pub paused: bool,
@@ -112,6 +121,7 @@ impl Default for MenuState {
             volume: Volume::default(),
             muted: false,
             text_mode: TextMode::default(),
+            scaling: Scaling::default(),
             running: false,
             batch_active: false,
             paused: false,
@@ -595,6 +605,20 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
                         Command::App(MenuAction::SetTextMode(mode)),
                         !state.running,
                         mode == state.text_mode,
+                    )
+                }),
+            );
+            items.extend(
+                [
+                    ("Fit to window", Scaling::Fit),
+                    ("Integer scaling", Scaling::Integer),
+                ]
+                .map(|(label, scaling)| {
+                    item(
+                        label,
+                        Command::App(MenuAction::SetScaling(scaling)),
+                        true,
+                        state.scaling == scaling,
                     )
                 }),
             );

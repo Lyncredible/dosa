@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use dosa::display::Desktop;
 use dosa::shell::Shell;
 use dosa_desktop::{
-    App, Frame, Input, Key, MenuAction, MenuState, MountKind, PointerEvent, PointerMode,
+    App, Frame, Input, Key, MenuAction, MenuState, MountKind, PointerEvent, PointerMode, Scaling,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -88,6 +88,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
     let status = desktop.menu().status;
     assert_eq!(status, "Mounted C:", "desktop mount failed");
+    if std::env::var_os("DOSA_SMOKE_INTEGER_SCALING").is_some() {
+        desktop.menu_action(MenuAction::SetScaling(Scaling::Integer));
+        assert_eq!(desktop.menu().scaling, Scaling::Integer);
+    }
     desktop.input(key_event(Key::Character(' '), Some(program), true));
     desktop.input(key_event(Key::Enter, None, true));
     let result = Rc::new(Cell::new(None));

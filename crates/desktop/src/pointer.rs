@@ -117,7 +117,7 @@ impl Pointer {
     }
 }
 
-fn normalize(
+pub(super) fn normalize(
     position: PhysicalPosition<f64>,
     viewport: [f32; 4],
     confined: bool,
