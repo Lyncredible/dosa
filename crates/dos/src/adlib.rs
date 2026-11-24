@@ -1,0 +1,149 @@
+//! AdLib's YM3812 address/data ports and two polled hardware timers.
+
+use oplon::Opl2;
+
+use crate::audio::SAMPLE_RATE;
+
+pub(super) struct Adlib {
+    address: u8,
+    timers: [Timer; 2],
+    synth: Option<Opl2>,
+}
+
+impl Adlib {
+    pub fn new() -> Self {
+        Self {
+            address: 0,
+            timers: [Timer::new(80), Timer::new(320)],
+            synth: None,
+        }
+    }
+
+    pub fn read_port(&mut self, port: u16, now: u64) -> Option<u8> {
+        match port {
+            0x388 => {
+                for timer in &mut self.timers {
+                    timer.advance(now);
+                }
+                let flags = (u8::from(self.timers[0].overflow) << 6)
+                    | (u8::from(self.timers[1].overflow) << 5);
+                Some(0x06 | flags | (u8::from(flags != 0) << 7))
+            }
+            0x389 => Some(0xff),
+            _ => None,
+        }
+    }
+
+    pub fn write_port(&mut self, port: u16, value: u8, now: u64) -> bool {
+        match port {
+            0x388 => self.address = value,
+            0x389 => match self.address {
+                0x02 | 0x03 => {
+                    let timer = &mut self.timers[usize::from(self.address - 2)];
+                    timer.advance(now);
+                    timer.counter = value;
+                }
+                0x04 => {
+                    for (index, timer) in self.timers.iter_mut().enumerate() {
+                        timer.advance(now);
+                        if value & 0x80 != 0 {
+                            timer.overflow = false;
+                        } else {
+                            timer.set_control(
+                                now,
+                                value & (1 << index) != 0,
+                                value & (0x40 >> index) != 0,
+                            );
+                        }
+                    }
+                }
+                address => self
+                    .synth
+                    .get_or_insert_with(|| Opl2::new(SAMPLE_RATE as u32))
+                    .write_reg(address, value),
+            },
+            _ => return false,
+        }
+        true
+    }
+
+    pub fn sample(&mut self) -> f32 {
+        self.synth.as_mut().map_or(0.0, |synth| {
+            let (mono, _) = synth.render_frame();
+            mono as f32 / 32_768.0
+        })
+    }
+}
+
+struct Timer {
+    quantum: u64,
+    counter: u8,
+    deadline: Option<u64>,
+    masked: bool,
+    overflow: bool,
+}
+
+impl Timer {
+    fn new(quantum: u64) -> Self {
+        Self {
+            quantum,
+            counter: 0,
+            deadline: None,
+            masked: false,
+            overflow: false,
+        }
+    }
+
+    fn period(&self) -> u64 {
+        (256 - u64::from(self.counter)) * self.quantum
+    }
+
+    fn advance(&mut self, now: u64) {
+        if let Some(deadline) = self.deadline.filter(|&deadline| deadline <= now) {
+            self.overflow |= !self.masked;
+            let period = self.period();
+            self.deadline = Some(now.saturating_add(period - (now - deadline) % period));
+        }
+    }
+
+    fn set_control(&mut self, now: u64, started: bool, masked: bool) {
+        self.masked = masked;
+        if masked {
+            self.overflow = false;
+        }
+        if started {
+            let deadline = now.saturating_add(self.period());
+            self.deadline.get_or_insert(deadline);
+        } else {
+            self.deadline = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timers_latch_mask_reset_and_reload_independently() {
+        let mut adlib = Adlib::new();
+        let write = |adlib: &mut Adlib, register, value, now| {
+            assert!(adlib.write_port(0x388, register, now));
+            assert!(adlib.write_port(0x389, value, now));
+        };
+        write(&mut adlib, 2, 0xff, 0);
+        write(&mut adlib, 3, 0xff, 0);
+        write(&mut adlib, 4, 0x03, 0);
+        assert_eq!(adlib.read_port(0x388, 79), Some(0x06));
+        assert_eq!(adlib.read_port(0x388, 80), Some(0xc6));
+        write(&mut adlib, 4, 0x83, 100);
+        assert_eq!(adlib.read_port(0x388, 159), Some(0x06));
+        assert_eq!(adlib.read_port(0x388, 160), Some(0xc6));
+        write(&mut adlib, 4, 0x43, 170);
+        assert_eq!(adlib.read_port(0x388, 319), Some(0x06));
+        assert_eq!(adlib.read_port(0x388, 320), Some(0xa6));
+        write(&mut adlib, 4, 0x60, 321);
+        assert_eq!(adlib.read_port(0x388, 1000), Some(0x06));
+        assert_eq!(adlib.read_port(0x389, 1000), Some(0xff));
+    }
+}
