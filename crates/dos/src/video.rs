@@ -286,6 +286,7 @@ impl Adapter {
             cpu.write_u8(0x40, 0x84, if mode == 0x12 { 29 } else { 24 });
             cpu.write_u16(0x40, 0x85, if mode == 0x12 { 16 } else { 8 });
         }
+        self.update_cursor(cpu);
         true
     }
 
