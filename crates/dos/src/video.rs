@@ -74,7 +74,7 @@ impl TextGeometry {
     }
 
     const fn console_page_bytes(self) -> u16 {
-        if self.rows() == 25 {
+        if self.columns == 80 && self.rows() == 25 {
             0x1000
         } else {
             self.font_page_bytes()
