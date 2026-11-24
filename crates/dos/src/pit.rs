@@ -57,7 +57,7 @@ impl Pit {
                 index @ 0..=1 => self.counters[usize::from(index)].control(value, self.now),
                 3 => {
                     for (index, counter) in self.counters.iter_mut().enumerate() {
-                        if value & (2 << index) != 0 {
+                        if read_back_selects(value, index) {
                             counter.latch(value & 0x20 == 0, value & 0x10 == 0, self.now);
                         }
                     }
@@ -175,22 +175,7 @@ impl Counter {
                 }
             },
         };
-        self.divisor = if self.control & 1 == 0 {
-            if raw == 0 {
-                BIOS_DIVISOR
-            } else {
-                u64::from(raw)
-            }
-        } else {
-            let count = (0..4).rev().fold(0, |count, digit| {
-                count * 10 + u64::from((raw >> (digit * 4)) & 0xf)
-            });
-            if count % 10_000 == 0 {
-                10_000
-            } else {
-                count % 10_000
-            }
-        };
+        self.divisor = decode_count(raw, self.control & 1 != 0);
         // The board wires both gates high. Hardware-triggered modes require
         // a new rising gate edge and cannot start from a counter write.
         if !matches!(self.mode(), 1 | 5) {
@@ -250,7 +235,25 @@ impl Counter {
     }
 }
 
-fn encode_bcd(mut value: u64) -> u16 {
+pub(super) fn read_back_selects(control: u8, channel: usize) -> bool {
+    control & 0xc0 == 0xc0 && control & (2 << channel) != 0
+}
+
+pub(super) fn decode_count(raw: u16, bcd: bool) -> u64 {
+    if !bcd {
+        return if raw == 0 {
+            BIOS_DIVISOR
+        } else {
+            u64::from(raw)
+        };
+    }
+    let count = (0..4).rev().fold(0, |count, digit| {
+        count * 10 + u64::from((raw >> (digit * 4)) & 0xf)
+    }) % 10_000;
+    if count == 0 { 10_000 } else { count }
+}
+
+pub(super) fn encode_bcd(mut value: u64) -> u16 {
     let mut packed = 0;
     for digit in 0..4 {
         packed |= ((value % 10) as u16) << (digit * 4);
