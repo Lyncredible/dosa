@@ -28,7 +28,15 @@ D:
 DIR
 ~~~
 
-Mounts are read-only. Headless execution returns the program's DOS exit code. It reports an error if the guest needs keyboard input or reaches the instruction limit.
+Mounts are read-only by default. To let DOS programs save files, explicitly mount a host directory with `--mount-rw`.
+
+~~~console
+dosa --mount C=programs.zip --mount-rw D=dos-saves
+~~~
+
+Create the host directory before mounting it. The guest can create, write, truncate, rename, and delete files there, and can create and remove empty directories. New names must use DOS 8.3 syntax. Files and ZIP mounts are read-only.
+
+Headless execution returns the program's DOS exit code. It reports an error if the guest needs keyboard input or reaches the instruction limit.
 
 ### Batch files
 
@@ -65,7 +73,7 @@ dosa --profile profiles/demo.toml --headless
 dosa --profile profiles/demo.toml --cpu 286 --speed fast --text-rows 43
 ~~~
 
-Relative TOML mount paths resolve from the profile's directory. Relative `--mount` paths resolve from the working directory. `--mount` replaces a profile mount on the same drive and adds mounts on new drives. Explicit `--exec`, `--cpu`, `--speed`, `--text-rows`, and `--text-columns` override the corresponding saved values.
+Relative TOML mount paths resolve from the profile's directory. Relative CLI mount paths resolve from the working directory. Set `writable = true` on a directory's `[[mounts]]` entry to let the guest modify it. Either mount flag replaces a profile mount on the same drive, including its access mode. Explicit `--exec`, `--cpu`, `--speed`, `--text-rows`, and `--text-columns` override the corresponding saved values.
 
 CPU profiles are `8086`, `286`, and `386`. Text modes have 80 or 132 columns and 25, 43, or 50 rows. Desktop execution speeds are `slow`, `normal`, `fast`, and `maximum` (`max` also works). Headless mode uses the same mounts, CPU, text rows, and command with its fixed instruction limit. Its command can come from `--exec` or the profile's `exec` field.
 

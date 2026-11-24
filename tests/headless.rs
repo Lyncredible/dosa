@@ -367,3 +367,188 @@ fn headless_hlt_can_wait_for_default_timer_without_spinning() {
         }
     }
 }
+
+#[test]
+fn guest_writable_mount_persists_file_and_directory_operations() {
+    const SAVE_DIR: u16 = 0x300;
+    const FIRST: u16 = 0x310;
+    const FINAL: u16 = 0x330;
+    const DATA: u16 = 0x350;
+    const EMPTY: u16 = 0x360;
+    const AUXILIARY: u16 = 0x370;
+    const BUFFER: u16 = 0x390;
+
+    fn mov(program: &mut Vec<u8>, opcode: u8, value: u16) {
+        program.push(opcode);
+        program.extend(value.to_le_bytes());
+    }
+
+    fn dos(program: &mut Vec<u8>, ax: u16) {
+        mov(program, 0xb8, ax);
+        // On carry, exit immediately with AL set to the DOS error code.
+        program.extend([0xcd, 0x21, 0x73, 4, 0xb4, 0x4c, 0xcd, 0x21]);
+    }
+
+    fn place(program: &mut Vec<u8>, address: u16, bytes: &[u8]) {
+        assert!(program.len() <= usize::from(address - 0x100));
+        program.resize(usize::from(address - 0x100), 0);
+        program.extend(bytes);
+    }
+
+    let dir = Fixture::new();
+    let profile = dir.0.join("saved.toml");
+    let cli = dir.0.join("cli");
+    let from_profile = dir.0.join("profile");
+    fs::create_dir(&cli).unwrap();
+    fs::create_dir(&from_profile).unwrap();
+    fs::write(
+        &profile,
+        "exec = 'writer'\n[[mounts]]\ndrive = 'C'\npath = 'profile'\nwritable = true\n",
+    )
+    .unwrap();
+
+    let mut writer = Vec::new();
+    mov(&mut writer, 0xba, SAVE_DIR);
+    dos(&mut writer, 0x3900);
+    mov(&mut writer, 0xba, FIRST);
+    mov(&mut writer, 0xb9, 0);
+    dos(&mut writer, 0x3c00);
+    writer.push(0x93); // XCHG AX,BX, retaining the handle.
+    mov(&mut writer, 0xba, DATA);
+    mov(&mut writer, 0xb9, 5);
+    dos(&mut writer, 0x4000);
+    mov(&mut writer, 0xba, 2);
+    mov(&mut writer, 0xb9, 0);
+    dos(&mut writer, 0x4200);
+    dos(&mut writer, 0x4000); // Zero-length write truncates to the offset.
+    mov(&mut writer, 0xba, 4);
+    dos(&mut writer, 0x4200);
+    mov(&mut writer, 0xba, DATA + 5);
+    mov(&mut writer, 0xb9, 1);
+    dos(&mut writer, 0x4000); // A hole is filled with zeros.
+    dos(&mut writer, 0x6800);
+    dos(&mut writer, 0x3e00);
+
+    mov(&mut writer, 0xba, FIRST);
+    mov(&mut writer, 0xbf, FINAL); // ES:DI is the rename destination.
+    dos(&mut writer, 0x5600);
+    mov(&mut writer, 0xba, FINAL);
+    dos(&mut writer, 0x3d02);
+    writer.push(0x93);
+    mov(&mut writer, 0xba, BUFFER);
+    mov(&mut writer, 0xb9, 5);
+    dos(&mut writer, 0x3f00);
+    dos(&mut writer, 0x3e00);
+    mov(&mut writer, 0xbb, 1);
+    dos(&mut writer, 0x4000); // Report the reopened contents on stdout.
+
+    mov(&mut writer, 0xba, AUXILIARY);
+    mov(&mut writer, 0xb9, 0);
+    dos(&mut writer, 0x3c00);
+    writer.push(0x93);
+    dos(&mut writer, 0x3e00);
+    dos(&mut writer, 0x4100);
+    mov(&mut writer, 0xba, EMPTY);
+    dos(&mut writer, 0x3900);
+    dos(&mut writer, 0x3a00);
+    dos(&mut writer, 0x4c00);
+
+    place(&mut writer, SAVE_DIR, b"SAVE\0");
+    place(&mut writer, FIRST, b"SAVE\\RUN.DAT\0");
+    place(&mut writer, FINAL, b"SAVE\\FINAL.DAT\0");
+    place(&mut writer, DATA, b"abcdez");
+    place(&mut writer, EMPTY, b"EMPTY\0");
+    place(&mut writer, AUXILIARY, b"SAVE\\TMP.DAT\0");
+    for mount in [&cli, &from_profile] {
+        fs::write(mount.join("WRITER.COM"), &writer).unwrap();
+    }
+
+    let binary = env!("CARGO_BIN_EXE_dosa");
+    let profile_refused = Command::new(binary)
+        .arg("--profile")
+        .arg(&profile)
+        .arg("--mount")
+        .arg(format!("C={}", from_profile.display()))
+        .arg("--headless")
+        .output()
+        .unwrap();
+    assert_eq!(
+        profile_refused.status.code(),
+        Some(5),
+        "{profile_refused:?}"
+    );
+    assert!(!from_profile.join("SAVE").exists());
+
+    let cli_output = Command::new(binary)
+        .arg("--mount-rw")
+        .arg(format!("C={}", cli.display()))
+        .args(["--headless", "--exec", "writer"])
+        .output()
+        .unwrap();
+    let profile_output = Command::new(binary)
+        .arg("--profile")
+        .arg(&profile)
+        .arg("--headless")
+        .output()
+        .unwrap();
+
+    for (mount, output) in [(&cli, cli_output), (&from_profile, profile_output)] {
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"ab\0\0z");
+        assert_eq!(fs::read(mount.join("SAVE/FINAL.DAT")).unwrap(), b"ab\0\0z");
+        assert!(!mount.join("SAVE/RUN.DAT").exists());
+        assert!(!mount.join("SAVE/TMP.DAT").exists());
+        assert!(!mount.join("EMPTY").exists());
+
+        let reopened = Command::new(binary)
+            .arg("--mount")
+            .arg(format!("C={}", mount.display()))
+            .args(["--headless", "--exec", r"type SAVE\FINAL.DAT"])
+            .output()
+            .unwrap();
+        assert!(reopened.status.success(), "{reopened:?}");
+        assert_eq!(reopened.stdout, b"ab\0\0z");
+    }
+
+    let rejected_file = Command::new(binary)
+        .arg("--mount-rw")
+        .arg(format!("C={}", cli.join("WRITER.COM").display()))
+        .args(["--headless", "--exec", "writer"])
+        .output()
+        .unwrap();
+    assert_eq!(rejected_file.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&rejected_file.stderr).contains("cannot mount"));
+}
+
+#[test]
+fn guest_truncate_and_write_do_not_change_an_outside_hard_link() {
+    let dir = Fixture::new();
+    let mounted = dir.0.join("mounted");
+    let outside = dir.0.join("outside.dat");
+    fs::create_dir(&mounted).unwrap();
+    fs::write(&outside, b"remain outside").unwrap();
+    fs::hard_link(&outside, mounted.join("LINK.DAT")).unwrap();
+
+    let mut writer = vec![
+        0xba, 0x30, 0x01, 0xb9, 0, 0, 0xb8, 0, 0x3c, 0xcd, 0x21, // Create/truncate.
+        0x73, 4, 0xb4, 0x4c, 0xcd, 0x21, // Exit with DOS error in AL on carry.
+        0x93, 0xba, 0x40, 0x01, 0xb9, 6, 0, 0xb8, 0, 0x40, 0xcd, 0x21, // Write data.
+        0x73, 4, 0xb4, 0x4c, 0xcd, 0x21, // Exit on carry.
+        0xb8, 0, 0x4c, 0xcd, 0x21,
+    ];
+    writer.resize(0x30, 0);
+    writer.extend(b"LINK.DAT\0");
+    writer.resize(0x40, 0);
+    writer.extend(b"inside");
+    fs::write(mounted.join("LINKTEST.COM"), writer).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .arg("--mount-rw")
+        .arg(format!("C={}", mounted.display()))
+        .args(["--headless", "--exec", "linktest"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read(mounted.join("LINK.DAT")).unwrap(), b"inside");
+    assert_eq!(fs::read(outside).unwrap(), b"remain outside");
+}

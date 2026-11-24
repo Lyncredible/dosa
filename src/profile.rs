@@ -8,9 +8,15 @@ use serde::Deserialize;
 
 #[derive(Default)]
 pub struct LaunchProfile {
-    pub mounts: Vec<(char, PathBuf)>,
+    pub mounts: Vec<StartupMount>,
     pub command: Option<String>,
     pub settings: Settings,
+}
+
+pub struct StartupMount {
+    pub drive: char,
+    pub path: PathBuf,
+    pub writable: bool,
 }
 
 #[derive(Default)]
@@ -68,6 +74,8 @@ enum CpuValue {
 struct MountEntry {
     drive: String,
     path: PathBuf,
+    #[serde(default)]
+    writable: bool,
 }
 
 impl LaunchProfile {
@@ -104,7 +112,7 @@ impl LaunchProfile {
         .apply(Settings::default());
 
         let base = path.parent().unwrap_or_else(|| Path::new("."));
-        let mut mounts = Vec::new();
+        let mut mounts: Vec<StartupMount> = Vec::new();
         for entry in profile.mounts {
             let [drive] = entry.drive.as_bytes() else {
                 return Err(
@@ -117,7 +125,7 @@ impl LaunchProfile {
                 );
             }
             let drive = char::from(drive.to_ascii_uppercase());
-            if mounts.iter().any(|(existing, _)| *existing == drive) {
+            if mounts.iter().any(|existing| existing.drive == drive) {
                 return Err(format!("mount drive {drive} appears more than once").into());
             }
             if entry.path.as_os_str().is_empty() {
@@ -137,7 +145,11 @@ impl LaunchProfile {
                 }
                 base.join(entry.path)
             };
-            mounts.push((drive, path));
+            mounts.push(StartupMount {
+                drive,
+                path,
+                writable: entry.writable,
+            });
         }
         Ok(Self {
             mounts,
@@ -146,14 +158,14 @@ impl LaunchProfile {
         })
     }
 
-    pub fn apply_mount_overrides(&mut self, cli_mounts: Vec<(char, PathBuf)>) {
+    pub fn apply_mount_overrides(&mut self, cli_mounts: Vec<StartupMount>) {
         let profile_count = self.mounts.len();
         for mount in cli_mounts {
             // Preserve the first drive selected by the profile and the native
             // ordering of CLI mounts that add new drives.
             if let Some(existing) = self.mounts[..profile_count]
                 .iter_mut()
-                .find(|(drive, _)| *drive == mount.0)
+                .find(|existing| existing.drive == mount.drive)
             {
                 *existing = mount;
             } else {

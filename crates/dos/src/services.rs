@@ -1,6 +1,4 @@
-use crate::{
-    CONVENTIONAL_END, DosError, Machine, PSP, Pending, PendingCall, RunState, ZERO, files,
-};
+use crate::{CONVENTIONAL_END, DosError, Machine, PSP, Pending, PendingCall, RunState, ZERO};
 use dosa_mount::Entry;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -254,27 +252,28 @@ impl Machine {
                 }
             }
             0x38 => self.failure(1),
-            0x39 | 0x3a | 0x3c | 0x41 | 0x56 | 0x5a | 0x5b => self.failure(5),
-            0x3b => {
-                let result = self
-                    .path(ds, dx)
-                    .and_then(|path| self.files.chdir(&self.mounts, &path));
+            0x39..=0x3b => {
+                let result = self.path(ds, dx).and_then(|path| match ah {
+                    0x39 => self.files.mkdir(&self.mounts, &path),
+                    0x3a => self.files.rmdir(&self.mounts, &path),
+                    _ => self.files.chdir(&self.mounts, &path),
+                });
                 self.result(result);
             }
-            0x3d => {
-                if al & 3 != 0 {
-                    self.failure(5);
-                } else {
-                    let result = self
-                        .path(ds, dx)
-                        .and_then(|path| self.files.open(&self.mounts, &path));
-                    match result {
-                        Ok(handle) => {
-                            self.cpu.regs.ax = handle;
-                            self.success();
-                        }
-                        Err(code) => self.failure(code),
+            0x3c | 0x3d => {
+                let result = self.path(ds, dx).and_then(|path| {
+                    if ah == 0x3c {
+                        self.files.create(&self.mounts, &path)
+                    } else {
+                        self.files.open(&self.mounts, &path, al)
                     }
+                });
+                match result {
+                    Ok(handle) => {
+                        self.cpu.regs.ax = handle;
+                        self.success();
+                    }
+                    Err(code) => self.failure(code),
                 }
             }
             0x3e => {
@@ -288,21 +287,38 @@ impl Machine {
             }
             0x3f => match self.files.read(bx, usize::from(cx)) {
                 Ok(bytes) => {
-                    self.cpu.load(ds, dx, bytes);
+                    self.cpu.load(ds, dx, &bytes);
                     self.cpu.regs.ax = bytes.len() as u16;
                     self.success();
                 }
                 Err(code) => self.failure(code),
             },
-            0x40 if bx == 1 || bx == 2 => {
+            0x40 => {
+                let console = matches!(bx, 1 | 2);
+                if !console && let Err(code) = self.files.check_write_handle(bx) {
+                    self.failure(code);
+                    return;
+                }
                 let bytes: Vec<_> = (0..cx)
                     .map(|i| self.cpu.read_u8(ds, dx.wrapping_add(i)))
                     .collect();
-                self.emit(&bytes);
-                self.cpu.regs.ax = cx;
-                self.success();
+                let result = if console {
+                    self.emit(&bytes);
+                    Ok(())
+                } else {
+                    self.files.write(bx, &bytes)
+                };
+                if result.is_ok() {
+                    self.cpu.regs.ax = cx;
+                }
+                self.result(result);
             }
-            0x40 => self.failure(if self.files.is_open(bx) { 5 } else { 6 }),
+            0x41 => {
+                let result = self
+                    .path(ds, dx)
+                    .and_then(|path| self.files.delete(&self.mounts, &path));
+                self.result(result);
+            }
             0x42 => {
                 let offset = ((u32::from(cx) << 16) | u32::from(dx)) as i32;
                 match self.files.seek(bx, al, offset) {
@@ -382,11 +398,22 @@ impl Machine {
                 self.find_result(entry);
             }
             0x51 | 0x62 => self.cpu.regs.bx = PSP,
+            0x56 => {
+                let result = self.path(ds, dx).and_then(|from| {
+                    self.path(self.cpu.regs.es, self.cpu.regs.di)
+                        .and_then(|to| self.files.rename(&self.mounts, &from, &to))
+                });
+                self.result(result);
+            }
             0x57 if al == 0 && self.files.is_open(bx) => {
                 self.cpu.regs.cx = 0;
                 self.cpu.regs.dx = 0x0021;
                 self.success();
             }
+            0x5a | 0x5b => self.failure(5),
+            // File writes are committed before returning from AH=40h.
+            0x68 if self.files.is_open(bx) => self.success(),
+            0x68 => self.failure(6),
             _ => self.failure(1),
         }
     }
@@ -417,15 +444,12 @@ impl Machine {
         String::from_utf8(bytes).map_err(|_| 3)
     }
 
-    fn find_result(&mut self, result: Result<Entry, u16>) {
+    fn find_result(&mut self, result: Result<(Entry, u8), u16>) {
         match result {
-            Ok(entry) => {
+            Ok((entry, attributes)) => {
                 let (segment, offset) = self.dta;
-                self.cpu.write_u8(
-                    segment,
-                    offset.wrapping_add(0x15),
-                    files::attributes(&entry),
-                );
+                self.cpu
+                    .write_u8(segment, offset.wrapping_add(0x15), attributes);
                 self.cpu.write_u16(segment, offset.wrapping_add(0x16), 0);
                 self.cpu
                     .write_u16(segment, offset.wrapping_add(0x18), 0x0021);

@@ -39,6 +39,13 @@ pub struct WritableFile {
 }
 
 impl WritableFile {
+    /// Whether two handles opened through the same mount address the same file.
+    pub fn same_target(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.root, &other.root)
+            && self.parents == other.parents
+            && self.name == other.name
+    }
+
     /// Read the current contents using the drive's normal file size limit.
     pub fn read(&self) -> Result<Vec<u8>> {
         let _guard = lock(&self.transaction)?;

@@ -73,6 +73,7 @@ impl Shell {
                 CD [path]    Show or change directory\r\n\
                 TYPE file    Print a file\r\n\
                 MOUNT C path Mount a host file, folder or ZIP\r\n\
+                Start dosa with --mount-rw C=path for a writable directory.\r\n\
                 C:           Switch drives\r\n\
                 CLS          Clear the screen\r\n\
                 EXIT         Close dosa\r\n\
