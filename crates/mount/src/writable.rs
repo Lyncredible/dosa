@@ -1,11 +1,11 @@
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
-use cap_std::fs::{Dir, Metadata, OpenOptions};
+use cap_std::fs::{Dir, File, Metadata, OpenOptions};
 
 use super::{
     Entry, MAX_FILE_BYTES, Mount, MountError, Result, Source, host_children, lock, read_bounded,
@@ -36,6 +36,7 @@ pub struct WritableFile {
     parents: Vec<String>,
     name: String,
     transaction: Arc<Mutex<()>>,
+    writable: bool,
 }
 
 impl WritableFile {
@@ -49,6 +50,30 @@ impl WritableFile {
     /// Read the current contents using the drive's normal file size limit.
     pub fn read(&self) -> Result<Vec<u8>> {
         let _guard = lock(&self.transaction)?;
+        let (file, length) = self.open_reader()?;
+        read_bounded(file, length)
+    }
+
+    /// Read at most the requested bytes without buffering the rest of the file.
+    pub fn read_at(&self, position: u64, length: usize) -> Result<Vec<u8>> {
+        let _guard = lock(&self.transaction)?;
+        let (mut file, size) = self.open_reader()?;
+        let limit = size.saturating_sub(position).min(length as u64);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        file.seek(SeekFrom::Start(position))?;
+        let mut bytes = Vec::new();
+        file.take(limit).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn length(&self) -> Result<u64> {
+        let _guard = lock(&self.transaction)?;
+        self.open_reader().map(|(_, length)| length)
+    }
+
+    fn open_reader(&self) -> Result<(File, u64)> {
         let parent = self.open_parent()?;
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
@@ -57,11 +82,17 @@ impl WritableFile {
         if !metadata.is_file() {
             return Err(MountError::UnsupportedSource);
         }
-        read_bounded(file, metadata.len())
+        if metadata.len() > MAX_FILE_BYTES {
+            return Err(MountError::FileTooLarge);
+        }
+        Ok((file, metadata.len()))
     }
 
     /// Atomically replace the file's contents inside its host directory.
     pub fn replace(&self, bytes: &[u8]) -> Result<()> {
+        if !self.writable {
+            return Err(MountError::ReadOnly);
+        }
         let _guard = lock(&self.transaction)?;
         let parent = self.open_parent()?;
         self.replace_locked(&parent, bytes)
@@ -119,6 +150,23 @@ impl WritableFile {
 }
 
 impl Mount {
+    /// Open a live read-only handle in a directory with explicitly enabled writes.
+    pub fn open_readable_file(&self, path: &str) -> Result<WritableFile> {
+        let directory = self.writable()?;
+        let _guard = lock(&directory.transaction)?;
+        let target = resolve_target(&directory.root, path)?;
+        let name = target.file_name(path)?;
+        let file = WritableFile {
+            root: Arc::clone(&directory.root),
+            parents: target.parents,
+            name,
+            transaction: Arc::clone(&directory.transaction),
+            writable: false,
+        };
+        file.open_reader()?;
+        Ok(file)
+    }
+
     /// Open a host directory with permission to create, replace, and remove guest files.
     pub fn open_writable_directory(path: impl AsRef<Path>) -> Result<Self> {
         let root = Dir::open_ambient_dir(path, ambient_authority())?;
@@ -157,6 +205,7 @@ impl Mount {
             parents: target.parents,
             name,
             transaction: Arc::clone(&writable.transaction),
+            writable: true,
         };
         if exists {
             if create {

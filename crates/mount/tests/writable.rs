@@ -15,6 +15,10 @@ fn writable_directory_persists_replacements_and_directory_mutations() {
         .unwrap();
     file.replace(b"first save").unwrap();
     assert_eq!(file.read().unwrap(), b"first save");
+    assert_eq!(file.length().unwrap(), 10);
+    assert_eq!(file.read_at(6, 4).unwrap(), b"save");
+    assert_eq!(file.read_at(8, 10).unwrap(), b"ve");
+    assert!(file.read_at(100, 10).unwrap().is_empty());
     assert_eq!(mount.read("SAVED/LEVEL.SAV").unwrap(), b"first save");
     assert!(mount.remove_dir("SAVED").is_err());
 
@@ -62,6 +66,28 @@ fn default_mount_cannot_mutate_even_when_host_area_is_writable() {
     ));
     assert_eq!(fs::read(root.join("KEEP.DAT")).unwrap(), b"original");
     assert!(Mount::open_writable_directory(root.join("KEEP.DAT")).is_err());
+}
+
+#[test]
+fn live_read_handle_accepts_readonly_host_file_but_rejects_replacement() {
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("READONLY.DAT");
+    fs::write(&path, b"readable").unwrap();
+    let original_permissions = fs::metadata(&path).unwrap().permissions();
+    let mut permissions = original_permissions.clone();
+    permissions.set_readonly(true);
+    fs::set_permissions(&path, permissions).unwrap();
+    let mount = Mount::open_writable_directory(scratch.path()).unwrap();
+    let handle = mount.open_readable_file("READONLY.DAT").unwrap();
+    assert_eq!(handle.read_at(0, 8).unwrap(), b"readable");
+    assert!(matches!(
+        handle.replace(b"changed"),
+        Err(MountError::ReadOnly)
+    ));
+    assert_eq!(fs::read(&path).unwrap(), b"readable");
+    drop(handle);
+    drop(mount);
+    fs::set_permissions(&path, original_permissions).unwrap();
 }
 
 #[test]
