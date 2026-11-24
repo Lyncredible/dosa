@@ -18,7 +18,7 @@ mod pointer;
 mod renderer;
 
 pub use input::{Input, Key, Modifiers};
-pub use menu::{CpuMode, MenuAction, MenuState, MountKind, Speed, TextMode};
+pub use menu::{CpuMode, MenuAction, MenuState, MountKind, Speed, TextMode, Volume};
 pub use pointer::{PointerEvent, PointerMode};
 use renderer::Renderer;
 
@@ -392,7 +392,7 @@ impl<A: App> ApplicationHandler for Desktop<A> {
                 if menu.enabled && (menu.paused || !menu.running) {
                     audio.clear();
                 } else {
-                    audio.push(samples);
+                    audio.push(samples, menu.audio_gain());
                 }
             }
             self.sync_pointer(&window, false);

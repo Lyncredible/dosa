@@ -39,6 +39,15 @@ pub enum Speed {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Volume {
+    Quiet = 25,
+    Half = 50,
+    Loud = 75,
+    #[default]
+    Full = 100,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TextMode {
     #[default]
     Rows25,
@@ -69,6 +78,8 @@ pub enum MenuAction {
     SetCpu(CpuMode),
     Unmount(char),
     SetSpeed(Speed),
+    SetVolume(Volume),
+    SetMuted(bool),
     SetTextMode(TextMode),
     SetPaused(bool),
     Exit,
@@ -81,6 +92,8 @@ pub struct MenuState {
     pub drives: std::collections::BTreeMap<char, &'static str>,
     pub cpu: CpuMode,
     pub speed: Speed,
+    pub volume: Volume,
+    pub muted: bool,
     pub text_mode: TextMode,
     pub running: bool,
     pub batch_active: bool,
@@ -96,11 +109,23 @@ impl Default for MenuState {
             drives: Default::default(),
             cpu: CpuMode::default(),
             speed: Speed::default(),
+            volume: Volume::default(),
+            muted: false,
             text_mode: TextMode::default(),
             running: false,
             batch_active: false,
             paused: false,
             status: String::new(),
+        }
+    }
+}
+
+impl MenuState {
+    pub(crate) fn audio_gain(&self) -> f32 {
+        if self.muted {
+            0.0
+        } else {
+            f32::from(self.volume as u8) / 100.0
         }
     }
 }
@@ -111,13 +136,15 @@ enum Tab {
     Cpu,
     Speed,
     View,
+    Audio,
 }
 
-const TABS: [(Tab, &str, u32, u32); 4] = [
+const TABS: [(Tab, &str, u32, u32); 5] = [
     (Tab::Drives, "Drives", 7, 68),
     (Tab::Cpu, "CPU", 78, 50),
     (Tab::Speed, "Speed", 131, 62),
     (Tab::View, "View", 196, 53),
+    (Tab::Audio, "Audio", 252, 62),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -255,6 +282,7 @@ impl Menu {
                 Some('c') => Some(Tab::Cpu),
                 Some('s') => Some(Tab::Speed),
                 Some('v') => Some(Tab::View),
+                Some('a') => Some(Tab::Audio),
                 _ => None,
             };
             if let Some(tab) = tab {
@@ -359,15 +387,16 @@ impl Menu {
             }
             canvas.text(rect.x + 7, 11, label, TEXT);
         }
-        if width >= 380 {
-            canvas.text(width - 113, 11, "Alt+D/C/S/V", MUTED);
+        if width >= 450 {
+            canvas.text(width - 131, 11, "Alt+D/C/S/V/A", MUTED);
         }
         let settings = format!(
-            "{}: | {} | {}{}",
+            "{}: | {} | {}{}{}",
             state.active_drive,
             cpu_label(state.cpu),
             speed_label(state.speed),
-            if state.paused { " | Paused" } else { "" }
+            if state.paused { " | Paused" } else { "" },
+            if state.muted { " | Muted" } else { "" },
         );
         canvas.text(12, 36, &settings, MUTED);
         if !state.status.is_empty() {
@@ -527,6 +556,29 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
                 )
             })
             .collect(),
+        Tab::Audio => std::iter::once(item(
+            if state.muted { "Unmute" } else { "Mute" },
+            Command::App(MenuAction::SetMuted(!state.muted)),
+            true,
+            state.muted,
+        ))
+        .chain(
+            [
+                ("Volume 25%", Volume::Quiet),
+                ("Volume 50%", Volume::Half),
+                ("Volume 75%", Volume::Loud),
+                ("Volume 100%", Volume::Full),
+            ]
+            .map(|(label, volume)| {
+                item(
+                    label,
+                    Command::App(MenuAction::SetVolume(volume)),
+                    true,
+                    volume == state.volume,
+                )
+            }),
+        )
+        .collect(),
         Tab::View => {
             let mut items = Vec::from(
                 [
@@ -726,6 +778,33 @@ mod tests {
             options(Tab::Drives, &state, 'D', false)
                 .iter()
                 .all(|item| !item.enabled)
+        );
+    }
+
+    #[test]
+    fn audio_menu_remains_available_to_a_running_guest() {
+        let mut menu = Menu::default();
+        let mut state = MenuState {
+            running: true,
+            volume: Volume::Half,
+            ..Default::default()
+        };
+        menu.key(&input(Key::Character('a'), true), Some('a'), &state, false);
+        assert_eq!(
+            menu.key(&input(Key::Enter, false), None, &state, false),
+            (true, Some(Command::App(MenuAction::SetMuted(true))))
+        );
+        assert_eq!(state.audio_gain(), 0.5);
+        state.muted = true;
+        assert_eq!(state.audio_gain(), 0.0);
+        menu.open(Tab::Audio, &state);
+        menu.key(&input(Key::Down, false), None, &state, false);
+        assert_eq!(
+            menu.key(&input(Key::Enter, false), None, &state, false),
+            (
+                true,
+                Some(Command::App(MenuAction::SetVolume(Volume::Quiet)))
+            )
         );
     }
 

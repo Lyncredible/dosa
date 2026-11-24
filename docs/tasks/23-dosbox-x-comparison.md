@@ -8,7 +8,7 @@ Dosa already has drive mounting, CPU and speed menus, TOML launch profiles, full
 | --- | --- |
 | Drive information and unmount | Implemented. The Drives menu shows source type and access mode and allows unmounting while idle. Regressions verify keyboard selection, batch locking, prompt fallback, and remounting. |
 | Quick launch | Implemented. Pick a COM, EXE, or BAT from Drives. Its folder is temporarily mounted read-only on an unused drive. Tests cover sibling resources, nested batch calls, guest errors, and prompt restoration. Native picker interaction remains in [task 14](14-integration.md). |
-| Sound controls | Add master mute and volume. Verify output gain and continued guest audio timing while muted. Add per-device levels after that signal path is covered. |
+| Sound controls | Master mute and volume implemented through the Audio menu. Callback tests verify gain changes on queued audio and that mute keeps the sample queue advancing. Per-device levels remain planned. |
 | Text clipboard | Copy the visible DOS text screen with CP437 decoding. Add explicit paste through the DOS input queue, with tests for line endings, queue limits, and guest input timing. |
 | Display scaling | Add integer scaling alongside the current aspect-corrected fit. Verify rendering and mouse coordinates at high DPI and on a window smaller than the guest frame. |
 
