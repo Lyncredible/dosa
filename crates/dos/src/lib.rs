@@ -8,6 +8,7 @@ mod files;
 mod keyboard;
 mod loader;
 mod mouse;
+mod mscdex;
 mod pic;
 mod pit;
 mod services;

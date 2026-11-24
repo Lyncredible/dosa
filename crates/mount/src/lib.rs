@@ -2,6 +2,7 @@
 
 mod fat_image;
 mod iso_image;
+pub use iso_image::ISO_SECTOR_BYTES;
 mod names;
 mod writable;
 mod zip_mount;
@@ -106,6 +107,22 @@ pub struct Mount {
 }
 
 impl Mount {
+    /// Return the declared data-sector count for an optical image mount.
+    pub fn iso_sector_count(&self) -> Option<u32> {
+        match &self.source {
+            Source::IsoImage(image) => Some(image.sector_count()),
+            _ => None,
+        }
+    }
+
+    /// Read cooked 2,048-byte sectors from an optical image.
+    pub fn read_iso_sectors(&self, first: u32, bytes: &mut [u8]) -> Result<()> {
+        match &self.source {
+            Source::IsoImage(image) => image.read_sectors(first, bytes),
+            _ => Err(MountError::UnsupportedSource),
+        }
+    }
+
     /// Describe the mount source and guest access mode.
     pub fn description(&self) -> &'static str {
         match &self.source {
