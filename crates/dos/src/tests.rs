@@ -140,9 +140,9 @@ fn guest_timer_runs_repeatedly_with_programmed_pit_period() {
     machine.step().unwrap();
     assert_eq!(machine.cpu.read_u8(segment, 0x180), 0);
 
-    machine.pit.advance(16);
+    machine.pit.advance(17);
     machine.step().unwrap();
-    machine.pit.advance(32);
+    machine.pit.advance(33);
     for _ in 0..20 {
         machine.step().unwrap();
     }

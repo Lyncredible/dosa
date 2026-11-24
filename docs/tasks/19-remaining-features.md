@@ -7,7 +7,7 @@ Complete the remaining roadmap and verification requirements with focused implem
 | BIOS IRQ completion | Interrupt shadows, halted-guest wake, callable default timer and keyboard handlers, chained guest ISRs and INT 1Ch tests |
 | Wider text | 132-column modes with memory stride, BDA, cursor, scrolling, menu selection and resized-window verification |
 | Guest screenshot capture | Explicit host save action, correct indexed palette conversion, saved PNG dimensions and pixel checks |
-| PIT and speaker | Channel 0 mode timing, channels 1/2, port 61h gating, synthetic tone samples and native audio playback |
+| PIT and speaker | IRQ0 periodic and one-shot timing, channel 1 refresh, channel 0/1 BCD and read-back, speaker gate and native audio implemented. See [task 20](20-pc-speaker.md) for channel 2 and reload compatibility work. |
 | Writable storage | Explicit writable mount or overlay, create/write/truncate/rename/delete/directories, persistence and confinement tests |
 | Disk media | Read-only FAT volume mounts accept `--mount-fat` or a profile flag. A generated FAT12 fixture verifies geometry, short and long names, DOS CLI access and unchanged image bytes. Partitioned images, ISO/MSCDEX and boot are tracked separately. |
 | AdLib | OPL2 address/data ports and polled timers implemented. A generated COM program exercises FM synthesis and the 48 kHz PC speaker mixer. See [task 21](21-adlib.md). |

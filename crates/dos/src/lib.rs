@@ -483,7 +483,7 @@ impl Machine {
                 for byte in 0..width {
                     let port = port.wrapping_add(u16::from(byte));
                     let requests = self.irq_requests();
-                    let part = self
+                    let mut part = self
                         .pic
                         .port_read(port, requests)
                         .or_else(|| self.audio.read_port(port, elapsed))
@@ -491,6 +491,9 @@ impl Machine {
                         .or_else(|| self.keyboard.port_read(port))
                         .or_else(|| self.video.port_read(port))
                         .unwrap_or(0xff);
+                    if port == 0x61 {
+                        part = (part & !0x10) | (u8::from(self.pit.refresh_toggle()) << 4);
+                    }
                     value |= u32::from(part) << (u32::from(byte) * 8);
                 }
                 self.cpu.complete_port_read(width, value);
