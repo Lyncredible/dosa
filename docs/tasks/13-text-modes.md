@@ -2,7 +2,7 @@
 
 Host console presets now include 80 and 132 columns with 25, 43, or 50 rows. The View menu, launch profiles and CLI select the geometry. Tests verify BIOS stride, wrapping, scrolling, cursor bounds, framebuffer dimensions and independent row/column overrides.
 
-First support 80×25, 80×43, and 80×50 through the shared DOS video adapter. Size text cells, cursor positioning, scroll bounds, BIOS Data Area fields, video memory reads and writes, and frontend rendering from the selected mode. Track 132-column modes after verifying additional memory use and common BIOS assumptions.
+Support 80- and 132-column text with 25, 43, and 50 rows through the shared DOS video adapter. Size text cells, cursor positioning, scroll bounds, BIOS Data Area fields, video memory reads and writes, and frontend rendering from the selected mode.
 
 - Exercise console output, cursor movement, wrapping, and scrolling at rows 43 and 50.
 - Verify guest-visible geometry and the last row of B800 text memory, for both the shell and a real-mode program.
