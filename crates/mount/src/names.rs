@@ -86,7 +86,7 @@ pub(crate) fn assign_aliases<T>(children: &mut [Child<T>]) {
     children.sort_unstable_by(|a, b| a.entry.name.cmp(&b.entry.name));
 }
 
-fn canonical_name(original: &str) -> Option<String> {
+pub(crate) fn canonical_name(original: &str) -> Option<String> {
     let (stem, extension) = split_name(original);
     if stem.is_empty()
         || stem.len() > 8
