@@ -18,6 +18,7 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 pub(super) struct WritableDirectory {
     pub(super) root: Arc<Dir>,
     transaction: Arc<Mutex<()>>,
+    session: Option<Arc<tempfile::TempDir>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,6 +38,7 @@ pub struct WritableFile {
     name: String,
     transaction: Arc<Mutex<()>>,
     writable: bool,
+    _session: Option<Arc<tempfile::TempDir>>,
 }
 
 impl WritableFile {
@@ -162,6 +164,7 @@ impl Mount {
             name,
             transaction: Arc::clone(&directory.transaction),
             writable: false,
+            _session: directory.session.clone(),
         };
         file.open_reader()?;
         Ok(file)
@@ -170,12 +173,28 @@ impl Mount {
     /// Open a host directory with permission to create, replace, and remove guest files.
     pub fn open_writable_directory(path: impl AsRef<Path>) -> Result<Self> {
         let root = Dir::open_ambient_dir(path, ambient_authority())?;
-        Ok(Self {
+        Ok(Self::writable_directory(root, None))
+    }
+
+    /// Mount a writable, temporary copy of the DOS-visible files in a ZIP archive.
+    pub fn open_session_zip(path: impl AsRef<Path>) -> Result<Self> {
+        let Source::Zip(zip) = Self::open(path)?.source else {
+            return Err(MountError::ExpectedZip);
+        };
+        let session = tempfile::tempdir()?;
+        let root = Dir::open_ambient_dir(session.path(), ambient_authority())?;
+        zip.copy_to(&root)?;
+        Ok(Self::writable_directory(root, Some(Arc::new(session))))
+    }
+
+    fn writable_directory(root: Dir, session: Option<Arc<tempfile::TempDir>>) -> Self {
+        Self {
             source: Source::WritableDirectory(WritableDirectory {
                 root: Arc::new(root),
                 transaction: Arc::new(Mutex::new(())),
+                session,
             }),
-        })
+        }
     }
 
     pub fn is_writable(&self) -> bool {
@@ -227,6 +246,7 @@ impl Mount {
             name,
             transaction: Arc::clone(&writable.transaction),
             writable: true,
+            _session: writable.session.clone(),
         };
         if exists {
             if create {

@@ -36,7 +36,9 @@ Mounts are read-only by default. To let DOS programs save files, explicitly moun
 dosa --mount C=programs.zip --mount-rw D=dos-saves
 ~~~
 
-Create the host directory before mounting it. The guest can create, write, truncate, rename, and delete files there, and can create and remove empty directories. New names must use DOS 8.3 syntax. Files and ZIP mounts are read-only.
+Create the host directory before mounting it. The guest can create, write, truncate, rename, and delete files there, and can create and remove empty directories. New names must use DOS 8.3 syntax.
+
+Use `--mount-session C=programs.zip` if a program needs to open ZIP files for writing. Dosa mounts the archive's DOS 8.3 names in a temporary writable directory. Changes last until the mount is replaced or Dosa exits, and the source ZIP stays unchanged. The Drives menu offers **Writable ZIP copy** for the same mode.
 
 Headless execution returns the program's DOS exit code. It reports an error if the guest needs keyboard input or reaches the instruction limit.
 
@@ -75,7 +77,7 @@ dosa --profile profiles/demo.toml --headless
 dosa --profile profiles/demo.toml --cpu 286 --speed fast --text-rows 43
 ~~~
 
-Relative TOML mount paths resolve from the profile's directory. Relative CLI mount paths resolve from the working directory. Set `writable = true` on a directory's `[[mounts]]` entry to let the guest modify it. Either mount flag replaces a profile mount on the same drive, including its access mode. Explicit `--exec`, `--cpu`, `--speed`, `--text-rows`, and `--text-columns` override the corresponding saved values.
+Relative TOML mount paths resolve from the profile's directory. Relative CLI mount paths resolve from the working directory. Set `writable = true` for a writable host directory or `session_zip = true` for a writable ZIP copy. A CLI mount flag replaces a profile mount on the same drive, including its access mode. Explicit `--exec`, `--cpu`, `--speed`, `--text-rows`, and `--text-columns` override the corresponding saved values.
 
 CPU profiles are `8086`, `286`, and `386`. Text modes have 80 or 132 columns and 25, 43, or 50 rows. Desktop execution speeds are `slow`, `normal`, `fast`, and `maximum` (`max` also works). Headless mode uses the same mounts, CPU, text rows, and command with its fixed instruction limit. Its command can come from `--exec` or the profile's `exec` field.
 
@@ -107,4 +109,4 @@ cargo clippy --workspace --all-targets --locked
 
 See [TASKS.md](TASKS.md) for the architecture and work in progress.
 
-Set `DOSA_SMOKE_GENERATED=1` and run `cargo test --test desktop_smoke --locked` to exercise a live window. The test builds a temporary ZIP with a DOS program that updates VGA graphics after Enter. To use your own ZIP, set `DOSA_SMOKE_ARCHIVE`, `DOSA_SMOKE_PROGRAM`, and optionally `DOSA_SMOKE_ENTER_COUNT`. The test mounts the ZIP through the application menu action and checks graphics updates in the GPU event loop.
+Set `DOSA_SMOKE_GENERATED=1` and run `cargo test --test desktop_smoke --locked` to exercise a live window. The test builds a temporary ZIP with a DOS program that updates VGA graphics after Enter. To use your own ZIP, set `DOSA_SMOKE_ARCHIVE`, `DOSA_SMOKE_PROGRAM`, and optionally `DOSA_SMOKE_ENTER_COUNT`. Set `DOSA_SMOKE_SESSION=1` to exercise the writable ZIP copy. The test mounts the ZIP through the application menu action and checks graphics updates in the GPU event loop.

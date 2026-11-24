@@ -40,10 +40,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let min_colors: usize = std::env::var("DOSA_SMOKE_MIN_COLORS")
         .unwrap_or_else(|_| "3".into())
         .parse()?;
+    let session_zip = std::env::var_os("DOSA_SMOKE_SESSION").is_some();
     let mut mount_arg = std::ffi::OsString::from("C=");
     mount_arg.push(archive.as_os_str());
     let listing = Command::new(env!("CARGO_BIN_EXE_dosa"))
-        .arg("--mount")
+        .arg(if session_zip {
+            "--mount-session"
+        } else {
+            "--mount"
+        })
         .arg(mount_arg)
         .args(["--headless", "--exec", "DIR"])
         .output()?;
@@ -66,7 +71,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     desktop.menu_action(MenuAction::Mount {
         drive: 'C',
         source: archive,
-        kind: MountKind::Zip,
+        kind: if session_zip {
+            MountKind::SessionZip
+        } else {
+            MountKind::Zip
+        },
     });
     let status = desktop.menu().status;
     assert_eq!(status, "Mounted C:", "desktop mount failed");
@@ -154,6 +163,10 @@ impl App for Smoke {
         let hash = hasher.finish();
         if self.fingerprint.replace(hash) != Some(hash) {
             self.changed_at = now;
+        }
+        if self.keys_remaining == 0 && self.key_frame.is_some_and(|previous| previous != hash) {
+            self.result.set(Some(Ok(())));
+            return;
         }
         if now.duration_since(self.changed_at) < Duration::from_millis(400)
             || self.key_frame == Some(hash)

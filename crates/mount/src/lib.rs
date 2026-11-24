@@ -64,6 +64,10 @@ pub enum MountError {
     UnsupportedSource,
     #[error("ZIP directory exceeds the mount entry limit")]
     ArchiveTooLarge,
+    #[error("writable ZIP copies require a ZIP archive")]
+    ExpectedZip,
+    #[error("ZIP contents exceed the {limit}-byte writable copy limit")]
+    ZipCopyTooLarge { limit: u64 },
     #[error("file exceeds the {MAX_FILE_BYTES}-byte mount read limit")]
     FileTooLarge,
     #[error("mount file lock was poisoned")]

@@ -54,6 +54,7 @@ pub enum MountKind {
     File,
     Folder,
     Zip,
+    SessionZip,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -466,6 +467,7 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
             ("Mount file...", MountKind::File),
             ("Mount folder...", MountKind::Folder),
             ("Mount ZIP...", MountKind::Zip),
+            ("Writable ZIP copy...", MountKind::SessionZip),
         ]
         .into_iter()
         .map(|(label, kind)| item(label, Command::Mount(kind, drive), !state.running, false))
@@ -560,6 +562,10 @@ pub(crate) fn pick_path(window: &Window, kind: MountKind) -> Option<PathBuf> {
             .set_title("Mount a ZIP archive")
             .add_filter("ZIP archive", &["zip"])
             .pick_file(),
+        MountKind::SessionZip => dialog
+            .set_title("Mount a writable ZIP copy")
+            .add_filter("ZIP archive", &["zip"])
+            .pick_file(),
     }
 }
 
@@ -645,7 +651,7 @@ mod tests {
         menu.key(&input(Key::Up, false), None, &state, false);
         assert_eq!(
             menu.key(&input(Key::Enter, false), None, &state, false),
-            (true, Some(Command::Mount(MountKind::Zip, 'Z')))
+            (true, Some(Command::Mount(MountKind::SessionZip, 'Z')))
         );
         assert!(!menu.blocks_pointer());
     }
