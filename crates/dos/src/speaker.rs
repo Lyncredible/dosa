@@ -1,11 +1,11 @@
 //! PIT channel 2 and the PC speaker gate.
 
-use crate::pit::{BIOS_DIVISOR, decode_count, encode_bcd, read_back_selects};
+use crate::pit::{BIOS_DIVISOR, Period, decode_count, encode_bcd, read_back_selects};
 
 pub(super) struct Speaker {
     now: u64,
-    epoch: Option<u64>,
-    divisor: u64,
+    period: Option<Period>,
+    reload: Option<Period>,
     control: u8,
     low: Option<u8>,
     read_high: bool,
@@ -18,8 +18,8 @@ impl Speaker {
     pub fn new(now: u64) -> Self {
         Self {
             now,
-            epoch: Some(now),
-            divisor: BIOS_DIVISOR,
+            period: Some(Period::new(now, BIOS_DIVISOR)),
+            reload: None,
             control: 0x36,
             low: None,
             read_high: false,
@@ -31,6 +31,16 @@ impl Speaker {
 
     pub fn advance(&mut self, now: u64) {
         self.now = now;
+        if self.reload.is_some_and(|reload| reload.tick <= now) {
+            self.period = self.reload.take();
+        }
+    }
+
+    fn period_at(&self, tick: u64) -> Option<Period> {
+        self.reload
+            .filter(|reload| reload.tick <= tick)
+            .or(self.period)
+            .filter(|period| period.tick <= tick)
     }
 
     pub fn sample(&self, tick: u64) -> f32 {
@@ -48,30 +58,30 @@ impl Speaker {
             return true;
         }
         let mode = self.mode();
-        let Some(epoch) = self.epoch.filter(|&epoch| epoch <= now) else {
+        let Some(period) = self.period_at(now) else {
             return mode != 0;
         };
-        let elapsed = now - epoch;
-        let divisor = self.divisor;
+        let elapsed = now - period.tick;
+        let divisor = period.divisor;
         match mode {
             0 | 1 => elapsed >= divisor,
             2 => elapsed % divisor != divisor - 1,
-            3 => elapsed % divisor < divisor.div_ceil(2),
+            3 => period.phase(now) < divisor.div_ceil(2),
             4 | 5 => elapsed != divisor,
             _ => true,
         }
     }
 
     fn count(&self) -> u16 {
-        let Some(epoch) = self.epoch.filter(|&epoch| epoch <= self.now) else {
+        let Some(period) = self.period_at(self.now) else {
             return 0;
         };
-        let elapsed = self.now - epoch;
-        let divisor = self.divisor;
+        let elapsed = self.now - period.tick;
+        let divisor = period.divisor;
         let remaining = match self.mode() {
             2 => divisor - elapsed % divisor,
             3 => {
-                let phase = elapsed % divisor;
+                let phase = period.phase(self.now);
                 if phase < divisor.div_ceil(2) {
                     if phase == 0 {
                         divisor
@@ -111,7 +121,7 @@ impl Speaker {
             self.latch_count();
         }
         if value & 0x10 == 0 && self.latched_status.is_none() {
-            let null_count = self.epoch.is_none_or(|epoch| epoch > self.now);
+            let null_count = self.reload.is_some() || self.period_at(self.now).is_none();
             self.latched_status = Some(
                 self.control | u8::from(self.output(self.now)) << 7 | u8::from(null_count) << 6,
             );
@@ -149,7 +159,11 @@ impl Speaker {
         match port {
             0x61 => {
                 if self.gate & 1 == 0 && value & 1 != 0 {
-                    self.epoch = self.epoch.map(|epoch| self.now.max(epoch));
+                    self.period = self
+                        .reload
+                        .take()
+                        .or(self.period)
+                        .map(|period| Period::new(self.now + 1, period.divisor));
                 }
                 self.gate = value;
             }
@@ -158,7 +172,8 @@ impl Speaker {
                     self.latch_count();
                 } else {
                     self.control = value & 0x3f;
-                    self.epoch = None;
+                    self.period = None;
+                    self.reload = None;
                     self.low = None;
                     self.read_high = false;
                     self.latched = None;
@@ -177,8 +192,17 @@ impl Speaker {
                         }
                     },
                 };
-                self.divisor = decode_count(raw, self.control & 1 != 0);
-                self.epoch = Some(self.now + 1);
+                let divisor = decode_count(raw, self.control & 1 != 0);
+                if self.gate & 1 != 0 {
+                    self.reload = self
+                        .period
+                        .and_then(|period| period.deferred_reload(self.mode(), self.now, divisor));
+                    if self.reload.is_some() {
+                        return true;
+                    }
+                }
+                self.reload = None;
+                self.period = Some(Period::new(self.now + 1, divisor));
             }
             _ => return false,
         }
@@ -316,5 +340,44 @@ mod tests {
         }
         assert_eq!(machine.cpu.regs.ax as u8 & 0x7f, 0x34);
         assert_eq!(machine.cpu.regs.bx as u8, 0xf5);
+    }
+
+    #[test]
+    fn mode_three_divisor_updates_at_the_next_output_transition() {
+        let mut speaker = Speaker::new(0);
+        speaker.write_port(0x43, 0x96);
+        speaker.write_port(0x42, 10);
+        speaker.write_port(0x61, 3);
+        speaker.advance(3);
+        speaker.write_port(0x42, 7);
+        assert_eq!(speaker.sample(5), 0.12);
+        assert_eq!(speaker.sample(6), -0.12);
+        speaker.advance(7);
+        speaker.write_port(0x42, 8);
+        assert_eq!(speaker.sample(8), -0.12);
+        assert_eq!(speaker.sample(9), 0.12);
+        assert_eq!(speaker.sample(12), 0.12);
+        assert_eq!(speaker.sample(13), -0.12);
+    }
+
+    #[test]
+    fn rising_gate_loads_a_pending_mode_two_divisor_before_the_old_period_ends() {
+        let mut speaker = Speaker::new(0);
+        speaker.write_port(0x43, 0x94);
+        speaker.write_port(0x42, 10);
+        speaker.write_port(0x61, 3);
+        speaker.advance(3);
+        speaker.write_port(0x42, 4);
+        assert!(speaker.output(9));
+        assert!(!speaker.output(10));
+        assert!(speaker.output(11));
+        assert!(!speaker.output(14));
+
+        speaker.write_port(0x61, 2);
+        speaker.advance(4);
+        speaker.write_port(0x61, 3);
+        assert!(speaker.output(7));
+        assert!(!speaker.output(8));
+        assert!(speaker.output(9));
     }
 }
