@@ -154,10 +154,21 @@ impl Desktop {
     fn refresh_prompt(&mut self, previous: &str) {
         if self.shell.prompt() != previous {
             self.shell.machine.write_console(b"\r\n");
-            self.write_prompt();
-            let typed: Vec<_> = self.line.chars().map(encode_cp437).collect();
-            self.shell.machine.write_console(&typed);
+            self.write_input_prompt();
         }
+    }
+
+    fn write_input_prompt(&mut self) {
+        self.write_prompt();
+        let typed: Vec<_> = self.line.chars().map(encode_cp437).collect();
+        self.shell.machine.write_console(&typed);
+    }
+
+    fn finish_command(&mut self) {
+        if let Err(error) = self.shell.finish_quick_launch() {
+            self.status = format!("Quick launch cleanup failed: {error}");
+        }
+        self.write_input_prompt();
     }
 
     fn submit(&mut self, line: &str) {
@@ -203,12 +214,12 @@ impl Desktop {
                     self.apply_command(Ok(step.command));
                 }
                 Ok(None) => {
-                    self.write_prompt();
+                    self.finish_command();
                     break;
                 }
                 Err(error) => {
                     self.apply_command(Err(error));
-                    self.write_prompt();
+                    self.finish_command();
                     break;
                 }
             }
@@ -299,7 +310,7 @@ impl App for Desktop {
                     self.running = false;
                     self.shell.machine.write_console(b"\r\n");
                     if !self.shell.batch_active() {
-                        self.write_prompt();
+                        self.finish_command();
                     }
                 }
                 Ok(RunState::Running | RunState::WaitingForKey | RunState::WaitingForInterrupt) => {
@@ -311,7 +322,7 @@ impl App for Desktop {
                     self.shell
                         .machine
                         .write_console(format!("\r\n{error}\r\n").as_bytes());
-                    self.write_prompt();
+                    self.finish_command();
                 }
             }
             // The guest's output has already been written to video memory.
@@ -363,6 +374,15 @@ impl App for Desktop {
 
     fn menu_action(&mut self, action: MenuAction) {
         match action {
+            MenuAction::QuickLaunch(path) if !self.running && !self.shell.batch_active() => {
+                match self.shell.quick_launch(&path) {
+                    Ok(command) => {
+                        self.shell.machine.write_console(b"\r\n");
+                        self.apply_command(Ok(command));
+                    }
+                    Err(error) => self.status = format!("Quick launch failed: {error}"),
+                }
+            }
             MenuAction::SaveScreenshot(path) => {
                 self.render();
                 self.status = match save_screenshot(&path, self.frame()) {
@@ -627,6 +647,74 @@ fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quick_launch_runs_a_nested_batch_and_restores_the_shell() {
+        let programs = tempfile::tempdir().unwrap();
+        let batch = programs.path().join("Launch some DOS tools.bat");
+        std::fs::write(&batch, b"@echo off\ncall nested.bat\ncd C:\\\n").unwrap();
+        std::fs::write(
+            programs.path().join("nested.bat"),
+            b"@echo off\nchild.com\nif errorlevel 7 type result.txt\n",
+        )
+        .unwrap();
+        std::fs::write(
+            programs.path().join("child.com"),
+            [0xb8, 7, 0x4c, 0xcd, 0x21],
+        )
+        .unwrap();
+        std::fs::write(programs.path().join("result.txt"), b"sibling available\r\n").unwrap();
+        let existing = tempfile::tempdir().unwrap();
+        std::fs::create_dir(existing.path().join("SUB")).unwrap();
+        let mut shell = Shell::new();
+        shell
+            .mount('C', Mount::open(existing.path()).unwrap())
+            .unwrap();
+        shell.execute("CD SUB").unwrap();
+        let previous = shell.prompt();
+        let mut desktop = Desktop::new(shell, None);
+        desktop.menu_action(MenuAction::QuickLaunch(batch));
+        assert!(desktop.shell.batch_active());
+        assert_eq!(desktop.menu().active_drive, 'Z');
+        assert_eq!(desktop.menu().drives[&'Z'], "Folder (read-only)");
+        for _ in 0..4 {
+            desktop.tick();
+        }
+        assert!(!desktop.running && !desktop.shell.batch_active());
+        assert_eq!(desktop.shell.prompt(), previous);
+        assert_eq!(
+            desktop.menu().drives.keys().copied().collect::<Vec<_>>(),
+            ['C']
+        );
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected text mode")
+        };
+        let text: Vec<_> = frame
+            .cells
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|cell| cell[0])
+            .collect();
+        assert!(
+            text.windows(b"sibling available".len())
+                .any(|bytes| bytes == b"sibling available")
+        );
+    }
+
+    #[test]
+    fn quick_launch_cleans_up_after_a_guest_instruction_error() {
+        let programs = tempfile::tempdir().unwrap();
+        let program = programs.path().join("oops.COM");
+        std::fs::write(&program, [0x0f, 0x0b]).unwrap();
+        let mut desktop = Desktop::new(Shell::new(), None);
+        desktop.menu_action(MenuAction::QuickLaunch(program));
+        assert!(desktop.running);
+        desktop.tick();
+        assert!(!desktop.running);
+        assert!(desktop.menu().drives.is_empty());
+        assert_eq!(desktop.menu().active_drive, 'C');
+    }
 
     #[test]
     fn desktop_unmount_falls_back_to_remaining_drive_and_allows_remount() {

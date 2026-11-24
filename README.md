@@ -85,6 +85,8 @@ CPU profiles are `8086`, `286`, and `386`. Text modes have 80 or 132 columns and
 
 Use Drives to select a drive letter, see its source type and access mode, and mount or unmount it while the shell is idle. Removing the current drive switches the prompt to the first remaining drive. CPU selects the 8086, 286, or 386 instruction profile while the shell is idle. Speed adjusts the guest instruction budget during execution.
 
+**Drives → Quick launch** opens a COM, EXE, or BAT and temporarily mounts its folder read-only on an unused DOS drive so it can use sibling files. Dosa restores the previous drive and directories when the program or batch finishes. Use a writable mount for programs that need to save files in their own folder.
+
 View offers pause/resume, fullscreen, and 80- or 132-column text presets with 25, 43, or 50 rows. DOS mouse support maps the host pointer into the guest viewport and releases held buttons when leaving the viewport or opening a menu.
 
 The desktop plays PC speaker sound, AdLib OPL2 music, and 8-bit mono Sound Blaster 2.0 PCM. For Sound Blaster setup, use port `220h`, IRQ `7`, and DMA channel `1`. DOS programs also receive these settings in `BLASTER`.
