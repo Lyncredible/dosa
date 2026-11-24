@@ -17,6 +17,9 @@ mod speaker;
 mod vga;
 mod video;
 
+/// Sample rate of the mono PCM samples produced by [Machine::take_audio].
+pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
+
 #[cfg(test)]
 mod tests;
 

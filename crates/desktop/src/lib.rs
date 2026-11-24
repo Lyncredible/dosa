@@ -166,6 +166,19 @@ impl<A: App> Desktop<A> {
                     self.app.menu_action(MenuAction::SaveScreenshot(path));
                 }
             }
+            Some(menu::Command::RecordAudio) => {
+                self.pointer.set_position(None);
+                self.sync_pointer(window, true);
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_parent(window)
+                    .set_title("Record DOS audio")
+                    .add_filter("WAV audio", &["wav"])
+                    .set_file_name("dosa.wav")
+                    .save_file()
+                {
+                    self.app.menu_action(MenuAction::StartRecording(path));
+                }
+            }
             Some(menu::Command::Mount(kind, drive)) => {
                 self.pointer.set_position(None);
                 self.sync_pointer(window, true);

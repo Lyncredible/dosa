@@ -81,6 +81,8 @@ pub enum MenuAction {
     StopPaste,
     QuickLaunch(PathBuf),
     SaveScreenshot(PathBuf),
+    StartRecording(PathBuf),
+    StopRecording,
     Mount {
         drive: char,
         source: PathBuf,
@@ -106,6 +108,7 @@ pub struct MenuState {
     pub speed: Speed,
     pub volume: Volume,
     pub muted: bool,
+    pub recording: bool,
     pub text_mode: TextMode,
     pub scaling: Scaling,
     pub running: bool,
@@ -126,6 +129,7 @@ impl Default for MenuState {
             speed: Speed::default(),
             volume: Volume::default(),
             muted: false,
+            recording: false,
             text_mode: TextMode::default(),
             scaling: Scaling::default(),
             running: false,
@@ -171,6 +175,7 @@ const TABS: [(Tab, &str, u32, u32); 6] = [
 pub(crate) enum Command {
     QuickLaunch,
     Screenshot,
+    RecordAudio,
     Mount(MountKind, char),
     Fullscreen,
     App(MenuAction),
@@ -412,12 +417,13 @@ impl Menu {
             canvas.text(width - 149, 11, "Alt+D/C/S/V/A/E", MUTED);
         }
         let settings = format!(
-            "{}: | {} | {}{}{}",
+            "{}: | {} | {}{}{}{}",
             state.active_drive,
             cpu_label(state.cpu),
             speed_label(state.speed),
             if state.paused { " | Paused" } else { "" },
             if state.muted { " | Muted" } else { "" },
+            if state.recording { " | REC" } else { "" },
         );
         canvas.text(12, 36, &settings, MUTED);
         if !state.status.is_empty() {
@@ -620,6 +626,16 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
                 )
             }),
         )
+        .chain(std::iter::once(if state.recording {
+            item(
+                "Stop WAV recording",
+                Command::App(MenuAction::StopRecording),
+                true,
+                false,
+            )
+        } else {
+            item("Record audio to WAV...", Command::RecordAudio, true, false)
+        }))
         .collect(),
         Tab::View => {
             let mut items = Vec::from(
@@ -866,6 +882,24 @@ mod tests {
                 Some(Command::App(MenuAction::SetVolume(Volume::Quiet)))
             )
         );
+    }
+
+    #[test]
+    fn audio_menu_switches_between_start_and_stop_recording() {
+        let mut menu = Menu::default();
+        let mut state = MenuState::default();
+        for expected in [
+            Command::RecordAudio,
+            Command::App(MenuAction::StopRecording),
+        ] {
+            menu.open(Tab::Audio, &state);
+            menu.key(&input(Key::Up, false), None, &state, false);
+            assert_eq!(
+                menu.key(&input(Key::Enter, false), None, &state, false),
+                (true, Some(expected))
+            );
+            state.recording = true;
+        }
     }
 
     #[test]

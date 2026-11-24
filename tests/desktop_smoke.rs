@@ -19,6 +19,7 @@ use dosa_desktop::{
 
 fn main() -> Result<(), Box<dyn Error>> {
     let generated;
+    let mut wav_path = None;
     let (archive, program, key_count) =
         if let Some(archive) = std::env::var_os("DOSA_SMOKE_ARCHIVE") {
             let program = std::env::var("DOSA_SMOKE_PROGRAM")?;
@@ -29,6 +30,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if std::env::var_os("DOSA_SMOKE_GENERATED").is_some() {
             generated = tempfile::tempdir()?;
             let archive = generated.path().join("desktop fixture.zip");
+            wav_path = Some(generated.path().join("desktop capture.wav"));
             generate_archive(&archive)?;
             (archive, "SMOKE.COM".to_owned(), 1)
         } else {
@@ -92,6 +94,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         desktop.menu_action(MenuAction::SetScaling(Scaling::Integer));
         assert_eq!(desktop.menu().scaling, Scaling::Integer);
     }
+    if let Some(path) = &wav_path {
+        desktop.menu_action(MenuAction::SetMuted(true));
+        desktop.menu_action(MenuAction::StartRecording(path.clone()));
+        assert!(desktop.menu().recording);
+    }
     desktop.input(key_event(Key::Character(' '), Some(program), true));
     desktop.input(key_event(Key::Enter, None, true));
     let result = Rc::new(Cell::new(None));
@@ -113,6 +120,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     result
         .get()
         .ok_or("desktop closed before the smoke test finished")??;
+    if let Some(path) = wav_path {
+        let wav = std::fs::read(path)?;
+        assert_eq!(&wav[..4], b"RIFF");
+        assert_eq!(&wav[24..28], &48_000u32.to_le_bytes());
+        assert!(
+            wav[44..]
+                .as_chunks::<2>()
+                .0
+                .contains(&(-8192i16).to_le_bytes())
+        );
+    }
     println!(
         "desktop smoke passed: archive mounted, graphics rendered, {key_count} input transitions"
     );
@@ -121,6 +139,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn generate_archive(path: &std::path::Path) -> Result<(), Box<dyn Error>> {
     let guest = [
+        0xba, 0x2c, 0x02, 0xb0, 0xd1, 0xee, // Enable Sound Blaster DAC
+        0xb0, 0x10, 0xee, 0xb0, 64, 0xee, // Set a known DAC level
         0xb8, 0x13, 0x00, 0xcd, 0x10, // INT 10h, set VGA mode 13h
         0xb8, 0x00, 0xa0, 0x8e, 0xc0, // MOV ES,A000h
         0x26, 0xc7, 0x06, 0, 0, 1, 2, // MOV WORD [ES:0],0201h
@@ -151,6 +171,14 @@ struct Smoke {
 }
 
 impl App for Smoke {
+    fn audio(&mut self) -> Vec<f32> {
+        if self.desktop.menu().recording {
+            self.desktop.audio()
+        } else {
+            Vec::new()
+        }
+    }
+
     fn tick(&mut self) {
         self.desktop.tick();
         let now = Instant::now();

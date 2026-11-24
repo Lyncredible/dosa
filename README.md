@@ -93,6 +93,8 @@ View offers pause/resume, fullscreen, scaling, and 80- or 132-column text preset
 
 The desktop plays PC speaker sound, AdLib OPL2 music, and 8-bit mono Sound Blaster PCM with standard and high-speed DMA playback. For Sound Blaster setup, use port `220h`, IRQ `7`, and DMA channel `1`. DOS programs also receive these settings in `BLASTER`.
 
+Choose **Audio → Record audio to WAV** to capture guest audio as 48 kHz, 16-bit mono PCM. Recording uses the guest mix before host volume and mute. **Stop WAV recording** or closing Dosa saves the file.
+
 Audio offers master volume and mute while a guest runs. Unmuting restores the selected level. Keyboard menu access uses Alt+D, Alt+C, Alt+S, Alt+V, and Alt+A, followed by arrow keys and Enter.
 
 **Edit** (`Alt+E`) copies the visible DOS text screen or pastes up to 4,096 characters. At the shell prompt, pasted line breaks become spaces and Enter submits the edited command. In a running program, paste feeds the DOS BIOS keyboard queue one character at a time, including Enter for line breaks. Choose **Stop pasting** to discard the remaining paste.

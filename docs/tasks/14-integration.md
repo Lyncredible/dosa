@@ -8,4 +8,4 @@ Exercise the emulator as a user launches it, using repeatable fixtures for publi
 - Keep local paths, software names or assets from the local fixture, and screenshots showing them out of tracked or public artifacts.
 - Keep native Linux and macOS checks in [06](06-platforms.md).
 
-The opt-in `desktop_smoke` target can generate its own ZIP and exercise VGA presentation and an Enter transition in a native window. Set `DOSA_SMOKE_GENERATED=1` to run it without a supplied archive.
+The opt-in `desktop_smoke` target can generate its own ZIP and exercise VGA presentation, an Enter transition, and WAV capture in a native window. Set `DOSA_SMOKE_GENERATED=1` to run it without a supplied archive.

@@ -13,6 +13,7 @@ use font8x8::{
 };
 
 use crate::shell::{Command, Shell};
+use crate::wav::Recording;
 
 const CP437_LOW: &str = "\0☺☻♥♦♣♠•◘○◙♂♀♪♫☼►◄↕‼¶§▬↨↑↓→←∟↔▲▼";
 const CP437_HIGH: &str = concat!(
@@ -63,6 +64,7 @@ pub struct Desktop {
     paused: bool,
     volume: Volume,
     muted: bool,
+    recording: Option<Recording>,
     scaling: Scaling,
     clipboard: Option<arboard::Clipboard>,
     paste: VecDeque<u8>,
@@ -124,6 +126,7 @@ impl Desktop {
             paused: false,
             volume: Volume::default(),
             muted: false,
+            recording: None,
             scaling: Scaling::default(),
             clipboard: None,
             paste: VecDeque::new(),
@@ -325,11 +328,43 @@ impl Desktop {
             self.shell.machine.write_console(&[encode_cp437(character)]);
         }
     }
+
+    fn finish_recording(&mut self, limit_reached: bool) {
+        if let Some(recording) = self.recording.take() {
+            self.status = match recording.finish() {
+                Ok(()) if limit_reached => "WAV saved at size limit".into(),
+                Ok(()) => "WAV saved".into(),
+                Err(error) => format!("WAV save failed: {error}"),
+            };
+        }
+    }
+}
+
+impl Drop for Desktop {
+    fn drop(&mut self) {
+        if let Some(recording) = self.recording.take()
+            && let Err(error) = recording.finish()
+        {
+            eprintln!("WAV save failed: {error}");
+        }
+    }
 }
 
 impl App for Desktop {
     fn audio(&mut self) -> Vec<f32> {
         let samples = self.shell.machine.take_audio();
+        if let Some(recording) = &mut self.recording
+            && !samples.is_empty()
+        {
+            match recording.append(&samples) {
+                Ok(false) => {}
+                Ok(true) => self.finish_recording(true),
+                Err(error) => {
+                    self.recording = None;
+                    self.status = format!("WAV recording failed: {error}");
+                }
+            }
+        }
         if self.running && !self.paused {
             samples
         } else {
@@ -386,6 +421,10 @@ impl App for Desktop {
             self.shell.machine.take_output();
         }
         if !self.running && !self.paused && !self.exit && self.shell.batch_active() {
+            if self.recording.is_some() {
+                // Capture the last samples before the next guest resets the audio devices.
+                self.audio();
+            }
             self.advance_batch();
         }
         self.render();
@@ -423,6 +462,7 @@ impl App for Desktop {
             speed: self.settings.speed,
             volume: self.volume,
             muted: self.muted,
+            recording: self.recording.is_some(),
             text_mode: self.settings.text_mode,
             scaling: self.scaling,
             running: self.running,
@@ -505,6 +545,16 @@ impl App for Desktop {
             MenuAction::SetSpeed(speed) => self.settings.speed = speed,
             MenuAction::SetVolume(volume) => self.volume = volume,
             MenuAction::SetMuted(muted) => self.muted = muted,
+            MenuAction::StartRecording(path) if self.recording.is_none() => {
+                match Recording::start(path) {
+                    Ok(recording) => {
+                        self.recording = Some(recording);
+                        self.status.clear();
+                    }
+                    Err(error) => self.status = format!("WAV recording failed: {error}"),
+                }
+            }
+            MenuAction::StopRecording => self.finish_recording(false),
             MenuAction::SetScaling(scaling) => self.scaling = scaling,
             MenuAction::SetPaused(paused) if self.running => {
                 self.paused = paused;
@@ -1008,6 +1058,62 @@ mod tests {
         desktop.menu_action(MenuAction::SetMuted(false));
         assert!(!desktop.menu().muted);
         assert_eq!(desktop.menu().volume, Volume::Half);
+    }
+
+    #[test]
+    fn wav_recording_captures_muted_guest_audio_and_saves_on_stop_and_close() {
+        let scratch = tempfile::tempdir().unwrap();
+        let guest = [
+            0xba, 0x2c, 0x02, 0xb0, 0xd1, 0xee, // Enable Sound Blaster DAC
+            0xb0, 0x10, 0xee, 0xb0, 64, 0xee, // Set a known DAC level
+            0x31, 0xc0, 0xcd, 0x16, // Wait for a key
+            0xb8, 0, 0x4c, 0xcd, 0x21,
+        ];
+        std::fs::write(scratch.path().join("TONE.COM"), guest).unwrap();
+        let mut shell = Shell::new();
+        shell
+            .mount('C', Mount::open(scratch.path()).unwrap())
+            .unwrap();
+        let mut desktop = Desktop::new(shell, Some("tone"));
+        desktop.menu_action(MenuAction::SetMuted(true));
+        let path = scratch.path().join("stopped.wav");
+        desktop.menu_action(MenuAction::StartRecording(path.clone()));
+        assert!(desktop.menu().recording);
+        desktop.tick();
+        let first = desktop.audio();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        desktop.tick();
+        let tone = desktop.audio();
+        assert!(tone.contains(&-0.25));
+        desktop.menu_action(MenuAction::SetPaused(true));
+        desktop.tick();
+        assert!(desktop.audio().is_empty());
+        desktop.menu_action(MenuAction::StopRecording);
+        assert!(!desktop.menu().recording);
+        assert_eq!(desktop.menu().status, "WAV saved");
+
+        let wav = std::fs::read(path).unwrap();
+        let data_bytes = ((first.len() + tone.len()) * 2) as u32;
+        assert_eq!(wav.len(), 44 + data_bytes as usize);
+        assert_eq!(&wav[..4], b"RIFF");
+        assert_eq!(&wav[4..8], &(36 + data_bytes).to_le_bytes());
+        assert_eq!(&wav[8..16], b"WAVEfmt ");
+        assert_eq!(&wav[20..24], &[1, 0, 1, 0]);
+        assert_eq!(&wav[24..28], &48_000u32.to_le_bytes());
+        assert_eq!(&wav[34..40], b"\x10\0data");
+        assert_eq!(&wav[40..44], &data_bytes.to_le_bytes());
+        assert!(
+            wav[44..]
+                .as_chunks::<2>()
+                .0
+                .contains(&(-8192i16).to_le_bytes())
+        );
+
+        let path = scratch.path().join("closed.wav");
+        desktop.menu_action(MenuAction::StartRecording(path.clone()));
+        assert!(!path.exists());
+        drop(desktop);
+        assert_eq!(std::fs::read(path).unwrap().len(), 44);
     }
 
     #[test]
