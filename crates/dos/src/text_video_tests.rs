@@ -64,6 +64,7 @@ fn wide_console_wraps_scrolls_and_reports_bios_stride() {
         let (mut cpu, mut video) = setup();
         assert!(video.set_console_geometry(&mut cpu, 132, rows));
         assert_eq!(cpu.read_u16(0x40, 0x4a), 132);
+        assert!(usize::from(cpu.read_u16(0x40, 0x4c)) >= 132 * usize::from(rows) * 2);
         let frame = text(&video, &cpu);
         assert_eq!((frame.columns, frame.rows), (132, u16::from(rows)));
         assert_eq!(frame.cells.len(), 132 * usize::from(rows) * 2);
