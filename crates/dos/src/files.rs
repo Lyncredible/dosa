@@ -18,7 +18,11 @@ struct File {
 
 enum FileSource {
     ReadOnly(Vec<u8>),
-    Writable { file: WritableFile, readable: bool },
+    Writable {
+        file: WritableFile,
+        readable: bool,
+        writable: bool,
+    },
 }
 
 impl DosFiles {
@@ -110,12 +114,18 @@ impl DosFiles {
         let (_, mount, path) = self.resolve_mount(mounts, name)?;
         let handle = self.next_handle()?;
         let source = match mode & 3 {
+            0 if mount.is_writable() => FileSource::Writable {
+                file: mount.open_readable_file(&path).map_err(mount_code)?,
+                readable: true,
+                writable: false,
+            },
             0 => FileSource::ReadOnly(self.read_file(mount, &path)?),
             1 | 2 => FileSource::Writable {
                 file: mount
                     .open_writable_file(&path, WriteDisposition::OpenExisting)
                     .map_err(mount_code)?,
                 readable: mode & 3 == 2,
+                writable: true,
             },
             _ => return Err(12),
         };
@@ -143,6 +153,7 @@ impl DosFiles {
         let source = FileSource::Writable {
             file,
             readable: true,
+            writable: true,
         };
         self.handles.insert(
             handle,
@@ -233,7 +244,10 @@ impl DosFiles {
 
     pub(crate) fn check_write_handle(&self, handle: u16) -> Result<(), u16> {
         match self.handles.get(&handle).map(|file| &file.source) {
-            Some(FileSource::Writable { .. }) => Ok(()),
+            Some(FileSource::Writable { writable: true, .. }) => Ok(()),
+            Some(FileSource::Writable {
+                writable: false, ..
+            }) => Err(5),
             Some(FileSource::ReadOnly(_)) => Err(5),
             None => Err(6),
         }
@@ -246,10 +260,12 @@ impl DosFiles {
             FileSource::Writable {
                 file: source,
                 readable: true,
-            } => {
-                let bytes = source.read().map_err(mount_code)?;
-                Cow::Owned(read_slice(&bytes, file.position, length).to_vec())
-            }
+                ..
+            } => Cow::Owned(
+                source
+                    .read_at(file.position as u64, length)
+                    .map_err(mount_code)?,
+            ),
             FileSource::Writable {
                 readable: false, ..
             } => return Err(5),
@@ -261,7 +277,9 @@ impl DosFiles {
     pub(crate) fn write(&mut self, handle: u16, data: &[u8]) -> Result<(), u16> {
         let file = self.handles.get_mut(&handle).ok_or(6u16)?;
         let FileSource::Writable {
-            file: destination, ..
+            file: destination,
+            writable: true,
+            ..
         } = &file.source
         else {
             return Err(5);
@@ -293,7 +311,7 @@ impl DosFiles {
             2 => match &file.source {
                 FileSource::ReadOnly(bytes) => bytes.len(),
                 FileSource::Writable { file: source, .. } => {
-                    source.read().map_err(mount_code)?.len()
+                    source.length().map_err(mount_code)? as usize
                 }
             },
             _ => return Err(1),

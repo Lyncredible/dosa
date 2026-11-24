@@ -552,3 +552,48 @@ fn guest_truncate_and_write_do_not_change_an_outside_hard_link() {
     assert_eq!(fs::read(mounted.join("LINK.DAT")).unwrap(), b"inside");
     assert_eq!(fs::read(outside).unwrap(), b"remain outside");
 }
+
+#[test]
+fn simultaneous_read_and_write_handles_see_current_contents() {
+    let dir = Fixture::new();
+    fs::write(dir.0.join("SHARED.DAT"), b"old").unwrap();
+    let mut program = Vec::new();
+    fn dos_call(program: &mut Vec<u8>, setup: &[u8]) {
+        program.extend_from_slice(setup);
+        program.extend_from_slice(&[
+            0xcd, 0x21, 0x73, 5, // Continue on success.
+            0xb8, 1, 0x4c, 0xcd, 0x21,
+        ]);
+    }
+    dos_call(&mut program, &[0xba, 0, 3, 0xb8, 0, 0x3d]); // Read-only open.
+    program.extend_from_slice(&[0x89, 0xc6]); // Preserve handle A in SI.
+    dos_call(&mut program, &[0xba, 0, 3, 0xb8, 2, 0x3d]); // Read/write open.
+    program.extend_from_slice(&[0x89, 0xc3]); // Handle B in BX.
+    dos_call(&mut program, &[0xba, 0x10, 3, 0xb9, 3, 0, 0xb4, 0x40]);
+    program.extend_from_slice(&[0x89, 0xf3]); // Read the update through handle A.
+    dos_call(&mut program, &[0xba, 0x20, 3, 0xb9, 3, 0, 0xb4, 0x3f]);
+    dos_call(
+        &mut program,
+        &[0xbb, 1, 0, 0xba, 0x20, 3, 0xb9, 3, 0, 0xb4, 0x40],
+    );
+    program.extend_from_slice(&[
+        0x89, 0xf3, 0xba, 0x10, 3, 0xb9, 1, 0, 0xb4, 0x40, 0xcd, 0x21, 0x72,
+        5, // A read-only handle must reject the write.
+        0xb8, 1, 0x4c, 0xcd, 0x21, 0xb8, 0, 0x4c, 0xcd, 0x21,
+    ]);
+    program.resize(0x200, 0);
+    program.extend_from_slice(b"SHARED.DAT\0");
+    program.resize(0x210, 0);
+    program.extend_from_slice(b"new");
+    fs::write(dir.0.join("SHARE.COM"), program).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .arg("--mount-rw")
+        .arg(format!("C={}", dir.0.display()))
+        .args(["--headless", "--exec", "share"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"new");
+    assert_eq!(fs::read(dir.0.join("SHARED.DAT")).unwrap(), b"new");
+}
