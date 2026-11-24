@@ -39,7 +39,10 @@ impl Audio {
             self.sample = start;
         }
         while self.sample < end {
-            let tick = (u128::from(self.sample) * pit::FREQUENCY / u128::from(SAMPLE_RATE)) as u64;
+            // Sample at the end of each PCM interval. The prior advance may
+            // have committed a PIT reload partway through this interval.
+            let tick =
+                (u128::from(self.sample + 1) * pit::FREQUENCY / u128::from(SAMPLE_RATE)) as u64;
             self.sound_blaster.advance(1, &mut self.dma, cpu);
             let value =
                 (self.speaker.sample(tick) + self.adlib.sample() + self.sound_blaster.sample())

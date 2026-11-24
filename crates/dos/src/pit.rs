@@ -72,8 +72,8 @@ impl Pit {
 
 struct Counter {
     control: u8,
-    divisor: u64,
-    epoch: Option<u64>,
+    period: Option<Period>,
+    reload: Option<Period>,
     next_edge: Option<u64>,
     low_byte: Option<u8>,
     read_high: bool,
@@ -85,8 +85,8 @@ impl Counter {
     fn new(now: u64, divisor: u64) -> Self {
         Self {
             control: 0x34,
-            divisor,
-            epoch: Some(now),
+            period: Some(Period::new(now, divisor)),
+            reload: None,
             next_edge: Some(now + divisor),
             low_byte: None,
             read_high: false,
@@ -96,12 +96,30 @@ impl Counter {
     }
 
     fn advance(&mut self, now: u64) -> u64 {
+        if let Some(reload) = self.reload.filter(|reload| reload.tick <= now) {
+            let edges = self.advance_edges(reload.tick - 1);
+            self.period = self.reload.take();
+            if reload.starts_low {
+                self.next_edge = Some(reload.tick + reload.divisor / 2);
+                return edges + self.advance_edges(now);
+            }
+            self.next_edge = Some(reload.tick + reload.divisor);
+            return edges + 1 + self.advance_edges(now);
+        }
+        self.advance_edges(now)
+    }
+
+    fn advance_edges(&mut self, now: u64) -> u64 {
         let Some(edge) = self.next_edge.filter(|&edge| now >= edge) else {
             return 0;
         };
         if matches!(self.mode(), 2 | 3) {
-            let count = (now - edge) / self.divisor + 1;
-            self.next_edge = Some(now + self.divisor - (now - edge) % self.divisor);
+            let divisor = self
+                .period
+                .expect("scheduled periodic edge has a count")
+                .divisor;
+            let count = (now - edge) / divisor + 1;
+            self.next_edge = Some(now + divisor - (now - edge) % divisor);
             count
         } else {
             self.next_edge = None;
@@ -115,7 +133,8 @@ impl Counter {
             return;
         }
         self.control = value & 0x3f;
-        self.epoch = None;
+        self.period = None;
+        self.reload = None;
         self.next_edge = None;
         self.low_byte = None;
         self.read_high = false;
@@ -129,7 +148,8 @@ impl Counter {
             self.read_high = false;
         }
         if status && self.latched_status.is_none() {
-            let null_count = self.epoch.is_none_or(|epoch| epoch > now);
+            let null_count =
+                self.reload.is_some() || self.period.is_none_or(|period| period.tick > now);
             self.latched_status =
                 Some(self.control | u8::from(self.output(now)) << 7 | u8::from(null_count) << 6);
         }
@@ -168,20 +188,28 @@ impl Counter {
                 None => {
                     self.low_byte = Some(value);
                     if self.mode() == 0 {
-                        self.epoch = None;
+                        self.period = None;
                         self.next_edge = None;
                     }
                     return;
                 }
             },
         };
-        self.divisor = decode_count(raw, self.control & 1 != 0);
+        let divisor = decode_count(raw, self.control & 1 != 0);
+        let mode = self.mode();
+        if let Some(reload) = self
+            .period
+            .and_then(|period| period.deferred_reload(mode, now, divisor))
+        {
+            self.reload = Some(reload);
+            return;
+        }
         // The board wires both gates high. Hardware-triggered modes require
         // a new rising gate edge and cannot start from a counter write.
-        if !matches!(self.mode(), 1 | 5) {
-            let epoch = now + 1;
-            self.epoch = Some(epoch);
-            self.next_edge = Some(epoch + self.divisor + u64::from(self.mode() == 4));
+        if !matches!(mode, 1 | 5) {
+            let tick = now + 1;
+            self.period = Some(Period::new(tick, divisor));
+            self.next_edge = Some(tick + divisor + u64::from(mode == 4));
         }
     }
 
@@ -194,24 +222,25 @@ impl Counter {
     }
 
     fn count(&self, now: u64) -> u16 {
-        let Some(epoch) = self.epoch else {
+        let Some(period) = self.period else {
             return 0;
         };
-        let elapsed = now.saturating_sub(epoch);
+        let elapsed = now.saturating_sub(period.tick);
+        let divisor = period.divisor;
         let limit = if self.control & 1 == 0 {
             BIOS_DIVISOR
         } else {
             10_000
         };
         let value = match self.mode() {
-            2 => self.divisor - elapsed % self.divisor,
+            2 => divisor - elapsed % divisor,
             3 => {
-                let phase = elapsed % self.divisor;
-                let half = self.divisor.div_ceil(2);
+                let phase = period.phase(now);
+                let half = divisor.div_ceil(2);
                 let steps = if phase < half { phase } else { phase - half };
-                (self.divisor & !1).saturating_sub(steps * 2)
+                (divisor & !1).saturating_sub(steps * 2)
             }
-            _ => (self.divisor + limit - elapsed % limit) % limit,
+            _ => (divisor + limit - elapsed % limit) % limit,
         };
         if self.control & 1 == 0 {
             value as u16
@@ -221,17 +250,56 @@ impl Counter {
     }
 
     fn output(&self, now: u64) -> bool {
-        let Some(epoch) = self.epoch.filter(|&epoch| epoch <= now) else {
+        let Some(period) = self.period.filter(|period| period.tick <= now) else {
             return self.mode() != 0;
         };
-        let elapsed = now - epoch;
+        let elapsed = now - period.tick;
+        let divisor = period.divisor;
         match self.mode() {
-            0 => elapsed >= self.divisor,
-            2 => elapsed % self.divisor != self.divisor - 1,
-            3 => elapsed % self.divisor < self.divisor.div_ceil(2),
-            4 => elapsed != self.divisor,
+            0 => elapsed >= divisor,
+            2 => elapsed % divisor != divisor - 1,
+            3 => period.phase(now) < divisor.div_ceil(2),
+            4 => elapsed != divisor,
             _ => true,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Period {
+    pub tick: u64,
+    pub divisor: u64,
+    starts_low: bool,
+}
+
+impl Period {
+    pub fn new(tick: u64, divisor: u64) -> Self {
+        Self {
+            tick,
+            divisor,
+            starts_low: false,
+        }
+    }
+
+    pub fn phase(self, now: u64) -> u64 {
+        let elapsed = now.saturating_sub(self.tick) % self.divisor;
+        let offset = u64::from(self.starts_low) * self.divisor.div_ceil(2);
+        (elapsed + offset) % self.divisor
+    }
+
+    pub fn deferred_reload(self, mode: u8, now: u64, divisor: u64) -> Option<Self> {
+        if !matches!(mode, 2 | 3) || self.tick > now {
+            return None;
+        }
+        let phase = self.phase(now);
+        let half = self.divisor.div_ceil(2);
+        let starts_low = mode == 3 && phase < half;
+        let boundary = if starts_low { half } else { self.divisor };
+        Some(Self {
+            tick: now + boundary - phase,
+            divisor,
+            starts_low,
+        })
     }
 }
 
@@ -298,6 +366,49 @@ mod tests {
         assert_eq!(pit.port_read(0x40), Some(0xff));
         pit.advance(0x1000);
         assert_eq!(pit.port_read(0x40), Some(0xff));
+    }
+
+    #[test]
+    fn mode_two_reload_preserves_old_irq_boundary_and_clears_null_count() {
+        let mut pit = Pit::new(0);
+        pit.port_write(0x43, 0x14);
+        pit.port_write(0x40, 10);
+        pit.advance(4);
+        pit.port_write(0x40, 4);
+        pit.port_write(0x43, 0xc2);
+        assert_eq!(pit.port_read(0x40), Some(0xd4));
+        assert_eq!(pit.port_read(0x40), Some(7));
+        pit.advance(10);
+        assert!(!pit.irq_requested());
+        pit.advance(11);
+        assert!(pit.irq_requested());
+        pit.acknowledge_irq();
+        pit.port_write(0x43, 0xc2);
+        assert_eq!(pit.port_read(0x40), Some(0x94));
+        assert_eq!(pit.port_read(0x40), Some(4));
+        pit.advance(14);
+        assert!(!pit.irq_requested());
+        pit.advance(15);
+        assert!(pit.irq_requested());
+    }
+
+    #[test]
+    fn mode_three_refresh_counts_rises_across_a_deferred_half_cycle_reload() {
+        let mut pit = Pit::new(0);
+        pit.port_write(0x43, 0x56);
+        pit.port_write(0x41, 10);
+        pit.advance(4);
+        pit.port_write(0x41, 7);
+        pit.port_write(0x41, 9); // Last completed count wins.
+        pit.advance(6);
+        assert!(!pit.refresh_toggle()); // Load 9 at the falling edge.
+        assert_eq!(pit.port_read(0x41), Some(8));
+        pit.advance(9);
+        assert!(!pit.refresh_toggle());
+        pit.advance(19); // Rising edges at 10 and 19.
+        assert!(!pit.refresh_toggle());
+        pit.advance(28);
+        assert!(pit.refresh_toggle());
     }
 
     #[test]
