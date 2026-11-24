@@ -201,7 +201,9 @@ mod tests {
         );
         machine.state = crate::RunState::Running;
         machine.run(20).unwrap();
-        machine.audio.advance(std::time::Duration::from_secs(1));
+        machine
+            .audio
+            .advance(std::time::Duration::from_secs(1), &machine.cpu);
         let samples = machine.take_audio();
         assert!(samples.contains(&0.12) && samples.contains(&-0.12));
     }

@@ -3,6 +3,7 @@
 mod adlib;
 mod audio;
 mod bios;
+mod dma;
 mod files;
 mod keyboard;
 mod loader;
@@ -10,6 +11,7 @@ mod mouse;
 mod pic;
 mod pit;
 mod services;
+mod sound_blaster;
 mod speaker;
 mod vga;
 mod video;
@@ -433,7 +435,7 @@ impl Machine {
     fn advance_timers(&mut self) {
         let elapsed = self.clock.elapsed();
         self.pit.advance(pit::ticks(elapsed));
-        self.audio.advance(elapsed);
+        self.audio.advance(elapsed, &self.cpu);
     }
 
     fn poll_keyboard_wait(&mut self) {
@@ -476,7 +478,7 @@ impl Machine {
             Step::Interrupt(vector) => self.interrupt(vector)?,
             Step::PortRead { port, width } => {
                 let elapsed = self.clock.elapsed();
-                self.audio.advance(elapsed);
+                self.audio.advance(elapsed, &self.cpu);
                 let mut value = 0;
                 for byte in 0..width {
                     let port = port.wrapping_add(u16::from(byte));
@@ -498,8 +500,8 @@ impl Machine {
                     let port = port.wrapping_add(u16::from(byte));
                     let value = (value >> (byte * 8)) as u8;
                     let elapsed = self.clock.elapsed();
-                    self.audio.advance(elapsed);
-                    if !self.audio.write_port(port, value, elapsed)
+                    self.audio.advance(elapsed, &self.cpu);
+                    if !self.audio.write_port(port, value, elapsed, &mut self.cpu)
                         && !self.pic.port_write(port, value)
                         && !self.pit.port_write(port, value)
                         && !self.keyboard.port_write(port, value)
@@ -514,7 +516,9 @@ impl Machine {
     }
 
     fn irq_requests(&self) -> u8 {
-        u8::from(self.pit.irq_requested()) | (u8::from(self.keyboard.irq_requested()) << 1)
+        u8::from(self.pit.irq_requested())
+            | (u8::from(self.keyboard.irq_requested()) << 1)
+            | (u8::from(self.audio.irq_requested()) << sound_blaster::IRQ)
     }
 
     fn service_hardware_interrupt(&mut self) -> bool {
@@ -531,6 +535,9 @@ impl Machine {
         if self.has_interrupt_handler(vector) {
             if vector == KEYBOARD_VECTOR {
                 self.keyboard.acknowledge_irq();
+            }
+            if irq == sound_blaster::IRQ {
+                self.audio.acknowledge_irq();
             }
             self.pic.acknowledge(irq);
             self.cpu.enter_interrupt(vector);
