@@ -8,6 +8,7 @@ mod mouse;
 mod pic;
 mod pit;
 mod services;
+mod speaker;
 mod vga;
 mod video;
 
@@ -130,6 +131,7 @@ pub struct Machine {
     mouse: Mouse,
     pic: Pic,
     pit: Pit,
+    speaker: speaker::Speaker,
     modifiers: u8,
     locks: u8,
     output: Vec<u8>,
@@ -166,6 +168,7 @@ impl Machine {
             mouse: Mouse::default(),
             pic: Pic::default(),
             pit: Pit::new(0),
+            speaker: speaker::Speaker::new(0),
             modifiers: 0,
             locks: 0,
             output: Vec::new(),
@@ -239,6 +242,7 @@ impl Machine {
         self.mouse = Mouse::default();
         self.pic = Pic::default();
         self.pit = Pit::new(now);
+        self.speaker = speaker::Speaker::new(now);
         self.modifiers = 0;
         self.locks = 0;
         self.output.clear();
@@ -377,6 +381,11 @@ impl Machine {
         std::mem::take(&mut self.output)
     }
 
+    /// Drain mono PC audio at 48 kHz. The queue retains at most 200 milliseconds.
+    pub fn take_audio(&mut self) -> Vec<f32> {
+        self.speaker.drain()
+    }
+
     pub fn stop(&mut self) {
         if self.state.is_active() {
             self.exit(3);
@@ -390,12 +399,15 @@ impl Machine {
         self.state = RunState::Running;
         let now = pit::ticks(self.clock.elapsed());
         self.pit.advance(now);
+        self.speaker.advance(now);
         for instruction in 0..budget {
             if !matches!(self.state, RunState::Running | RunState::WaitingForKey) {
                 break;
             }
             if instruction != 0 && instruction % TIMER_SAMPLE_INTERVAL == 0 {
-                self.pit.advance(pit::ticks(self.clock.elapsed()));
+                let now = pit::ticks(self.clock.elapsed());
+                self.pit.advance(now);
+                self.speaker.advance(now);
             }
             self.poll_keyboard_wait();
             if self.state != RunState::Running {
@@ -449,6 +461,7 @@ impl Machine {
             Step::Continue => {}
             Step::Interrupt(vector) => self.interrupt(vector)?,
             Step::PortRead { port, width } => {
+                self.speaker.advance(pit::ticks(self.clock.elapsed()));
                 let mut value = 0;
                 for byte in 0..width {
                     let port = port.wrapping_add(u16::from(byte));
@@ -456,6 +469,7 @@ impl Machine {
                     let part = self
                         .pic
                         .port_read(port, requests)
+                        .or_else(|| self.speaker.read_port(port))
                         .or_else(|| self.pit.port_read(port))
                         .or_else(|| self.keyboard.port_read(port))
                         .or_else(|| self.video.port_read(port))
@@ -468,7 +482,9 @@ impl Machine {
                 for byte in 0..width {
                     let port = port.wrapping_add(u16::from(byte));
                     let value = (value >> (byte * 8)) as u8;
-                    if !self.pic.port_write(port, value)
+                    self.speaker.advance(pit::ticks(self.clock.elapsed()));
+                    if !self.speaker.write_port(port, value)
+                        && !self.pic.port_write(port, value)
                         && !self.pit.port_write(port, value)
                         && !self.keyboard.port_write(port, value)
                     {

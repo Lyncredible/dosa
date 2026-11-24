@@ -257,6 +257,19 @@ impl Desktop {
 }
 
 impl App for Desktop {
+    fn audio(&mut self) -> Vec<f32> {
+        let samples = self.shell.machine.take_audio();
+        if self.running && !self.paused {
+            samples
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn audio_error(&mut self, error: &str) {
+        self.status = format!("Audio unavailable: {error}");
+    }
+
     fn tick(&mut self) {
         if self.running && !self.paused {
             match self
