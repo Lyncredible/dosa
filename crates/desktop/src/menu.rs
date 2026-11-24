@@ -557,9 +557,9 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
         Tab::Drives => [
             ("Mount file...", MountKind::File),
             ("Mount folder...", MountKind::Folder),
-            ("Mount ZIP...", MountKind::Zip),
+            ("Mount ZIP...", MountKind::SessionZip),
+            ("Mount read-only ZIP...", MountKind::Zip),
             ("Mount ISO image...", MountKind::Iso),
-            ("Writable ZIP copy...", MountKind::SessionZip),
         ]
         .into_iter()
         .map(|(label, kind)| item(label, Command::Mount(kind, drive), can_change_mounts, false))
@@ -700,7 +700,7 @@ pub(crate) fn pick_path(window: &Window, kind: MountKind) -> Option<PathBuf> {
         MountKind::File => dialog.set_title("Mount a file").pick_file(),
         MountKind::Folder => dialog.set_title("Mount a folder").pick_folder(),
         MountKind::Zip => dialog
-            .set_title("Mount a ZIP archive")
+            .set_title("Mount a read-only ZIP archive")
             .add_filter("ZIP archive", &["zip"])
             .pick_file(),
         MountKind::Iso => dialog
@@ -708,7 +708,7 @@ pub(crate) fn pick_path(window: &Window, kind: MountKind) -> Option<PathBuf> {
             .add_filter("ISO image", &["iso"])
             .pick_file(),
         MountKind::SessionZip => dialog
-            .set_title("Mount a writable ZIP copy")
+            .set_title("Mount a temporary writable ZIP copy")
             .add_filter("ZIP archive", &["zip"])
             .pick_file(),
     }
@@ -793,8 +793,8 @@ mod tests {
             (true, None)
         );
         menu.key(&input(Key::Character('z'), false), None, &state, false);
-        menu.key(&input(Key::Up, false), None, &state, false);
-        menu.key(&input(Key::Up, false), None, &state, false);
+        menu.key(&input(Key::Down, false), None, &state, false);
+        menu.key(&input(Key::Down, false), None, &state, false);
         assert_eq!(
             menu.key(&input(Key::Enter, false), None, &state, false),
             (true, Some(Command::Mount(MountKind::SessionZip, 'Z')))

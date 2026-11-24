@@ -51,6 +51,7 @@ pub enum DosError {
     Busy,
     Mount(MountError),
     Cpu(CpuError),
+    CpuAfterDeniedWrite { error: CpuError, drive: char },
     Interrupt { vector: u8, ax: u16 },
 }
 
@@ -67,6 +68,10 @@ impl fmt::Display for DosError {
             Self::Busy => f.write_str("a DOS program is already running"),
             Self::Mount(error) => write!(f, "{error}"),
             Self::Cpu(error) => write!(f, "{error}"),
+            Self::CpuAfterDeniedWrite { error, drive } => write!(
+                f,
+                "{error}\r\nAn earlier write request to {drive}: failed because the drive is read-only."
+            ),
             Self::Interrupt { vector, ax } => {
                 write!(f, "unsupported interrupt {vector:02X}h (AX={ax:04X}h)")
             }
@@ -494,7 +499,14 @@ impl Machine {
         if self.mouse.at_driver_entry(&self.cpu) {
             self.mouse_interrupt();
         }
-        match self.cpu.step().map_err(DosError::Cpu)? {
+        let step = self
+            .cpu
+            .step()
+            .map_err(|error| match self.files.denied_write_drive {
+                Some(drive) => DosError::CpuAfterDeniedWrite { error, drive },
+                None => DosError::Cpu(error),
+            })?;
+        match step {
             Step::Continue => {}
             Step::Interrupt(vector) => self.interrupt(vector)?,
             Step::PortRead { port, width } => {

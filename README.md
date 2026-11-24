@@ -8,7 +8,7 @@ Install the stable Rust toolchain and build with Cargo.
 
 ~~~console
 cargo build --release --locked
-cargo run --release -- --mount C=path/to/games.zip
+cargo run --release -- --mount-session C=path/to/games.zip
 ~~~
 
 The first mounted drive is selected on startup. Type `DIR` to list its contents and enter a program name to start it. When you omit the extension, the shell checks `.COM`, `.EXE`, and `.BAT` in that order. Type `HELP` for more shell commands.
@@ -32,7 +32,7 @@ D:
 DIR
 ~~~
 
-Mounts are read-only by default. To let DOS programs save files, explicitly mount a host directory with `--mount-rw`.
+The `--mount` flag opens sources read-only. To let DOS programs save files to a host directory, mount it with `--mount-rw`.
 
 ~~~console
 dosa --mount C=programs.zip --mount-rw D=dos-saves
@@ -40,7 +40,7 @@ dosa --mount C=programs.zip --mount-rw D=dos-saves
 
 Create the host directory before mounting it. The guest can create, write, truncate, rename, and delete files there, and can create and remove empty directories. New names must use DOS 8.3 syntax.
 
-Use `--mount-session C=programs.zip` if a program needs to open ZIP files for writing. Dosa mounts the archive's DOS 8.3 names in a temporary writable directory. Changes last until the mount is replaced or Dosa exits, and the source ZIP stays unchanged. The Drives menu offers **Writable ZIP copy** for the same mode.
+**Drives → Mount ZIP** and `--mount-session C=programs.zip` put the archive's DOS 8.3 files in a temporary writable directory. Changes last until the mount is replaced or Dosa exits, and the source ZIP stays unchanged. Choose **Mount read-only ZIP** or `--mount C=programs.zip` for a read-only view.
 
 Headless execution returns the program's DOS exit code. It reports an error if the guest needs keyboard input or reaches the instruction limit.
 
