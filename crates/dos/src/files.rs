@@ -1,4 +1,5 @@
-use dosa_mount::{Entry, Mount, MountError};
+use dosa_mount::{Entry, Mount, MountError, WritableFile, WriteDisposition};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 
 const MAX_OPEN_BYTES: u64 = 256 * 1024 * 1024;
@@ -7,12 +8,17 @@ pub(crate) struct DosFiles {
     pub drive: char,
     directories: BTreeMap<char, String>,
     handles: BTreeMap<u16, File>,
-    search: VecDeque<Entry>,
+    search: VecDeque<(Entry, u8)>,
 }
 
 struct File {
-    bytes: Vec<u8>,
+    source: FileSource,
     position: usize,
+}
+
+enum FileSource {
+    ReadOnly(Vec<u8>),
+    Writable { file: WritableFile, readable: bool },
 }
 
 impl DosFiles {
@@ -76,46 +82,135 @@ impl DosFiles {
 
     pub(crate) fn chdir(&mut self, mounts: &BTreeMap<char, Mount>, name: &str) -> Result<(), u16> {
         let (drive, mount, path) = self.resolve_mount(mounts, name)?;
-        let mut canonical = String::new();
-        for part in path.split('\\').filter(|part| !part.is_empty()) {
-            let candidate = if canonical.is_empty() {
-                part.to_owned()
-            } else {
-                format!("{canonical}\\{part}")
-            };
-            let entry = mount.metadata(&candidate).map_err(|_| 3u16)?;
-            if !entry.is_dir {
-                return Err(3);
-            }
-            if !canonical.is_empty() {
-                canonical.push('\\');
-            }
-            canonical.push_str(&entry.name);
-        }
+        let canonical = canonical_directory(mount, &path)?;
         self.directories.insert(drive, canonical);
         Ok(())
     }
 
-    pub(crate) fn open(&mut self, mounts: &BTreeMap<char, Mount>, name: &str) -> Result<u16, u16> {
+    pub(crate) fn mkdir(&self, mounts: &BTreeMap<char, Mount>, name: &str) -> Result<(), u16> {
         let (_, mount, path) = self.resolve_mount(mounts, name)?;
-        let handle = (5..64)
+        mount.create_dir(&path).map_err(directory_code)
+    }
+
+    pub(crate) fn rmdir(&self, mounts: &BTreeMap<char, Mount>, name: &str) -> Result<(), u16> {
+        let (drive, mount, path) = self.resolve_mount(mounts, name)?;
+        let canonical = canonical_directory(mount, &path)?;
+        if canonical.eq_ignore_ascii_case(self.directory(drive)) {
+            return Err(16);
+        }
+        mount.remove_dir(&path).map_err(directory_code)
+    }
+
+    pub(crate) fn open(
+        &mut self,
+        mounts: &BTreeMap<char, Mount>,
+        name: &str,
+        mode: u8,
+    ) -> Result<u16, u16> {
+        let (_, mount, path) = self.resolve_mount(mounts, name)?;
+        let handle = self.next_handle()?;
+        let source = match mode & 3 {
+            0 => FileSource::ReadOnly(self.read_file(mount, &path)?),
+            1 | 2 => FileSource::Writable {
+                file: mount
+                    .open_writable_file(&path, WriteDisposition::OpenExisting)
+                    .map_err(mount_code)?,
+                readable: mode & 3 == 2,
+            },
+            _ => return Err(12),
+        };
+        self.handles.insert(
+            handle,
+            File {
+                source,
+                position: 0,
+            },
+        );
+        Ok(handle)
+    }
+
+    pub(crate) fn create(
+        &mut self,
+        mounts: &BTreeMap<char, Mount>,
+        name: &str,
+    ) -> Result<u16, u16> {
+        let (_, mount, path) = self.resolve_mount(mounts, name)?;
+        let handle = self.next_handle()?;
+        self.check_file_not_open_for_writing(mount, &path)?;
+        let file = mount
+            .open_writable_file(&path, WriteDisposition::CreateOrTruncate)
+            .map_err(mount_code)?;
+        let source = FileSource::Writable {
+            file,
+            readable: true,
+        };
+        self.handles.insert(
+            handle,
+            File {
+                source,
+                position: 0,
+            },
+        );
+        Ok(handle)
+    }
+
+    pub(crate) fn delete(&self, mounts: &BTreeMap<char, Mount>, name: &str) -> Result<(), u16> {
+        let (_, mount, path) = self.resolve_mount(mounts, name)?;
+        self.check_file_not_open_for_writing(mount, &path)?;
+        mount.remove_file(&path).map_err(mount_code)
+    }
+
+    pub(crate) fn rename(
+        &self,
+        mounts: &BTreeMap<char, Mount>,
+        from: &str,
+        to: &str,
+    ) -> Result<(), u16> {
+        let (drive, mount, from) = self.resolve_mount(mounts, from)?;
+        let (destination_drive, to) = self.resolve(to)?;
+        if drive != destination_drive {
+            return Err(17);
+        }
+        self.check_file_not_open_for_writing(mount, &from)?;
+        mount.rename_file(&from, &to).map_err(mount_code)
+    }
+
+    fn next_handle(&self) -> Result<u16, u16> {
+        (5..64)
             .find(|handle| !self.handles.contains_key(handle))
-            .ok_or(4u16)?;
+            .ok_or(4)
+    }
+
+    fn check_file_not_open_for_writing(&self, mount: &Mount, path: &str) -> Result<(), u16> {
+        if self.handles.values().any(|f| matches!(f.source, FileSource::Writable { .. }))
+            && let Ok(target) = mount.open_writable_file(path, WriteDisposition::OpenExisting)
+            && self.handles.values().any(|open| {
+                matches!(&open.source, FileSource::Writable { file, .. } if file.same_target(&target))
+            })
+        {
+            return Err(5);
+        }
+        Ok(())
+    }
+
+    fn read_file(&self, mount: &Mount, path: &str) -> Result<Vec<u8>, u16> {
         let remaining = MAX_OPEN_BYTES
             - self
                 .handles
                 .values()
-                .map(|f| f.bytes.len() as u64)
+                .map(|f| match &f.source {
+                    FileSource::ReadOnly(bytes) => bytes.len() as u64,
+                    FileSource::Writable { .. } => 0,
+                })
                 .sum::<u64>();
-        if mount.metadata(&path).map_err(mount_code)?.size > remaining {
+        if mount.metadata(path).map_err(mount_code)?.size > remaining {
             return Err(8);
         }
-        let bytes = mount.read(&path).map_err(mount_code)?;
+        let bytes = mount.read(path).map_err(mount_code)?;
         if bytes.len() as u64 > remaining {
             return Err(8);
         }
-        self.handles.insert(handle, File { bytes, position: 0 });
-        Ok(handle)
+        Ok(bytes)
     }
 
     pub(crate) fn attributes(
@@ -125,7 +220,7 @@ impl DosFiles {
     ) -> Result<u16, u16> {
         let (_, mount, path) = self.resolve_mount(mounts, name)?;
         let entry = mount.metadata(&path).map_err(mount_code)?;
-        Ok(u16::from(attributes(&entry)))
+        Ok(u16::from(attributes(&entry, !mount.is_writable())))
     }
 
     pub(crate) fn close(&mut self, handle: u16) -> Result<(), u16> {
@@ -136,12 +231,58 @@ impl DosFiles {
         self.handles.contains_key(&handle)
     }
 
-    pub(crate) fn read(&mut self, handle: u16, length: usize) -> Result<&[u8], u16> {
+    pub(crate) fn check_write_handle(&self, handle: u16) -> Result<(), u16> {
+        match self.handles.get(&handle).map(|file| &file.source) {
+            Some(FileSource::Writable { .. }) => Ok(()),
+            Some(FileSource::ReadOnly(_)) => Err(5),
+            None => Err(6),
+        }
+    }
+
+    pub(crate) fn read(&mut self, handle: u16, length: usize) -> Result<Cow<'_, [u8]>, u16> {
         let file = self.handles.get_mut(&handle).ok_or(6u16)?;
-        let start = file.position.min(file.bytes.len());
-        let end = (start + length).min(file.bytes.len());
-        file.position += end - start;
-        Ok(&file.bytes[start..end])
+        let data = match &file.source {
+            FileSource::ReadOnly(bytes) => Cow::Borrowed(read_slice(bytes, file.position, length)),
+            FileSource::Writable {
+                file: source,
+                readable: true,
+            } => {
+                let bytes = source.read().map_err(mount_code)?;
+                Cow::Owned(read_slice(&bytes, file.position, length).to_vec())
+            }
+            FileSource::Writable {
+                readable: false, ..
+            } => return Err(5),
+        };
+        file.position += data.len();
+        Ok(data)
+    }
+
+    pub(crate) fn write(&mut self, handle: u16, data: &[u8]) -> Result<(), u16> {
+        let file = self.handles.get_mut(&handle).ok_or(6u16)?;
+        let FileSource::Writable {
+            file: destination, ..
+        } = &file.source
+        else {
+            return Err(5);
+        };
+        let end = file
+            .position
+            .checked_add(data.len())
+            .filter(|&end| end as u64 <= MAX_OPEN_BYTES)
+            .ok_or(112u16)?;
+        let mut bytes = destination.read().map_err(mount_code)?;
+        if data.is_empty() {
+            bytes.resize(end, 0);
+        } else {
+            if end > bytes.len() {
+                bytes.resize(end, 0);
+            }
+            bytes[file.position..end].copy_from_slice(data);
+        }
+        destination.replace(&bytes).map_err(mount_code)?;
+        file.position = end;
+        Ok(())
     }
 
     pub(crate) fn seek(&mut self, handle: u16, origin: u8, offset: i32) -> Result<u32, u16> {
@@ -149,7 +290,12 @@ impl DosFiles {
         let base = match origin {
             0 => 0,
             1 => file.position,
-            2 => file.bytes.len(),
+            2 => match &file.source {
+                FileSource::ReadOnly(bytes) => bytes.len(),
+                FileSource::Writable { file: source, .. } => {
+                    source.read().map_err(mount_code)?.len()
+                }
+            },
             _ => return Err(1),
         };
         let position = u32::try_from(base as i64 + i64::from(offset)).map_err(|_| 1u16)?;
@@ -162,7 +308,7 @@ impl DosFiles {
         mounts: &BTreeMap<char, Mount>,
         pattern: &str,
         mask: u16,
-    ) -> Result<Entry, u16> {
+    ) -> Result<(Entry, u8), u16> {
         self.search.clear();
         let (_, mount, path) = self.resolve_mount(mounts, pattern)?;
         let (directory, name) = path.rsplit_once('\\').unwrap_or(("", &path));
@@ -175,23 +321,70 @@ impl DosFiles {
                     && mask & 0x08 == 0
                     && matches(&entry.name, name)
             })
+            .map(|entry| {
+                let attributes = attributes(&entry, !mount.is_writable());
+                (entry, attributes)
+            })
             .collect();
         self.next()
     }
 
-    pub(crate) fn next(&mut self) -> Result<Entry, u16> {
+    pub(crate) fn next(&mut self) -> Result<(Entry, u8), u16> {
         self.search.pop_front().ok_or(18)
     }
 }
 
-pub(crate) fn attributes(entry: &Entry) -> u8 {
-    if entry.is_dir { 0x10 } else { 0x21 }
+fn attributes(entry: &Entry, read_only: bool) -> u8 {
+    if entry.is_dir {
+        0x10
+    } else {
+        0x20 | u8::from(read_only)
+    }
+}
+
+fn canonical_directory(mount: &Mount, path: &str) -> Result<String, u16> {
+    let mut canonical = String::new();
+    for part in path.split('\\').filter(|part| !part.is_empty()) {
+        let candidate = if canonical.is_empty() {
+            part.to_owned()
+        } else {
+            format!("{canonical}\\{part}")
+        };
+        let entry = mount.metadata(&candidate).map_err(|_| 3u16)?;
+        if !entry.is_dir {
+            return Err(3);
+        }
+        if !canonical.is_empty() {
+            canonical.push('\\');
+        }
+        canonical.push_str(&entry.name);
+    }
+    Ok(canonical)
+}
+
+fn read_slice(bytes: &[u8], position: usize, length: usize) -> &[u8] {
+    let start = position.min(bytes.len());
+    let end = start.saturating_add(length).min(bytes.len());
+    &bytes[start..end]
+}
+
+fn directory_code(error: MountError) -> u16 {
+    if error.is_not_found() {
+        3
+    } else {
+        mount_code(error)
+    }
 }
 
 fn mount_code(error: MountError) -> u16 {
     match error {
         MountError::NotFound(..) => 2,
         MountError::InvalidPath(..) | MountError::NotDirectory(..) => 3,
+        MountError::AlreadyExists(..) => 80,
+        MountError::FileTooLarge => 8,
+        MountError::Io(error) if error.kind() == std::io::ErrorKind::StorageFull => 112,
+        MountError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => 2,
+        MountError::Io(error) if error.kind() == std::io::ErrorKind::AlreadyExists => 80,
         _ => 5,
     }
 }

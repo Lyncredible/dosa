@@ -13,7 +13,8 @@ use dosa_dos::RunState;
 use dosa_mount::Mount;
 
 use profile::{
-    LaunchProfile, SettingsOverrides, parse_cpu, parse_speed, parse_text_columns, parse_text_rows,
+    LaunchProfile, SettingsOverrides, StartupMount, parse_cpu, parse_speed, parse_text_columns,
+    parse_text_rows,
 };
 
 const USAGE: &str = "\
@@ -21,6 +22,7 @@ Usage: dosa [OPTIONS]
 
   --profile PATH       Load a TOML launch profile
   --mount DRIVE=PATH   Mount a host file, directory, or ZIP (repeatable)
+  --mount-rw DRIVE=DIR Mount a writable host directory (repeatable)
   --exec COMMAND       Run a DOS shell command on startup
   --cpu 8086|286|386   Select the guest CPU profile
   --speed SPEED        Select slow, normal, fast, or maximum desktop pacing
@@ -61,9 +63,16 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
                 println!("dosa {}", env!("CARGO_PKG_VERSION"));
                 return Ok(0);
             }
-            Some("--mount") => {
-                let value = args.next().ok_or("--mount needs DRIVE=PATH")?;
-                mounts.push(parse_mount(&value)?);
+            Some(option @ ("--mount" | "--mount-rw")) => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("{option} needs DRIVE=PATH"))?;
+                let (drive, path) = parse_mount(&value)?;
+                mounts.push(StartupMount {
+                    drive,
+                    path,
+                    writable: option == "--mount-rw",
+                });
             }
             Some("--profile") => {
                 let path = args.next().ok_or("--profile needs a TOML path")?;
@@ -109,10 +118,20 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     let settings = overrides.apply(launch.settings);
     let command = command.or(launch.command);
     let mut shell = Shell::new();
-    for (drive, path) in launch.mounts {
+    for StartupMount {
+        drive,
+        path,
+        writable,
+    } in launch.mounts
+    {
+        let mount = if writable {
+            Mount::open_writable_directory(&path)
+        } else {
+            Mount::open(&path)
+        };
         shell.mount(
             drive,
-            Mount::open(&path)
+            mount
                 .map_err(|error| format!("cannot mount {} on {drive}: {error}", path.display()))?,
         )?;
     }
