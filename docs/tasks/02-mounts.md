@@ -12,4 +12,4 @@ The mount crate has Windows tests for DOS name resolution, file and directory mo
 
 ## Writable ZIP copies
 
-Use `--mount-session`, `session_zip = true` in a profile, or Drives → **Writable ZIP copy**. The mount materializes validated DOS paths into a temporary writable drive and retains the original archive. The existing ZIP entry and file limits apply, with an additional 512 MiB limit on initial expansion. DOS and profile integration tests verify write access, reuse within a batch, and unchanged source bytes.
+Use `--mount-session`, `session_zip = true` in a profile, or Drives → **Mount ZIP**. The mount materializes validated DOS paths into a temporary writable drive and retains the original archive. The existing ZIP entry and file limits apply, with an additional 512 MiB limit on initial expansion. **Mount read-only ZIP** keeps the original access mode available. DOS and profile integration tests verify write access, reuse within a batch, and unchanged source bytes.

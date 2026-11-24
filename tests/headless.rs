@@ -114,6 +114,44 @@ fn writable_zip_copy_allows_dos_read_write_access_without_changing_archive() {
 }
 
 #[test]
+fn cpu_fault_reports_an_earlier_read_only_open_failure() {
+    let dir = Fixture::new();
+    let zip = dir.0.join("program.zip");
+    let mut program = vec![
+        0xba, 0x20, 0x01, 0xb8, 0x02, 0x3d, 0xcd, 0x21, // Open STATE.DAT read/write
+        0x73, 2, 0x0f, 0x0b, // Fault only if DOS reports an open failure
+        0xb8, 0, 0x4c, 0xcd, 0x21,
+    ];
+    program.resize(0x20, 0);
+    program.extend(b"STATE.DAT\0");
+
+    let mut archive = zip::ZipWriter::new(fs::File::create(&zip).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    archive.start_file("RUN.COM", options).unwrap();
+    archive.write_all(&program).unwrap();
+    archive.start_file("STATE.DAT", options).unwrap();
+    archive.write_all(b"DATA").unwrap();
+    archive.finish().unwrap();
+
+    let mount = format!("C={}", zip.display());
+    let run = |flag: &str| {
+        Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([flag, &mount, "--headless", "--exec", "run"])
+            .output()
+            .unwrap()
+    };
+    let output = run("--mount");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("Ud2"), "{output:?}");
+    assert!(error.contains("write request to C: failed"), "{output:?}");
+
+    let output = run("--mount-session");
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
 fn launch_profile_applies_guest_settings_and_explicit_cli_overrides() {
     let dir = Fixture::new();
     let profiles = dir.0.join("profiles");

@@ -6,6 +6,7 @@ const MAX_OPEN_BYTES: u64 = 256 * 1024 * 1024;
 
 pub(crate) struct DosFiles {
     pub drive: char,
+    pub(crate) denied_write_drive: Option<char>,
     directories: BTreeMap<char, String>,
     handles: BTreeMap<u16, File>,
     search: VecDeque<(Entry, u8)>,
@@ -29,6 +30,7 @@ impl DosFiles {
     pub(crate) fn new(drive: char, cwd: String) -> Self {
         Self {
             drive,
+            denied_write_drive: None,
             directories: BTreeMap::from([(drive, cwd)]),
             handles: BTreeMap::new(),
             search: VecDeque::new(),
@@ -111,7 +113,7 @@ impl DosFiles {
         name: &str,
         mode: u8,
     ) -> Result<u16, u16> {
-        let (_, mount, path) = self.resolve_mount(mounts, name)?;
+        let (drive, mount, path) = self.resolve_mount(mounts, name)?;
         let handle = self.next_handle()?;
         let source = match mode & 3 {
             0 if mount.is_writable() => FileSource::Writable {
@@ -123,7 +125,7 @@ impl DosFiles {
             1 | 2 => FileSource::Writable {
                 file: mount
                     .open_writable_file(&path, WriteDisposition::OpenExisting)
-                    .map_err(mount_code)?,
+                    .map_err(|error| self.write_open_error(drive, error))?,
                 readable: mode & 3 == 2,
                 writable: true,
             },
@@ -144,12 +146,12 @@ impl DosFiles {
         mounts: &BTreeMap<char, Mount>,
         name: &str,
     ) -> Result<u16, u16> {
-        let (_, mount, path) = self.resolve_mount(mounts, name)?;
+        let (drive, mount, path) = self.resolve_mount(mounts, name)?;
         let handle = self.next_handle()?;
         self.check_file_not_open_for_writing(mount, &path)?;
         let file = mount
             .open_writable_file(&path, WriteDisposition::CreateOrTruncate)
-            .map_err(mount_code)?;
+            .map_err(|error| self.write_open_error(drive, error))?;
         let source = FileSource::Writable {
             file,
             readable: true,
@@ -163,6 +165,13 @@ impl DosFiles {
             },
         );
         Ok(handle)
+    }
+
+    fn write_open_error(&mut self, drive: char, error: MountError) -> u16 {
+        if matches!(error, MountError::ReadOnly) {
+            self.denied_write_drive = Some(drive);
+        }
+        mount_code(error)
     }
 
     pub(crate) fn delete(&self, mounts: &BTreeMap<char, Mount>, name: &str) -> Result<(), u16> {
