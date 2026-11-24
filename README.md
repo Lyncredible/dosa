@@ -17,6 +17,8 @@ Mount a directory, a single file, or a ZIP. Quote host paths containing spaces.
 
 Use `--mount-fat A=floppy.img` to read a FAT volume image as a DOS drive. A profile mount can set `fat_image = true`. FAT images are read-only.
 
+Use `--mount-iso D=disc.iso`, `iso_image = true` in a profile, **Drives → Mount ISO image**, or `IMGMOUNT D "path to disc.iso"` at the Dosa prompt for a read-only ISO 9660 data drive. Dosa reads the primary volume with 2,048-byte blocks and single-extent files. MSCDEX services, CD audio, and disc swapping are planned separately.
+
 ~~~console
 cargo run --release -- --mount "C=path to a directory" --mount D=tools.zip --exec "C:\APP.EXE"
 cargo run --release -- --mount C=DEMO.COM --headless --exec DEMO

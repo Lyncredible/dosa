@@ -380,27 +380,29 @@ fn batch_files_cannot_mount_a_host_path_even_from_a_nested_call() {
     fs::create_dir(&guest).unwrap();
     fs::write(dir.0.join("OUTSIDE.TXT"), "outside marker").unwrap();
     fs::write(guest.join("START.BAT"), "@echo off\ncall child\n").unwrap();
-    fs::write(
-        guest.join("CHILD.BAT"),
-        format!(
-            "if errorlevel 0 mount D \"{}\"\ntype D:\\OUTSIDE.TXT\n",
-            dir.0.display()
-        ),
-    )
-    .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
-        .arg("--mount")
-        .arg(format!("C={}", guest.display()))
-        .args(["--headless", "--exec", "start"])
-        .output()
+    for command in ["mount", "imgmount"] {
+        fs::write(
+            guest.join("CHILD.BAT"),
+            format!(
+                "if errorlevel 0 {command} D \"{}\"\ntype D:\\OUTSIDE.TXT\n",
+                dir.0.display()
+            ),
+        )
         .unwrap();
-    let error = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert!(
-        error.contains("child.BAT:1:") && error.contains("interactive shell or --mount"),
-        "{error}"
-    );
-    assert!(output.stdout.is_empty());
+        let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .arg("--mount")
+            .arg(format!("C={}", guest.display()))
+            .args(["--headless", "--exec", "start"])
+            .output()
+            .unwrap();
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(
+            error.contains("child.BAT:1:") && error.contains("interactive shell or --mount"),
+            "{error}"
+        );
+        assert!(output.stdout.is_empty());
+    }
 }
 
 #[test]

@@ -25,6 +25,7 @@ Usage: dosa [OPTIONS]
   --mount-rw DRIVE=DIR Mount a writable host directory (repeatable)
   --mount-session DRIVE=ZIP Mount a writable ZIP copy until exit (repeatable)
   --mount-fat DRIVE=IMG Mount a read-only FAT volume image (repeatable)
+  --mount-iso DRIVE=ISO Mount a read-only ISO 9660 data image (repeatable)
   --exec COMMAND       Run a DOS shell command on startup
   --cpu 8086|286|386   Select the guest CPU profile
   --speed SPEED        Select slow, normal, fast, or maximum desktop pacing
@@ -65,7 +66,10 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
                 println!("dosa {}", env!("CARGO_PKG_VERSION"));
                 return Ok(0);
             }
-            Some(option @ ("--mount" | "--mount-rw" | "--mount-fat" | "--mount-session")) => {
+            Some(
+                option @ ("--mount" | "--mount-rw" | "--mount-fat" | "--mount-iso"
+                | "--mount-session"),
+            ) => {
                 let value = args
                     .next()
                     .ok_or_else(|| format!("{option} needs DRIVE=PATH"))?;
@@ -76,6 +80,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
                     access: match option {
                         "--mount-rw" => MountAccess::WritableDirectory,
                         "--mount-fat" => MountAccess::FatImage,
+                        "--mount-iso" => MountAccess::IsoImage,
                         "--mount-session" => MountAccess::SessionZip,
                         _ => MountAccess::ReadOnly,
                     },
@@ -133,6 +138,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     {
         let mount = match access {
             MountAccess::FatImage => Mount::open_fat_image(&path),
+            MountAccess::IsoImage => Mount::open_iso_image(&path),
             MountAccess::WritableDirectory => Mount::open_writable_directory(&path),
             MountAccess::SessionZip => Mount::open_session_zip(&path),
             MountAccess::ReadOnly => Mount::open(&path),

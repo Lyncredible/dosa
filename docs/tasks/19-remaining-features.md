@@ -9,7 +9,7 @@ Complete the remaining roadmap and verification requirements with focused implem
 | Guest screenshot capture | Explicit host save action, correct indexed palette conversion, saved PNG dimensions and pixel checks |
 | PIT and speaker | IRQ0 periodic and one-shot timing, channel 1 refresh, channel 0/1 BCD and read-back, speaker gate and native audio implemented. See [task 20](20-pc-speaker.md) for channel 2 and reload compatibility work. |
 | Writable storage | Explicit writable mount or overlay, create/write/truncate/rename/delete/directories, persistence and confinement tests |
-| Disk media | Read-only FAT volume mounts accept `--mount-fat` or a profile flag. A generated FAT12 fixture verifies geometry, short and long names, DOS CLI access and unchanged image bytes. Partitioned images, ISO/MSCDEX and boot are tracked separately. |
+| Disk media | Read-only FAT and ISO 9660 volumes can mount through the CLI or a profile. Generated fixtures verify DOS access and unchanged image bytes. ISO support is tracked in [task 23](23-dosbox-x-comparison.md), with MSCDEX, partitioned images, and boot still open. |
 | AdLib | OPL2 address/data ports and polled timers implemented. A generated COM program exercises FM synthesis and the 48 kHz PC speaker mixer. See [task 21](21-adlib.md). |
 | Sound Blaster | Sound Blaster 2.0 DSP, DMA channel 1, IRQ7, and 8-bit PCM mixing verified with a generated COM program. Extended commands and native program playback verification remain in [task 22](22-sound-blaster.md). |
 | Protected mode | Descriptor tables, transitions, memory semantics and exceptions for 286/386 profiles |

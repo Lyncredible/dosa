@@ -18,7 +18,7 @@ The DOSBox-X menu and clipboard guides document these workflows. [Menus](https:/
 
 | Feature | First increment and verification |
 | --- | --- |
-| CD-ROM and disk swapping | Mount read-only ISO 9660 data, then implement MSCDEX queries and sector reads against a generated image. Add a per-drive image list and test swapping between two images. Treat CUE audio and disk boot as separate changes. |
+| CD-ROM and disk swapping | Read-only ISO 9660 primary volumes mount via CLI, launch profile, shell, and desktop. A generated image tests version selection, nested execution, malformed records, and unchanged bytes. MSCDEX queries, sector reads, per-drive image lists, CUE audio, and disk boot remain planned. [ECMA-119](https://ecma-international.org/publications-and-standards/standards/ecma-119/) |
 | Save states | Start with explicit save/load files for a real-mode guest. Verify CPU, device, and mount identity restoration before adding slots or automatic saves. See [task 19](19-remaining-features.md). |
 | Joysticks and MIDI | Implement gameport input with a testable virtual joystick, then host controller mapping. Add MPU-401 UART separately with generated MIDI output and a configurable synthesis backend. |
 | Audio capture and debugger | Record emulator PCM to WAV and verify its sample rate and contents. Add paused register and memory inspection and single-step execution as a separate debugging increment. |

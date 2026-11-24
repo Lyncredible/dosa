@@ -24,6 +24,7 @@ pub enum MountAccess {
     WritableDirectory,
     SessionZip,
     FatImage,
+    IsoImage,
 }
 
 #[derive(Default)]
@@ -85,6 +86,8 @@ struct MountEntry {
     writable: bool,
     #[serde(default)]
     fat_image: bool,
+    #[serde(default)]
+    iso_image: bool,
     #[serde(default)]
     session_zip: bool,
 }
@@ -165,7 +168,12 @@ impl LaunchProfile {
                 )
                 .into());
             }
-            let access = if entry.session_zip {
+            if entry.iso_image && (entry.writable || entry.fat_image || entry.session_zip) {
+                return Err(format!("iso_image on drive {drive} cannot be combined with writable, fat_image, or session_zip").into());
+            }
+            let access = if entry.iso_image {
+                MountAccess::IsoImage
+            } else if entry.session_zip {
                 MountAccess::SessionZip
             } else if entry.fat_image {
                 MountAccess::FatImage
