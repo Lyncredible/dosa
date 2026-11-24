@@ -6,7 +6,7 @@ use dosa_cpu::Cpu;
 
 use crate::{adlib::Adlib, dma::Dma, pit, sound_blaster::SoundBlaster, speaker::Speaker};
 
-pub(super) const SAMPLE_RATE: u64 = 48_000;
+pub(super) const SAMPLE_RATE: u64 = crate::AUDIO_SAMPLE_RATE as u64;
 const MAX_SAMPLES: usize = SAMPLE_RATE as usize / 5;
 
 pub(super) struct Audio {
