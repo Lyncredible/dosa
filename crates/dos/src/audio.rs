@@ -77,6 +77,10 @@ impl Audio {
     }
 
     pub fn write_port(&mut self, port: u16, value: u8, elapsed: Duration, cpu: &mut Cpu) -> bool {
+        if port == 0x43 {
+            // Let the PIT apply the same read-back command to channels 0 and 1.
+            self.speaker.read_back(value);
+        }
         if self.dma.write_port(port, value) || self.sound_blaster.write_port(port, value) {
             self.sound_blaster
                 .transfer_identification(&mut self.dma, cpu);

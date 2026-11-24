@@ -5,7 +5,8 @@ Generate mono 48 kHz samples from PIT channel 2 and the port 61h speaker gate. B
 - Verify channel 2 divisor loads, mode 2/3 waveforms, gate behavior, counter latching, and bounded sample queues.
 - Run the opt-in native output test on a machine with an audio device.
 - Verify the normal DOS port-I/O path and desktop audio drain.
-- Complete channel 2 BCD and read-back support, and defer mode 2/3 reloads until the applicable cycle boundary.
+- Channel 2 accepts binary and packed BCD counts, including the 10,000-count BCD reload value. Tests cover latched count and status, the null count bit, and simultaneous read-back of channels 0 and 2 through DOS port instructions.
+- Defer mode 2/3 reloads until the applicable cycle boundary.
 
 Windows device tests and the normal DOS port-instruction path pass. The opt-in native audio test opened the default output stream and verified that its callback consumed the generated tone. Native Linux validation is in progress.
 
