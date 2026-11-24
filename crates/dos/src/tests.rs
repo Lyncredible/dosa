@@ -29,6 +29,54 @@ impl Drop for Directory {
 }
 
 #[test]
+fn paused_debugger_steps_through_wait_and_consumes_no_wall_clock_time() {
+    let directory = Directory::new("debugger");
+    directory.write(
+        "STEP.COM",
+        &[
+            0xb8, 0x34, 0x12, // MOV AX,1234h
+            0x40, // INC AX
+            0x31, 0xc0, // XOR AX,AX
+            0xcd, 0x16, // Wait for a key
+            0xb4, 0x4c, 0xcd, 0x21, // Exit with the key as status
+        ],
+    );
+    let mut machine = directory.machine();
+    machine.launch('C', "step.com", "").unwrap();
+    assert!(matches!(
+        machine.step_paused(),
+        Err(crate::DosError::GuestNotPaused)
+    ));
+    machine.set_paused(true);
+    let frozen_time = machine.elapsed();
+    let guest = machine.paused_guest().unwrap();
+    let regs = guest.registers();
+    assert_eq!(guest.peek(regs.cs, regs.ip), Some(0xb8));
+    assert_eq!(machine.run(100).unwrap(), RunState::Running);
+    assert_eq!(machine.paused_guest().unwrap().registers(), regs);
+    assert_eq!(machine.step_paused().unwrap(), RunState::Running);
+    let after = machine.paused_guest().unwrap().registers();
+    assert_eq!(after.ax, 0x1234);
+    assert_eq!(after.ip, regs.ip + 3);
+    machine.step_paused().unwrap();
+    assert_eq!(machine.paused_guest().unwrap().registers().ax, 0x1235);
+    machine.step_paused().unwrap();
+    assert_eq!(machine.step_paused().unwrap(), RunState::WaitingForKey);
+    let waiting = machine.paused_guest().unwrap().registers();
+    assert_eq!(machine.step_paused().unwrap(), RunState::WaitingForKey);
+    assert_eq!(machine.paused_guest().unwrap().registers(), waiting);
+    machine.paste_key(b'Q', 0);
+    assert_eq!(machine.step_paused().unwrap(), RunState::Running);
+    assert_eq!(
+        machine.paused_guest().unwrap().registers().ip,
+        waiting.ip + 2
+    );
+    assert_eq!(machine.elapsed(), frozen_time);
+    assert_eq!(machine.step_paused().unwrap(), RunState::Exited(b'Q'));
+    assert!(machine.paused_guest().is_none());
+}
+
+#[test]
 fn com_reads_key_then_prints_and_exits() {
     let directory = Directory::new("keyboard");
     fs::write(
