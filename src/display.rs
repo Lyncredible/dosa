@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use dosa_desktop::{
     App, CpuMode, Frame, Input, Key, MenuAction, MenuState, PointerEvent, PointerMode, Speed,
-    TextMode,
+    TextMode, Volume,
 };
 use dosa_dos::{CpuProfile, MouseCursor, RunState, TextFrame, Video};
 use dosa_mount::Mount;
@@ -64,6 +64,8 @@ pub struct Desktop {
     line: String,
     running: bool,
     paused: bool,
+    volume: Volume,
+    muted: bool,
     settings: Settings,
     status: String,
     exit: bool,
@@ -120,6 +122,8 @@ impl Desktop {
             line: String::new(),
             running: false,
             paused: false,
+            volume: Volume::default(),
+            muted: false,
             settings,
             status: String::new(),
             exit: false,
@@ -364,6 +368,8 @@ impl App for Desktop {
                 .collect(),
             cpu: self.settings.cpu,
             speed: self.settings.speed,
+            volume: self.volume,
+            muted: self.muted,
             text_mode: self.settings.text_mode,
             running: self.running,
             batch_active: self.shell.batch_active(),
@@ -432,6 +438,8 @@ impl App for Desktop {
                 }
             }
             MenuAction::SetSpeed(speed) => self.settings.speed = speed,
+            MenuAction::SetVolume(volume) => self.volume = volume,
+            MenuAction::SetMuted(muted) => self.muted = muted,
             MenuAction::SetPaused(paused) if self.running => {
                 self.paused = paused;
                 self.shell.machine.set_paused(paused);
@@ -823,6 +831,18 @@ mod tests {
         desktop.menu_action(MenuAction::SetTextMode(TextMode::WideRows50));
         desktop.tick();
         assert_eq!((desktop.frame().width, desktop.frame().height), (1056, 400));
+    }
+
+    #[test]
+    fn audio_actions_keep_the_selected_volume_when_muted() {
+        let mut desktop = Desktop::new(Shell::new(), None);
+        desktop.menu_action(MenuAction::SetVolume(Volume::Half));
+        desktop.menu_action(MenuAction::SetMuted(true));
+        assert!(desktop.menu().muted);
+        assert_eq!(desktop.menu().volume, Volume::Half);
+        desktop.menu_action(MenuAction::SetMuted(false));
+        assert!(!desktop.menu().muted);
+        assert_eq!(desktop.menu().volume, Volume::Half);
     }
 
     #[test]

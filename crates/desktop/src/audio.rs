@@ -16,8 +16,46 @@ pub(super) struct Audio {
 struct Queue {
     samples: VecDeque<f32>,
     phase: f64,
+    gain: f32,
     #[cfg(test)]
     played_samples: usize,
+}
+
+impl Default for Queue {
+    fn default() -> Self {
+        Self {
+            samples: VecDeque::new(),
+            phase: 0.0,
+            gain: 1.0,
+            #[cfg(test)]
+            played_samples: 0,
+        }
+    }
+}
+
+impl Queue {
+    fn render<T: SizedSample + FromSample<f32>>(
+        &mut self,
+        data: &mut [T],
+        channels: usize,
+        step: f64,
+    ) {
+        for frame in data.chunks_mut(channels) {
+            let sample = self.samples.front().copied().unwrap_or(0.0) * self.gain;
+            frame.fill(T::from_sample(sample));
+            self.phase += step;
+            while self.phase >= 1.0 {
+                let consumed = self.samples.pop_front();
+                #[cfg(test)]
+                if consumed.is_some_and(|sample| sample != 0.0) {
+                    self.played_samples += 1;
+                }
+                #[cfg(not(test))]
+                let _ = consumed;
+                self.phase -= 1.0;
+            }
+        }
+    }
 }
 
 impl Audio {
@@ -28,12 +66,7 @@ impl Audio {
         let supported = device.default_output_config()?;
         let format = supported.sample_format();
         let config = supported.config();
-        let queue = Arc::new(Mutex::new(Queue {
-            samples: VecDeque::new(),
-            phase: 0.0,
-            #[cfg(test)]
-            played_samples: 0,
-        }));
+        let queue = Arc::new(Mutex::new(Queue::default()));
         let stream = match format {
             SampleFormat::F32 => stream::<f32>(&device, config, queue.clone())?,
             SampleFormat::F64 => stream::<f64>(&device, config, queue.clone())?,
@@ -56,11 +89,12 @@ impl Audio {
         })
     }
 
-    pub fn push(&self, samples: Vec<f32>) {
+    pub fn push(&self, samples: Vec<f32>, gain: f32) {
         let mut queue = self
             .queue
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        queue.gain = gain;
         for sample in samples {
             if queue.samples.len() == MAX_QUEUED {
                 queue.samples.pop_front();
@@ -93,21 +127,7 @@ fn stream<T: SizedSample + FromSample<f32>>(
                 data.fill(T::EQUILIBRIUM);
                 return;
             };
-            for frame in data.chunks_mut(channels) {
-                let sample = queue.samples.front().copied().unwrap_or(0.0);
-                frame.fill(T::from_sample(sample));
-                queue.phase += step;
-                while queue.phase >= 1.0 {
-                    let consumed = queue.samples.pop_front();
-                    #[cfg(test)]
-                    if consumed.is_some_and(|sample| sample != 0.0) {
-                        queue.played_samples += 1;
-                    }
-                    #[cfg(not(test))]
-                    let _ = consumed;
-                    queue.phase -= 1.0;
-                }
-            }
+            queue.render(data, channels, step);
         },
         |error| eprintln!("dosa audio: {error}"),
         None,
@@ -119,13 +139,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mute_drains_the_queue_and_volume_scales_already_queued_samples() {
+        let mut queue = Queue {
+            samples: VecDeque::from([0.8, -0.6, -0.4]),
+            gain: 0.5,
+            ..Queue::default()
+        };
+        let mut frame = [0.0_f32; 2];
+        queue.render(&mut frame, 2, 1.0);
+        assert_eq!(frame, [0.4, 0.4]);
+        queue.gain = 0.0;
+        queue.render(&mut frame, 2, 1.0);
+        assert_eq!(frame, [0.0, 0.0]);
+        queue.gain = 0.25;
+        queue.render(&mut frame, 2, 1.0);
+        assert_eq!(frame, [-0.1, -0.1]);
+        assert!(queue.samples.is_empty());
+    }
+
+    #[test]
     #[ignore = "requires a native audio output device"]
     fn native_output_consumes_a_bounded_guest_tone() {
         let audio = Audio::open().unwrap();
         let samples = (0..MAX_QUEUED * 2)
             .map(|index| if index % 100 < 50 { 0.05 } else { -0.05 })
             .collect();
-        audio.push(samples);
+        audio.push(samples, 1.0);
         assert!(audio.queue.lock().unwrap().samples.len() <= MAX_QUEUED);
         for _ in 0..30 {
             if audio.queue.lock().unwrap().played_samples > 0 {

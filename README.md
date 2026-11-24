@@ -91,7 +91,7 @@ View offers pause/resume, fullscreen, and 80- or 132-column text presets with 25
 
 The desktop plays PC speaker sound, AdLib OPL2 music, and 8-bit mono Sound Blaster 2.0 PCM. For Sound Blaster setup, use port `220h`, IRQ `7`, and DMA channel `1`. DOS programs also receive these settings in `BLASTER`.
 
-Keyboard menu access uses Alt+D, Alt+C, Alt+S, and Alt+V, followed by arrow keys and Enter.
+Audio offers master volume and mute while a guest runs. Unmuting restores the selected level. Keyboard menu access uses Alt+D, Alt+C, Alt+S, Alt+V, and Alt+A, followed by arrow keys and Enter.
 
 The desktop speed presets allow 10,000, 50,000, 100,000, or 250,000 guest instructions per display tick. Full native picker interaction and macOS desktop checks remain open.
 
