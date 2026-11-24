@@ -91,7 +91,7 @@ Use Drives to select a drive letter, see its source type and access mode, and mo
 
 View offers pause/resume, fullscreen, scaling, and 80- or 132-column text presets with 25, 43, or 50 rows. Fit to window corrects the guest aspect ratio. Integer scaling uses whole physical pixels for each source pixel and falls back to fit when the display area is too small. DOS mouse support maps the host pointer into the guest viewport and releases held buttons when leaving the viewport or opening a menu.
 
-The desktop plays PC speaker sound, AdLib OPL2 music, and 8-bit mono Sound Blaster 2.0 PCM. For Sound Blaster setup, use port `220h`, IRQ `7`, and DMA channel `1`. DOS programs also receive these settings in `BLASTER`.
+The desktop plays PC speaker sound, AdLib OPL2 music, and 8-bit mono Sound Blaster PCM with standard and high-speed DMA playback. For Sound Blaster setup, use port `220h`, IRQ `7`, and DMA channel `1`. DOS programs also receive these settings in `BLASTER`.
 
 Audio offers master volume and mute while a guest runs. Unmuting restores the selected level. Keyboard menu access uses Alt+D, Alt+C, Alt+S, Alt+V, and Alt+A, followed by arrow keys and Enter.
 
