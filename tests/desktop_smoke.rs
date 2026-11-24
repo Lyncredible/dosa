@@ -41,6 +41,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|_| "3".into())
         .parse()?;
     let session_zip = std::env::var_os("DOSA_SMOKE_SESSION").is_some();
+    let final_enter_delay = std::env::var("DOSA_SMOKE_FINAL_ENTER_DELAY_MS")
+        .ok()
+        .map(|value| value.parse().map(Duration::from_millis))
+        .transpose()?;
+    let final_min_colors = std::env::var("DOSA_SMOKE_FINAL_MIN_COLORS")
+        .ok()
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(min_colors);
     let mut mount_arg = std::ffi::OsString::from("C=");
     mount_arg.push(archive.as_os_str());
     let listing = Command::new(env!("CARGO_BIN_EXE_dosa"))
@@ -88,11 +97,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         started: now,
         changed_at: now,
         sample_at: now,
+        last_enter_at: now,
         key_frame: None,
         keys_remaining: key_count,
+        final_enter_delay,
         result: Rc::clone(&result),
         fingerprint: None,
         min_colors,
+        final_min_colors,
     })?;
     result
         .get()
@@ -124,11 +136,14 @@ struct Smoke {
     started: Instant,
     changed_at: Instant,
     sample_at: Instant,
+    last_enter_at: Instant,
     key_frame: Option<u64>,
     keys_remaining: u32,
+    final_enter_delay: Option<Duration>,
     result: Rc<Cell<Option<Result<(), &'static str>>>>,
     fingerprint: Option<u64>,
     min_colors: usize,
+    final_min_colors: usize,
 }
 
 impl App for Smoke {
@@ -153,7 +168,12 @@ impl App for Smoke {
             .iter()
             .take(640 * 480)
             .collect();
-        if colors.len() < self.min_colors {
+        let min_colors = if self.keys_remaining == 0 {
+            self.final_min_colors
+        } else {
+            self.min_colors
+        };
+        if colors.len() < min_colors {
             self.changed_at = now;
             self.fingerprint = None;
             return;
@@ -168,9 +188,11 @@ impl App for Smoke {
             self.result.set(Some(Ok(())));
             return;
         }
-        if now.duration_since(self.changed_at) < Duration::from_millis(400)
-            || self.key_frame == Some(hash)
-        {
+        let settled = match self.final_enter_delay.filter(|_| self.keys_remaining == 1) {
+            Some(delay) => now.duration_since(self.last_enter_at) >= delay,
+            None => now.duration_since(self.changed_at) >= Duration::from_millis(400),
+        };
+        if !settled || self.key_frame == Some(hash) {
             return;
         }
 
@@ -179,6 +201,7 @@ impl App for Smoke {
             return;
         }
         self.keys_remaining -= 1;
+        self.last_enter_at = now;
         self.key_frame = Some(hash);
         self.changed_at = now;
         for pressed in [true, false] {
