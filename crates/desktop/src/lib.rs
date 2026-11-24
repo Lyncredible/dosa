@@ -142,6 +142,18 @@ impl<A: App> Desktop<A> {
 
     fn use_menu_command(&mut self, window: &Window, command: Option<menu::Command>) {
         match command {
+            Some(menu::Command::QuickLaunch) => {
+                self.pointer.set_position(None);
+                self.sync_pointer(window, true);
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_parent(window)
+                    .set_title("Launch a DOS program")
+                    .add_filter("DOS programs", &["com", "exe", "bat"])
+                    .pick_file()
+                {
+                    self.app.menu_action(MenuAction::QuickLaunch(path));
+                }
+            }
             Some(menu::Command::Screenshot) => {
                 self.pointer.set_position(None);
                 self.sync_pointer(window, true);

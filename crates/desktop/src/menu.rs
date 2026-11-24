@@ -59,6 +59,7 @@ pub enum MountKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MenuAction {
+    QuickLaunch(PathBuf),
     SaveScreenshot(PathBuf),
     Mount {
         drive: char,
@@ -121,6 +122,7 @@ const TABS: [(Tab, &str, u32, u32); 4] = [
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Command {
+    QuickLaunch,
     Screenshot,
     Mount(MountKind, char),
     Fullscreen,
@@ -455,7 +457,7 @@ fn row_rect(left: u32, index: usize) -> Rect {
     }
 }
 
-const DRIVE_ACTION_ROWS: u32 = 5;
+const DRIVE_ACTION_ROWS: u32 = 6;
 
 fn drive_rect(left: u32, index: u32) -> Rect {
     Rect {
@@ -490,6 +492,12 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
         ]
         .into_iter()
         .map(|(label, kind)| item(label, Command::Mount(kind, drive), can_change_mounts, false))
+        .chain(std::iter::once(item(
+            "Quick launch...",
+            Command::QuickLaunch,
+            can_change_mounts,
+            false,
+        )))
         .chain(std::iter::once(item(
             "Unmount",
             Command::App(MenuAction::Unmount(drive)),
@@ -673,6 +681,7 @@ mod tests {
             (true, None)
         );
         menu.key(&input(Key::Character('z'), false), None, &state, false);
+        menu.key(&input(Key::Up, false), None, &state, false);
         menu.key(&input(Key::Up, false), None, &state, false);
         assert_eq!(
             menu.key(&input(Key::Enter, false), None, &state, false),

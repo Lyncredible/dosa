@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::path::Path;
 
 use dosa_dos::Machine;
 use dosa_mount::{Entry, Mount};
@@ -23,6 +24,13 @@ pub struct Shell {
     directories: BTreeMap<char, String>,
     batch: Option<Batch>,
     errorlevel: u8,
+    quick_launch: Option<QuickLaunch>,
+}
+
+struct QuickLaunch {
+    drive: char,
+    previous_drive: char,
+    previous_directories: BTreeMap<char, String>,
 }
 
 impl Default for Shell {
@@ -39,6 +47,7 @@ impl Shell {
             directories: BTreeMap::new(),
             batch: None,
             errorlevel: 0,
+            quick_launch: None,
         }
     }
 
@@ -70,6 +79,66 @@ impl Shell {
 
     pub fn current_drive(&self) -> char {
         self.drive
+    }
+
+    pub(crate) fn quick_launch(&mut self, path: &Path) -> Result<Command, Box<dyn Error>> {
+        if self.batch_active() || self.quick_launch.is_some() {
+            return Err(dosa_dos::DosError::Busy.into());
+        }
+        let drive = ('A'..='Z')
+            .rev()
+            .find(|&drive| self.machine.drive(drive).is_none())
+            .ok_or("quick launch requires an unused drive letter")?;
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("invalid program filename")?;
+        let supported = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                ["COM", "EXE", "BAT"]
+                    .iter()
+                    .any(|kind| extension.eq_ignore_ascii_case(kind))
+            });
+        if !supported {
+            return Err("select a COM, EXE, or BAT file".into());
+        }
+        let folder = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mount = Mount::open(folder)?;
+        let program = mount
+            .list("")?
+            .into_iter()
+            .find(|entry| !entry.is_dir && entry.host_name == filename)
+            .ok_or("selected program is not available in its folder")?;
+        let scope = QuickLaunch {
+            drive,
+            previous_drive: self.drive,
+            previous_directories: self.directories.clone(),
+        };
+        self.mount(drive, mount)?;
+        self.drive = drive;
+        self.quick_launch = Some(scope);
+        match self.execute(&format!("{drive}:\\{}", program.name)) {
+            Ok(command) => Ok(command),
+            Err(error) => {
+                self.finish_quick_launch()?;
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn finish_quick_launch(&mut self) -> Result<(), dosa_dos::DosError> {
+        if let Some(scope) = &self.quick_launch {
+            self.machine.unmount(scope.drive)?;
+            let scope = self.quick_launch.take().unwrap();
+            self.drive = scope.previous_drive;
+            self.directories = scope.previous_directories;
+        }
+        Ok(())
     }
 
     pub fn execute(&mut self, line: &str) -> Result<Command, Box<dyn Error>> {
