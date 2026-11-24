@@ -1,5 +1,8 @@
 use crate::vga::Vga;
 use dosa_cpu::Cpu;
+use font8x8::{
+    BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, LATIN_FONTS, MISC_FONTS, UnicodeFonts,
+};
 
 #[cfg(test)]
 #[path = "text_video_tests.rs"]
@@ -95,6 +98,7 @@ pub(crate) struct Adapter {
     cga_pixels: Box<[u8]>,
     cga_color: u8,
     saved_text: Option<Box<[u8]>>,
+    saved_text_cursor: Option<(usize, usize)>,
     vga: Vga,
 }
 
@@ -115,6 +119,7 @@ impl Adapter {
             cga_pixels: vec![0; CGA_WIDTH * CGA_HEIGHT].into_boxed_slice(),
             cga_color: 15,
             saved_text: None,
+            saved_text_cursor: None,
             vga: Vga::new(),
         }
     }
@@ -172,7 +177,7 @@ impl Adapter {
     }
 
     pub(crate) fn restore_text(&mut self, cpu: &mut Cpu) {
-        let row = self.row;
+        let row = self.saved_text_cursor.map_or(self.row, |(_, row)| row);
         if self.mode != 3 {
             self.set_mode(cpu, 0x83);
         }
@@ -228,6 +233,18 @@ impl Adapter {
             cpu.memory[TEXT..TEXT + MAX_TEXT_BYTES].copy_from_slice(&text);
         }
         let clear = value & 0x80 == 0;
+        if mode != 3 && self.mode == 3 {
+            self.saved_text_cursor = Some((self.col, self.row));
+        }
+        if mode == 3 && self.mode != 3 {
+            if let Some((col, row)) = self.saved_text_cursor.take() {
+                self.col = col;
+                self.row = row;
+            }
+        } else if mode != 3 {
+            self.col = 0;
+            self.row = 0;
+        }
         if matches!(mode, 0x12 | 0x13) {
             self.vga
                 .enter(cpu, matches!(self.mode, 0x12 | 0x13), clear, mode == 0x12);
@@ -352,6 +369,50 @@ impl Adapter {
         self.update_cursor(cpu);
     }
 
+    fn graphics_character(&self, x: usize, y: usize, character: u8, color: u8) {
+        let height = if self.mode == 0x12 { 16 } else { 8 };
+        let glyph = graphics_glyph(character);
+        for row in 0..height {
+            for column in 0..8 {
+                if x + column >= self.vga.width() || y + row >= self.vga.height() {
+                    continue;
+                }
+                let foreground = glyph[row * 8 / height] & (1 << column) != 0;
+                if foreground || self.mode != 0x12 || color & 0x80 == 0 {
+                    self.vga.pixel(
+                        x + column,
+                        y + row,
+                        Some(if foreground { color } else { 0 }),
+                    );
+                }
+            }
+        }
+    }
+
+    fn graphics_teletype(&mut self, character: u8, color: u8) {
+        let height = if self.mode == 0x12 { 16 } else { 8 };
+        let columns = self.vga.width() / 8;
+        let rows = (self.vga.height() / height).max(1);
+        match character {
+            7 => return,
+            8 => self.col = self.col.saturating_sub(1),
+            13 => self.col = 0,
+            10 => self.row += 1,
+            _ => {
+                self.graphics_character(self.col * 8, self.row * height, character, color);
+                self.col += 1;
+                if self.col >= columns {
+                    self.col = 0;
+                    self.row += 1;
+                }
+            }
+        }
+        if self.row >= rows {
+            self.vga.scroll_up(height);
+            self.row = rows - 1;
+        }
+    }
+
     fn scroll(
         &self,
         cpu: &mut Cpu,
@@ -399,8 +460,13 @@ impl Adapter {
             0x00 => return self.set_mode(cpu, al),
             0x01 => self.set_cursor_shape(cpu, cpu.regs.cx),
             0x02 => {
-                self.col = usize::from(dl).min(COLS - 1);
-                self.row = usize::from(dh).min(self.text.rows() - 1);
+                self.col = usize::from(dl).min(usize::from(self.columns()) - 1);
+                let rows = match self.mode {
+                    0x12 => 30,
+                    0x13 => self.vga.height() / 8,
+                    _ => self.text.rows(),
+                };
+                self.row = usize::from(dh).min(rows.saturating_sub(1));
                 self.update_cursor(cpu);
             }
             0x03 => {
@@ -423,6 +489,16 @@ impl Adapter {
                     if ah == 0x09 {
                         cpu.memory[TEXT + cell * 2 + 1] = bl;
                     }
+                }
+            }
+            0x09 | 0x0a if matches!(self.mode, 0x12 | 0x13) => {
+                let columns = self.vga.width() / 8;
+                let height = if self.mode == 0x12 { 16 } else { 8 };
+                let start = self.row * columns + self.col;
+                let end =
+                    (start + usize::from(cpu.regs.cx)).min(columns * (self.vga.height() / height));
+                for cell in start..end {
+                    self.graphics_character(cell % columns * 8, cell / columns * height, al, bl);
                 }
             }
             0x0b if self.mode == 6 && bh == 0 => self.cga_color = bl & 15,
@@ -452,7 +528,34 @@ impl Adapter {
                     }
                 }
             }
+            0x0e if matches!(self.mode, 0x12 | 0x13) => {
+                self.graphics_teletype(al, bl);
+                self.update_cursor(cpu);
+            }
             0x0e => self.write(cpu, &[al]),
+            0x13 if matches!(self.mode, 0x12 | 0x13) => {
+                let previous = (self.col, self.row);
+                self.col = usize::from(dl).min(usize::from(self.columns()) - 1);
+                let height = if self.mode == 0x12 { 16 } else { 8 };
+                self.row = usize::from(dh).min((self.vga.height() / height).saturating_sub(1));
+                let mut offset = cpu.regs.bp;
+                for _ in 0..cpu.regs.cx {
+                    let character = cpu.read_u8(cpu.regs.es, offset);
+                    offset = offset.wrapping_add(1);
+                    let color = if al & 2 != 0 {
+                        let color = cpu.read_u8(cpu.regs.es, offset);
+                        offset = offset.wrapping_add(1);
+                        color
+                    } else {
+                        bl
+                    };
+                    self.graphics_teletype(character, color);
+                }
+                if al & 1 == 0 {
+                    (self.col, self.row) = previous;
+                }
+                self.update_cursor(cpu);
+            }
             0x0f => {
                 cpu.regs.ax = u16::from_le_bytes([self.mode, self.columns()]);
                 cpu.regs.bx &= 0x00ff;
@@ -548,6 +651,28 @@ impl Adapter {
             _ => self.vga.write_port(port, value),
         }
     }
+}
+
+fn graphics_glyph(character: u8) -> [u8; 8] {
+    const EXTENDED: &str = concat!(
+        "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒ",
+        "áíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐",
+        "└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀",
+        "αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ "
+    );
+    let character = if character >= 128 {
+        EXTENDED.chars().nth(usize::from(character - 128)).unwrap()
+    } else {
+        char::from(character)
+    };
+    BASIC_FONTS
+        .get(character)
+        .or_else(|| LATIN_FONTS.get(character))
+        .or_else(|| BOX_FONTS.get(character))
+        .or_else(|| BLOCK_FONTS.get(character))
+        .or_else(|| GREEK_FONTS.get(character))
+        .or_else(|| MISC_FONTS.get(character))
+        .unwrap_or_else(|| BASIC_FONTS.get('?').unwrap())
 }
 
 fn cga_scanline(y: usize) -> usize {
