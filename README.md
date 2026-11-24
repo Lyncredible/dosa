@@ -15,6 +15,8 @@ The first mounted drive is selected on startup. Type `DIR` to list its contents 
 
 Mount a directory, a single file, or a ZIP. Quote host paths containing spaces.
 
+Use `--mount-fat A=floppy.img` to read a FAT volume image as a DOS drive. A profile mount can set `fat_image = true`. FAT images are read-only.
+
 ~~~console
 cargo run --release -- --mount "C=path to a directory" --mount D=tools.zip --exec "C:\APP.EXE"
 cargo run --release -- --mount C=DEMO.COM --headless --exec DEMO

@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }
 cap-fs-ext = "4.0.3"
 cap-std = "4.0.3"
 thiserror = "2"

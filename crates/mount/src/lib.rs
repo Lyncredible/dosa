@@ -1,5 +1,6 @@
 //! DOS drives backed by host directories, individual files, or ZIP archives.
 
+mod fat_image;
 mod names;
 mod writable;
 mod zip_mount;
@@ -85,6 +86,7 @@ type Result<T> = std::result::Result<T, MountError>;
 
 #[derive(Debug)]
 enum Source {
+    FatImage(fat_image::FatImage),
     Directory(Arc<Dir>),
     WritableDirectory(WritableDirectory),
     SingleFile(Child<Mutex<File>>),
@@ -98,6 +100,18 @@ pub struct Mount {
 }
 
 impl Mount {
+    /// Mount a FAT volume image as a read-only DOS drive.
+    pub fn open_fat_image(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if !fs::metadata(path)?.is_file() {
+            return Err(MountError::UnsupportedSource);
+        }
+        let image = fat_image::FatImage::open(File::open(path)?)?;
+        Ok(Self {
+            source: Source::FatImage(image),
+        })
+    }
+
     /// Open a host directory, a ZIP file (extension matched case-insensitively),
     /// or a single regular file presented in the drive root.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -152,6 +166,7 @@ impl Mount {
                 Err(MountError::NotDirectory(path.to_owned()))
             }
             Source::Zip(zip) => zip.list(&components, path),
+            Source::FatImage(image) => image.list(&components, path),
         }
     }
 
@@ -172,6 +187,7 @@ impl Mount {
                 Ok(entry)
             }
             Source::Zip(zip) => zip.metadata(&components, path),
+            Source::FatImage(image) => image.metadata(&components, path),
         }
     }
 
@@ -202,6 +218,7 @@ impl Mount {
                 read_bounded(&mut *file, size)
             }
             Source::Zip(zip) => zip.read(&components, path),
+            Source::FatImage(image) => image.read(&components, path),
         }
     }
 }

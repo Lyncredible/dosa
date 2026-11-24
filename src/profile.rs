@@ -17,6 +17,7 @@ pub struct StartupMount {
     pub drive: char,
     pub path: PathBuf,
     pub writable: bool,
+    pub fat_image: bool,
 }
 
 #[derive(Default)]
@@ -76,6 +77,8 @@ struct MountEntry {
     path: PathBuf,
     #[serde(default)]
     writable: bool,
+    #[serde(default)]
+    fat_image: bool,
 }
 
 impl LaunchProfile {
@@ -145,10 +148,14 @@ impl LaunchProfile {
                 }
                 base.join(entry.path)
             };
+            if entry.writable && entry.fat_image {
+                return Err(format!("FAT image on drive {drive} must be read-only").into());
+            }
             mounts.push(StartupMount {
                 drive,
                 path,
                 writable: entry.writable,
+                fat_image: entry.fat_image,
             });
         }
         Ok(Self {
