@@ -29,6 +29,7 @@ fn graphics_text_handles_tiny_crtc_height_and_restores_text_cursor() {
     bios(&mut video, &mut cpu, 0x0200, 0, 0, 0x0304);
     bios(&mut video, &mut cpu, 0x12, 0, 0, 0);
     assert_eq!((video.col, video.row), (0, 0));
+    assert_eq!(cpu.read_u16(0x40, 0x50), 0);
     video.port_write(0x3d4, 7);
     video.port_write(0x3d5, 0);
     video.port_write(0x3d4, 0x12);
