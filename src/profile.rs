@@ -16,8 +16,14 @@ pub struct LaunchProfile {
 pub struct StartupMount {
     pub drive: char,
     pub path: PathBuf,
-    pub writable: bool,
-    pub fat_image: bool,
+    pub access: MountAccess,
+}
+
+pub enum MountAccess {
+    ReadOnly,
+    WritableDirectory,
+    SessionZip,
+    FatImage,
 }
 
 #[derive(Default)]
@@ -79,6 +85,8 @@ struct MountEntry {
     writable: bool,
     #[serde(default)]
     fat_image: bool,
+    #[serde(default)]
+    session_zip: bool,
 }
 
 impl LaunchProfile {
@@ -151,11 +159,25 @@ impl LaunchProfile {
             if entry.writable && entry.fat_image {
                 return Err(format!("FAT image on drive {drive} must be read-only").into());
             }
+            if entry.session_zip && (entry.writable || entry.fat_image) {
+                return Err(format!(
+                    "session_zip on drive {drive} cannot be combined with writable or fat_image"
+                )
+                .into());
+            }
+            let access = if entry.session_zip {
+                MountAccess::SessionZip
+            } else if entry.fat_image {
+                MountAccess::FatImage
+            } else if entry.writable {
+                MountAccess::WritableDirectory
+            } else {
+                MountAccess::ReadOnly
+            };
             mounts.push(StartupMount {
                 drive,
                 path,
-                writable: entry.writable,
-                fat_image: entry.fat_image,
+                access,
             });
         }
         Ok(Self {

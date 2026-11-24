@@ -5,7 +5,7 @@ The first milestone is a GPU-rendered DOS prompt that can mount host content and
 | Task | Depends on | Status |
 | --- | --- | --- |
 | [01 · Real-mode CPU and memory](docs/tasks/01-cpu.md) | Architecture | Initial implementation complete |
-| [02 · Host drive mounts](docs/tasks/02-mounts.md) | Architecture | Read-only mounts complete |
+| [02 · Host drive mounts](docs/tasks/02-mounts.md) | Architecture | Directory, ZIP, and writable session mounts implemented |
 | [03 · GPU desktop](docs/tasks/03-desktop.md) | Architecture | Windows GPU smoke passed |
 | [04 · DOS and first runnable milestone](docs/tasks/04-dos.md) | 01, 02, 03 | Initial implementation complete |
 | [05 · DOS application compatibility](docs/tasks/05-compatibility.md) | 04 | In progress |

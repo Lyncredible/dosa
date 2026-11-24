@@ -13,8 +13,8 @@ use dosa_dos::RunState;
 use dosa_mount::Mount;
 
 use profile::{
-    LaunchProfile, SettingsOverrides, StartupMount, parse_cpu, parse_speed, parse_text_columns,
-    parse_text_rows,
+    LaunchProfile, MountAccess, SettingsOverrides, StartupMount, parse_cpu, parse_speed,
+    parse_text_columns, parse_text_rows,
 };
 
 const USAGE: &str = "\
@@ -23,6 +23,7 @@ Usage: dosa [OPTIONS]
   --profile PATH       Load a TOML launch profile
   --mount DRIVE=PATH   Mount a host file, directory, or ZIP (repeatable)
   --mount-rw DRIVE=DIR Mount a writable host directory (repeatable)
+  --mount-session DRIVE=ZIP Mount a writable ZIP copy until exit (repeatable)
   --mount-fat DRIVE=IMG Mount a read-only FAT volume image (repeatable)
   --exec COMMAND       Run a DOS shell command on startup
   --cpu 8086|286|386   Select the guest CPU profile
@@ -64,7 +65,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
                 println!("dosa {}", env!("CARGO_PKG_VERSION"));
                 return Ok(0);
             }
-            Some(option @ ("--mount" | "--mount-rw" | "--mount-fat")) => {
+            Some(option @ ("--mount" | "--mount-rw" | "--mount-fat" | "--mount-session")) => {
                 let value = args
                     .next()
                     .ok_or_else(|| format!("{option} needs DRIVE=PATH"))?;
@@ -72,8 +73,12 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
                 mounts.push(StartupMount {
                     drive,
                     path,
-                    writable: option == "--mount-rw",
-                    fat_image: option == "--mount-fat",
+                    access: match option {
+                        "--mount-rw" => MountAccess::WritableDirectory,
+                        "--mount-fat" => MountAccess::FatImage,
+                        "--mount-session" => MountAccess::SessionZip,
+                        _ => MountAccess::ReadOnly,
+                    },
                 });
             }
             Some("--profile") => {
@@ -123,16 +128,14 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     for StartupMount {
         drive,
         path,
-        writable,
-        fat_image,
+        access,
     } in launch.mounts
     {
-        let mount = if fat_image {
-            Mount::open_fat_image(&path)
-        } else if writable {
-            Mount::open_writable_directory(&path)
-        } else {
-            Mount::open(&path)
+        let mount = match access {
+            MountAccess::FatImage => Mount::open_fat_image(&path),
+            MountAccess::WritableDirectory => Mount::open_writable_directory(&path),
+            MountAccess::SessionZip => Mount::open_session_zip(&path),
+            MountAccess::ReadOnly => Mount::open(&path),
         };
         shell.mount(
             drive,

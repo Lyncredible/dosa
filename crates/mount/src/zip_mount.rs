@@ -3,10 +3,17 @@ use crate::{
     names::{Child, assign_aliases, find_child, valid_component},
     read_bounded,
 };
-use std::{collections::BTreeMap, fs::File, io::Read, sync::Mutex};
+use cap_std::fs::Dir;
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::{Read, Write},
+    sync::Mutex,
+};
 use zip::ZipArchive;
 
 const MAX_NODES: usize = 100_000;
+const ZIP_COPY_LIMIT: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Default)]
 enum PendingNode {
@@ -144,13 +151,46 @@ impl ZipMount {
         let Node::File(index) = child.item else {
             return Err(MountError::IsDirectory(path.to_owned()));
         };
+        self.read_file(index, child.entry.size)
+    }
+
+    pub fn copy_to(&self, root: &Dir) -> Result<()> {
+        let mut remaining = ZIP_COPY_LIMIT;
+        self.copy_node(&self.root.item, root, &mut remaining)
+    }
+
+    fn copy_node(&self, node: &Node, target: &Dir, remaining: &mut u64) -> Result<()> {
+        let Node::Directory(children) = node else {
+            unreachable!("ZIP copy starts at a directory");
+        };
+        for child in children {
+            let name = &child.entry.name;
+            match &child.item {
+                Node::Directory(_) => {
+                    target.create_dir(name)?;
+                    self.copy_node(&child.item, &target.open_dir(name)?, remaining)?;
+                }
+                Node::File(index) => {
+                    let size = child.entry.size;
+                    *remaining =
+                        remaining
+                            .checked_sub(size)
+                            .ok_or(MountError::ZipCopyTooLarge {
+                                limit: ZIP_COPY_LIMIT,
+                            })?;
+                    let data = self.read_file(*index, size)?;
+                    target.create(name)?.write_all(&data)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn read_file(&self, index: usize, size: u64) -> Result<Vec<u8>> {
         let mut archive = lock(&self.archive)?;
         let file = archive.by_index(index)?;
-        let data = read_bounded(
-            file.take(child.entry.size.saturating_add(1)),
-            child.entry.size,
-        )?;
-        if data.len() as u64 != child.entry.size {
+        let data = read_bounded(file.take(size.saturating_add(1)), size)?;
+        if data.len() as u64 != size {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "ZIP entry length differs from its directory record",

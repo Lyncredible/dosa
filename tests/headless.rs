@@ -59,6 +59,61 @@ fn runs_a_dos_program_from_file_directory_and_zip_mounts() {
 }
 
 #[test]
+fn writable_zip_copy_allows_dos_read_write_access_without_changing_archive() {
+    let dir = Fixture::new();
+    let zip = dir.0.join("session copy.zip");
+    let mut program = vec![
+        0xba, 0x30, 0x01, 0xb8, 0x02, 0x3d, 0xcd, 0x21, // Open STATE.DAT read/write
+        0x73, 4, 0xb4, 0x4c, 0xcd, 0x21, // On carry, return the DOS error code
+        0x89, 0xc3, 0xba, 0x40, 0x01, 0xb9, 1, 0, 0xb4, 0x40, 0xcd, 0x21, // Write one byte
+        0x73, 4, 0xb4, 0x4c, 0xcd, 0x21, // On carry, return the DOS error code
+        0xb8, 0x00, 0x4c, 0xcd, 0x21,
+    ];
+    program.resize(0x30, 0);
+    program.extend(b"STATE.DAT\0");
+    program.resize(0x40, 0);
+    program.push(b'Z');
+    let mut archive = zip::ZipWriter::new(fs::File::create(&zip).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    archive.start_file("EDIT.COM", options).unwrap();
+    archive.write_all(&program).unwrap();
+    archive.start_file("STATE.DAT", options).unwrap();
+    archive.write_all(b"ABCD").unwrap();
+    archive.start_file("START.BAT", options).unwrap();
+    archive
+        .write_all(b"@echo off\nedit\nif errorlevel 1 exit /b 5\ntype state.dat\n")
+        .unwrap();
+    archive.finish().unwrap();
+    let original = fs::read(&zip).unwrap();
+
+    let profile = dir.0.join("session.toml");
+    fs::write(
+        &profile,
+        "exec = 'start'\n[[mounts]]\ndrive = 'C'\npath = 'session copy.zip'\nsession_zip = true\n",
+    )
+    .unwrap();
+    let mount = format!("C={}", zip.display());
+    for args in [
+        vec!["--mount", &mount, "--exec", "start"],
+        vec!["--mount-session", &mount, "--exec", "start"],
+        vec!["--profile", profile.to_str().unwrap()],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .arg("--headless")
+            .args(&args)
+            .output()
+            .unwrap();
+        if args[0] == "--mount" {
+            assert_eq!(output.status.code(), Some(5), "{output:?}");
+        } else {
+            assert_eq!(output.status.code(), Some(0), "{output:?}");
+            assert_eq!(output.stdout, b"ZBCD");
+        }
+        assert_eq!(fs::read(&zip).unwrap(), original);
+    }
+}
+
+#[test]
 fn launch_profile_applies_guest_settings_and_explicit_cli_overrides() {
     let dir = Fixture::new();
     let profiles = dir.0.join("profiles");

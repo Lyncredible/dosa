@@ -352,8 +352,16 @@ impl App for Desktop {
                     Err(error) => format!("Screenshot failed: {error}"),
                 };
             }
-            MenuAction::Mount { drive, source, .. } if !self.running => {
-                self.status = match Mount::open(source)
+            MenuAction::Mount {
+                drive,
+                source,
+                kind,
+            } if !self.running => {
+                let result = match kind {
+                    dosa_desktop::MountKind::SessionZip => Mount::open_session_zip(source),
+                    _ => Mount::open(source),
+                };
+                self.status = match result
                     .map_err(|error| -> Box<dyn std::error::Error> { error.into() })
                     .and_then(|mount| self.shell.mount(drive, mount))
                 {
