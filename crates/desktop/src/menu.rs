@@ -66,6 +66,7 @@ pub enum MenuAction {
         kind: MountKind,
     },
     SetCpu(CpuMode),
+    Unmount(char),
     SetSpeed(Speed),
     SetTextMode(TextMode),
     SetPaused(bool),
@@ -76,10 +77,12 @@ pub enum MenuAction {
 pub struct MenuState {
     pub enabled: bool,
     pub active_drive: char,
+    pub drives: std::collections::BTreeMap<char, &'static str>,
     pub cpu: CpuMode,
     pub speed: Speed,
     pub text_mode: TextMode,
     pub running: bool,
+    pub batch_active: bool,
     pub paused: bool,
     pub status: String,
 }
@@ -89,10 +92,12 @@ impl Default for MenuState {
         Self {
             enabled: false,
             active_drive: 'C',
+            drives: Default::default(),
             cpu: CpuMode::default(),
             speed: Speed::default(),
             text_mode: TextMode::default(),
             running: false,
+            batch_active: false,
             paused: false,
             status: String::new(),
         }
@@ -402,15 +407,26 @@ impl Menu {
                 canvas.text(rect.x + 25, rect.y + 8, item.label, color);
             }
             if tab == Tab::Drives {
-                let label = format!("Drive {drive}:  (A-Z)");
-                canvas.text(left + 12, BAR_HEIGHT + 3 * ROW_HEIGHT + 8, &label, MUTED);
+                let info = state.drives.get(&drive).copied().unwrap_or("Not mounted");
+                let label = format!("{drive}: {info}");
+                canvas.text(
+                    left + 12,
+                    BAR_HEIGHT + DRIVE_ACTION_ROWS * ROW_HEIGHT + 6,
+                    &label,
+                    MUTED,
+                );
                 for index in 0..26 {
                     let rect = drive_rect(left, index);
                     let letter = char::from(b'A' + index as u8);
                     if letter == drive || self.point.is_some_and(|point| rect.contains(point)) {
                         canvas.fill(rect, ACTIVE);
                     }
-                    canvas.text(rect.x + 4, rect.y + 4, &letter.to_string(), TEXT);
+                    let color = if state.drives.contains_key(&letter) || letter == drive {
+                        TEXT
+                    } else {
+                        MUTED
+                    };
+                    canvas.text(rect.x + 4, rect.y + 4, &letter.to_string(), color);
                 }
             }
         }
@@ -439,10 +455,12 @@ fn row_rect(left: u32, index: usize) -> Rect {
     }
 }
 
+const DRIVE_ACTION_ROWS: u32 = 5;
+
 fn drive_rect(left: u32, index: u32) -> Rect {
     Rect {
         x: left + 8 + (index % 13) * 18,
-        y: BAR_HEIGHT + 3 * ROW_HEIGHT + 26 + (index / 13) * 21,
+        y: BAR_HEIGHT + DRIVE_ACTION_ROWS * ROW_HEIGHT + 22 + (index / 13) * 21,
         w: 17,
         h: 20,
     }
@@ -456,6 +474,7 @@ struct Item {
 }
 
 fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<Item> {
+    let can_change_mounts = !state.running && !state.batch_active;
     let item = |label, command, enabled, chosen| Item {
         label,
         command,
@@ -470,7 +489,13 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
             ("Writable ZIP copy...", MountKind::SessionZip),
         ]
         .into_iter()
-        .map(|(label, kind)| item(label, Command::Mount(kind, drive), !state.running, false))
+        .map(|(label, kind)| item(label, Command::Mount(kind, drive), can_change_mounts, false))
+        .chain(std::iter::once(item(
+            "Unmount",
+            Command::App(MenuAction::Unmount(drive)),
+            can_change_mounts && state.drives.contains_key(&drive),
+            false,
+        )))
         .collect(),
         Tab::Cpu => [CpuMode::I8086, CpuMode::I286, CpuMode::I386]
             .into_iter()
@@ -672,6 +697,26 @@ mod tests {
         assert_eq!(
             menu.key(&input(Key::Enter, false), None, &state, false),
             (true, Some(Command::App(MenuAction::SetSpeed(Speed::Slow))))
+        );
+    }
+
+    #[test]
+    fn unmount_targets_the_selected_mounted_drive_and_respects_batch_lock() {
+        let mut menu = Menu::default();
+        let mut state = MenuState::default();
+        state.drives.insert('D', "Folder (read-only)");
+        menu.open(Tab::Drives, &state);
+        menu.key(&input(Key::Character('d'), false), None, &state, false);
+        menu.key(&input(Key::Up, false), None, &state, false);
+        assert_eq!(
+            menu.key(&input(Key::Enter, false), None, &state, false),
+            (true, Some(Command::App(MenuAction::Unmount('D'))))
+        );
+        state.batch_active = true;
+        assert!(
+            options(Tab::Drives, &state, 'D', false)
+                .iter()
+                .all(|item| !item.enabled)
         );
     }
 

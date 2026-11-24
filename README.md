@@ -83,7 +83,7 @@ CPU profiles are `8086`, `286`, and `386`. Text modes have 80 or 132 columns and
 
 ## Desktop controls
 
-Use Drives to select a drive letter and mount a file, folder, or ZIP through a native picker. CPU selects the 8086, 286, or 386 instruction profile while the shell is idle. Speed adjusts the guest instruction budget during execution.
+Use Drives to select a drive letter, see its source type and access mode, and mount or unmount it while the shell is idle. Removing the current drive switches the prompt to the first remaining drive. CPU selects the 8086, 286, or 386 instruction profile while the shell is idle. Speed adjusts the guest instruction budget during execution.
 
 View offers pause/resume, fullscreen, and 80- or 132-column text presets with 25, 43, or 50 rows. DOS mouse support maps the host pointer into the guest viewport and releases held buttons when leaving the viewport or opening a menu.
 
