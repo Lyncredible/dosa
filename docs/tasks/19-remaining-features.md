@@ -9,7 +9,7 @@ Complete the remaining roadmap and verification requirements with focused implem
 | Guest screenshot capture | Explicit host save action, correct indexed palette conversion, saved PNG dimensions and pixel checks |
 | PIT and speaker | Channel 0 mode timing, channels 1/2, port 61h gating, synthetic tone samples and native audio playback |
 | Writable storage | Explicit writable mount or overlay, create/write/truncate/rename/delete/directories, persistence and confinement tests |
-| Disk media | Read-only FAT image mount, geometry and synthetic image fixtures |
+| Disk media | Read-only FAT volume mounts accept `--mount-fat` or a profile flag. A generated FAT12 fixture verifies geometry, short and long names, DOS CLI access and unchanged image bytes. Partitioned images, ISO/MSCDEX and boot are tracked separately. |
 | AdLib | FM device, register timing, synthesis and mixer validation |
 | Sound Blaster | DSP, DMA, IRQ, digital samples and native mixer validation |
 | Protected mode | Descriptor tables, transitions, memory semantics and exceptions for 286/386 profiles |

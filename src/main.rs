@@ -23,6 +23,7 @@ Usage: dosa [OPTIONS]
   --profile PATH       Load a TOML launch profile
   --mount DRIVE=PATH   Mount a host file, directory, or ZIP (repeatable)
   --mount-rw DRIVE=DIR Mount a writable host directory (repeatable)
+  --mount-fat DRIVE=IMG Mount a read-only FAT volume image (repeatable)
   --exec COMMAND       Run a DOS shell command on startup
   --cpu 8086|286|386   Select the guest CPU profile
   --speed SPEED        Select slow, normal, fast, or maximum desktop pacing
@@ -63,7 +64,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
                 println!("dosa {}", env!("CARGO_PKG_VERSION"));
                 return Ok(0);
             }
-            Some(option @ ("--mount" | "--mount-rw")) => {
+            Some(option @ ("--mount" | "--mount-rw" | "--mount-fat")) => {
                 let value = args
                     .next()
                     .ok_or_else(|| format!("{option} needs DRIVE=PATH"))?;
@@ -72,6 +73,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
                     drive,
                     path,
                     writable: option == "--mount-rw",
+                    fat_image: option == "--mount-fat",
                 });
             }
             Some("--profile") => {
@@ -122,9 +124,12 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         drive,
         path,
         writable,
+        fat_image,
     } in launch.mounts
     {
-        let mount = if writable {
+        let mount = if fat_image {
+            Mount::open_fat_image(&path)
+        } else if writable {
             Mount::open_writable_directory(&path)
         } else {
             Mount::open(&path)
