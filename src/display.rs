@@ -2,8 +2,8 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 use dosa_desktop::{
-    App, CpuMode, Frame, Input, Key, MenuAction, MenuState, PointerEvent, PointerMode, Speed,
-    TextMode, Volume,
+    App, CpuMode, Frame, Input, Key, MenuAction, MenuState, PointerEvent, PointerMode, Scaling,
+    Speed, TextMode, Volume,
 };
 use dosa_dos::{CpuProfile, MouseCursor, RunState, TextFrame, Video};
 use dosa_mount::Mount;
@@ -66,6 +66,7 @@ pub struct Desktop {
     paused: bool,
     volume: Volume,
     muted: bool,
+    scaling: Scaling,
     settings: Settings,
     status: String,
     exit: bool,
@@ -124,6 +125,7 @@ impl Desktop {
             paused: false,
             volume: Volume::default(),
             muted: false,
+            scaling: Scaling::default(),
             settings,
             status: String::new(),
             exit: false,
@@ -371,6 +373,7 @@ impl App for Desktop {
             volume: self.volume,
             muted: self.muted,
             text_mode: self.settings.text_mode,
+            scaling: self.scaling,
             running: self.running,
             batch_active: self.shell.batch_active(),
             paused: self.paused,
@@ -440,6 +443,7 @@ impl App for Desktop {
             MenuAction::SetSpeed(speed) => self.settings.speed = speed,
             MenuAction::SetVolume(volume) => self.volume = volume,
             MenuAction::SetMuted(muted) => self.muted = muted,
+            MenuAction::SetScaling(scaling) => self.scaling = scaling,
             MenuAction::SetPaused(paused) if self.running => {
                 self.paused = paused;
                 self.shell.machine.set_paused(paused);

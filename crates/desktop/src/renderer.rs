@@ -7,8 +7,8 @@ use winit::dpi::PhysicalSize;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
 
-use crate::Frame;
 use crate::menu::BAR_HEIGHT;
+use crate::{Frame, Scaling};
 
 const MATTE_RGB: [f64; 3] = [0.070, 0.082, 0.102];
 const INSET: f64 = 16.0;
@@ -23,7 +23,7 @@ pub(crate) struct Renderer {
     overlay_pipeline: wgpu::RenderPipeline,
     framebuffer: Option<FramebufferTexture>,
     overlay: Option<FramebufferTexture>,
-    menu_visible: bool,
+    presented_viewport: [f32; 4],
     size: PhysicalSize<u32>,
 }
 
@@ -69,7 +69,7 @@ impl Renderer {
             overlay_pipeline,
             framebuffer: None,
             overlay: None,
-            menu_visible: false,
+            presented_viewport: [0.0; 4],
             size: PhysicalSize::new(0, 0),
         };
         renderer.resize(size);
@@ -81,6 +81,7 @@ impl Renderer {
             return;
         }
         self.size = size;
+        self.presented_viewport = [0.0; 4];
         if size.width > 0 && size.height > 0 {
             self.config.width = size.width;
             self.config.height = size.height;
@@ -93,9 +94,9 @@ impl Renderer {
         window: &Arc<Window>,
         frame: Frame<'_>,
         aspect: Option<f32>,
+        scaling: Scaling,
         overlay: Option<Frame<'_>>,
     ) -> Result<(), Box<dyn Error>> {
-        self.menu_visible = overlay.is_some();
         if self.size.width == 0 || self.size.height == 0 {
             return Ok(());
         }
@@ -126,6 +127,14 @@ impl Renderer {
             &frame,
             srgb,
         )?;
+        let viewport = display_viewport(
+            self.size,
+            (frame.width, frame.height),
+            aspect,
+            scaling,
+            window.scale_factor(),
+            overlay.is_some(),
+        );
         let overlay_height = if let Some(frame) = overlay {
             upload(
                 &self.device,
@@ -157,7 +166,7 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
-            let [x, y, width, height] = self.display_viewport(window, &frame, aspect);
+            let [x, y, width, height] = viewport;
             pass.set_viewport(x, y, width, height, 0.0, 1.0);
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.framebuffer.as_ref().unwrap().binding, &[]);
@@ -172,35 +181,15 @@ impl Renderer {
         self.queue.submit([encoder.finish()]);
         window.pre_present_notify();
         self.queue.present(output);
+        self.presented_viewport = viewport;
         if reconfigure {
             self.surface.configure(&self.device, &self.config);
         }
         Ok(())
     }
 
-    pub(crate) fn display_viewport(
-        &self,
-        window: &Window,
-        frame: &Frame<'_>,
-        aspect: Option<f32>,
-    ) -> [f32; 4] {
-        if self.size.width == 0 || self.size.height == 0 || frame.width == 0 || frame.height == 0 {
-            return [0.0; 4];
-        }
-        let scale = window.scale_factor();
-        let bar = if self.menu_visible {
-            ((f64::from(BAR_HEIGHT) * scale).round() as u32).min(self.size.height.saturating_sub(1))
-        } else {
-            0
-        };
-        let mut viewport = viewport(
-            PhysicalSize::new(self.size.width, self.size.height - bar),
-            (frame.width, frame.height),
-            aspect,
-            scale * INSET,
-        );
-        viewport[1] += bar as f32;
-        viewport
+    pub(crate) fn presented_viewport(&self) -> [f32; 4] {
+        self.presented_viewport
     }
 }
 
@@ -333,11 +322,39 @@ impl FramebufferTexture {
     }
 }
 
+fn display_viewport(
+    surface: PhysicalSize<u32>,
+    frame: (u32, u32),
+    aspect: Option<f32>,
+    scaling: Scaling,
+    dpi: f64,
+    menu_visible: bool,
+) -> [f32; 4] {
+    if surface.width == 0 || surface.height == 0 || frame.0 == 0 || frame.1 == 0 {
+        return [0.0; 4];
+    }
+    let bar = if menu_visible {
+        ((f64::from(BAR_HEIGHT) * dpi).round() as u32).min(surface.height - 1)
+    } else {
+        0
+    };
+    let mut viewport = viewport(
+        PhysicalSize::new(surface.width, surface.height - bar),
+        frame,
+        aspect,
+        dpi * INSET,
+        scaling,
+    );
+    viewport[1] += bar as f32;
+    viewport
+}
+
 fn viewport(
     surface: PhysicalSize<u32>,
     frame: (u32, u32),
     aspect: Option<f32>,
     inset: f64,
+    scaling: Scaling,
 ) -> [f32; 4] {
     let outer_width = f64::from(surface.width);
     let outer_height = f64::from(surface.height);
@@ -345,11 +362,20 @@ fn viewport(
     let height = (outer_height - 2.0 * inset).max(1.0);
 
     let frame_height = f64::from(frame.1);
-    let frame_width = match aspect.filter(|value| value.is_finite() && *value > 0.0) {
+    let native_width = f64::from(frame.0);
+    let integer_scale = (width / native_width).min(height / frame_height).floor();
+    let corrected_width = match aspect.filter(|value| value.is_finite() && *value > 0.0) {
         Some(aspect) => frame_height * f64::from(aspect),
-        None => f64::from(frame.0),
+        None => native_width,
     };
-    let scale = (width / frame_width).min(height / frame_height);
+    let (frame_width, scale) = if scaling == Scaling::Integer && integer_scale >= 1.0 {
+        (native_width, integer_scale)
+    } else {
+        (
+            corrected_width,
+            (width / corrected_width).min(height / frame_height),
+        )
+    };
     let width = (frame_width * scale).round().clamp(1.0, outer_width);
     let height = (frame_height * scale).round().clamp(1.0, outer_height);
     [
@@ -376,7 +402,13 @@ mod tests {
     #[test]
     fn viewport_keeps_pixel_aspect_and_tracks_surface_resize() {
         assert_eq!(
-            viewport(PhysicalSize::new(832, 632), (320, 200), None, 16.0),
+            viewport(
+                PhysicalSize::new(832, 632),
+                (320, 200),
+                None,
+                16.0,
+                Scaling::Fit
+            ),
             [16.0, 66.0, 800.0, 500.0]
         );
         assert_eq!(
@@ -384,13 +416,72 @@ mod tests {
                 PhysicalSize::new(832, 632),
                 (320, 200),
                 Some(4.0 / 3.0),
-                16.0
+                16.0,
+                Scaling::Fit,
             ),
             [16.0, 16.0, 800.0, 600.0]
         );
         assert_eq!(
-            viewport(PhysicalSize::new(1, 1), (320, 200), None, 32.0),
+            viewport(
+                PhysicalSize::new(1, 1),
+                (320, 200),
+                None,
+                32.0,
+                Scaling::Fit
+            ),
             [0.0, 0.0, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn integer_scaling_keeps_physical_pixels_and_pointer_edges_aligned() {
+        let viewport = display_viewport(
+            PhysicalSize::new(1320, 1000),
+            (320, 200),
+            Some(4.0 / 3.0),
+            Scaling::Integer,
+            2.0,
+            true,
+        );
+        assert_eq!(viewport, [180.0, 252.0, 960.0, 600.0]);
+        use crate::pointer::normalize;
+        use winit::dpi::PhysicalPosition;
+        assert_eq!(
+            normalize(PhysicalPosition::new(179.0, 252.0), viewport, false),
+            None
+        );
+        assert_eq!(
+            normalize(PhysicalPosition::new(180.0, 252.0), viewport, false),
+            Some((0, 0))
+        );
+        assert_eq!(
+            normalize(PhysicalPosition::new(1139.0, 851.0), viewport, false),
+            Some((u16::MAX, u16::MAX))
+        );
+    }
+
+    #[test]
+    fn integer_scaling_falls_back_to_aspect_corrected_fit_for_small_windows() {
+        let surface = PhysicalSize::new(260, 190);
+        let fit = display_viewport(
+            surface,
+            (320, 200),
+            Some(4.0 / 3.0),
+            Scaling::Fit,
+            2.0,
+            false,
+        );
+        assert_eq!(fit, [46.0, 32.0, 168.0, 126.0]);
+        assert_eq!(
+            display_viewport(
+                surface,
+                (320, 200),
+                Some(4.0 / 3.0),
+                Scaling::Integer,
+                2.0,
+                false
+            ),
+            fit
         );
     }
 }

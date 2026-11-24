@@ -87,7 +87,7 @@ Use Drives to select a drive letter, see its source type and access mode, and mo
 
 **Drives → Quick launch** opens a COM, EXE, or BAT and temporarily mounts its folder read-only on an unused DOS drive so it can use sibling files. Dosa restores the previous drive and directories when the program or batch finishes. Use a writable mount for programs that need to save files in their own folder.
 
-View offers pause/resume, fullscreen, and 80- or 132-column text presets with 25, 43, or 50 rows. DOS mouse support maps the host pointer into the guest viewport and releases held buttons when leaving the viewport or opening a menu.
+View offers pause/resume, fullscreen, scaling, and 80- or 132-column text presets with 25, 43, or 50 rows. Fit to window corrects the guest aspect ratio. Integer scaling uses whole physical pixels for each source pixel and falls back to fit when the display area is too small. DOS mouse support maps the host pointer into the guest viewport and releases held buttons when leaving the viewport or opening a menu.
 
 The desktop plays PC speaker sound, AdLib OPL2 music, and 8-bit mono Sound Blaster 2.0 PCM. For Sound Blaster setup, use port `220h`, IRQ `7`, and DMA channel `1`. DOS programs also receive these settings in `BLASTER`.
 

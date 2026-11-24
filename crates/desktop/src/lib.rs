@@ -18,7 +18,7 @@ mod pointer;
 mod renderer;
 
 pub use input::{Input, Key, Modifiers};
-pub use menu::{CpuMode, MenuAction, MenuState, MountKind, Speed, TextMode, Volume};
+pub use menu::{CpuMode, MenuAction, MenuState, MountKind, Scaling, Speed, TextMode, Volume};
 pub use pointer::{PointerEvent, PointerMode};
 use renderer::Renderer;
 
@@ -201,9 +201,7 @@ impl<A: App> Desktop<A> {
             .renderer
             .as_ref()
             .filter(|_| mode != PointerMode::Host)
-            .map(|renderer| {
-                renderer.display_viewport(window, &self.app.frame(), self.app.display_aspect())
-            });
+            .map(Renderer::presented_viewport);
         if let Some(event) = self.pointer.update(window, mode, viewport) {
             self.app.pointer(event);
         }
@@ -356,6 +354,7 @@ impl<A: App> ApplicationHandler for Desktop<A> {
                         &window,
                         self.app.frame(),
                         self.app.display_aspect(),
+                        state.scaling,
                         overlay,
                     ) {
                         self.fail(event_loop, error);

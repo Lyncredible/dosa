@@ -10,7 +10,7 @@ Dosa already has drive mounting, CPU and speed menus, TOML launch profiles, full
 | Quick launch | Implemented. Pick a COM, EXE, or BAT from Drives. Its folder is temporarily mounted read-only on an unused drive. Tests cover sibling resources, nested batch calls, guest errors, and prompt restoration. Native picker interaction remains in [task 14](14-integration.md). |
 | Sound controls | Master mute and volume implemented through the Audio menu. Callback tests verify gain changes on queued audio and that mute keeps the sample queue advancing. Per-device levels remain planned. |
 | Text clipboard | Copy the visible DOS text screen with CP437 decoding. Add explicit paste through the DOS input queue, with tests for line endings, queue limits, and guest input timing. |
-| Display scaling | Add integer scaling alongside the current aspect-corrected fit. Verify rendering and mouse coordinates at high DPI and on a window smaller than the guest frame. |
+| Display scaling | Implemented. View selects aspect-corrected fit or whole-pixel scaling with a fit fallback. The pointer uses the last presented viewport. Tests cover high-DPI geometry, mouse edges, and small surfaces. |
 
 The DOSBox-X menu and clipboard guides document these workflows. [Menus](https://dosbox-x.com/wiki/DOSBox%E2%80%90X%E2%80%99s-Drop%E2%80%90Down-Menus) [Clipboard guide](https://dosbox-x.com/wiki/Guide%3AClipboard-support-in-DOSBox%E2%80%90X) [Scaling options](https://dosbox-x.com/wiki/DOSBox%E2%80%90X%E2%80%99s-Feature-Highlights)
 
