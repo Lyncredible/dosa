@@ -18,7 +18,7 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 pub(super) struct WritableDirectory {
     pub(super) root: Arc<Dir>,
     transaction: Arc<Mutex<()>>,
-    session: Option<Arc<tempfile::TempDir>>,
+    pub(super) session: Option<Arc<tempfile::TempDir>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -6,7 +6,7 @@ Dosa already has drive mounting, CPU and speed menus, TOML launch profiles, full
 
 | Feature | First increment and verification |
 | --- | --- |
-| Drive information and unmount | Show the selected drive's source type and access mode. Allow unmounting while idle and verify that the prompt selects a remaining drive and that an unmounted drive can be mounted again. |
+| Drive information and unmount | Implemented. The Drives menu shows source type and access mode and allows unmounting while idle. Regressions verify keyboard selection, batch locking, prompt fallback, and remounting. |
 | Quick launch | Open a COM, EXE, or BAT through a native picker. Mount its containing directory so sibling resources resolve. Verify selection, cancellation, nested batch calls, and return to the existing prompt. |
 | Sound controls | Add master mute and volume. Verify output gain and continued guest audio timing while muted. Add per-device levels after that signal path is covered. |
 | Text clipboard | Copy the visible DOS text screen with CP437 decoding. Add explicit paste through the DOS input queue, with tests for line endings, queue limits, and guest input timing. |

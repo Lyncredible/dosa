@@ -104,6 +104,20 @@ pub struct Mount {
 }
 
 impl Mount {
+    /// Describe the mount source and guest access mode.
+    pub fn description(&self) -> &'static str {
+        match &self.source {
+            Source::Directory(_) => "Folder (read-only)",
+            Source::WritableDirectory(directory) if directory.session.is_some() => {
+                "ZIP copy (session R/W)"
+            }
+            Source::WritableDirectory(_) => "Folder (read/write)",
+            Source::SingleFile(_) => "File (read-only)",
+            Source::Zip(_) => "ZIP (read-only)",
+            Source::FatImage(_) => "FAT image (read-only)",
+        }
+    }
+
     /// Mount a FAT volume image as a read-only DOS drive.
     pub fn open_fat_image(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();

@@ -43,11 +43,22 @@ impl Shell {
     }
 
     pub fn mount(&mut self, drive: char, mount: Mount) -> Result<(), Box<dyn Error>> {
+        let drive = drive.to_ascii_uppercase();
         let select = self.directories.is_empty();
         self.machine.mount(drive, mount)?;
         self.directories.insert(drive, String::new());
         if select {
             self.drive = drive;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn unmount(&mut self, drive: char) -> Result<(), dosa_dos::DosError> {
+        let drive = drive.to_ascii_uppercase();
+        self.machine.unmount(drive)?;
+        self.directories.remove(&drive);
+        if self.drive == drive {
+            self.drive = self.directories.keys().next().copied().unwrap_or('C');
         }
         Ok(())
     }

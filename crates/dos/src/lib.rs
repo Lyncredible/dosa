@@ -196,6 +196,17 @@ impl Machine {
         self.mounts.get(&drive.to_ascii_uppercase())
     }
 
+    pub fn unmount(&mut self, drive: char) -> Result<(), DosError> {
+        if self.state.is_active() {
+            return Err(DosError::Busy);
+        }
+        let drive = normalize_drive(drive)?;
+        self.mounts
+            .remove(&drive)
+            .ok_or(DosError::UnmountedDrive(drive))?;
+        Ok(())
+    }
+
     pub fn set_cpu_profile(&mut self, profile: CpuProfile) -> Result<(), DosError> {
         if self.state.is_active() {
             return Err(DosError::Busy);

@@ -151,6 +151,15 @@ impl Desktop {
             .write_console(self.shell.prompt().as_bytes());
     }
 
+    fn refresh_prompt(&mut self, previous: &str) {
+        if self.shell.prompt() != previous {
+            self.shell.machine.write_console(b"\r\n");
+            self.write_prompt();
+            let typed: Vec<_> = self.line.chars().map(encode_cp437).collect();
+            self.shell.machine.write_console(&typed);
+        }
+    }
+
     fn submit(&mut self, line: &str) {
         self.shell.machine.write_console(b"\r\n");
         let result = self.shell.execute(line);
@@ -334,10 +343,19 @@ impl App for Desktop {
         MenuState {
             enabled: true,
             active_drive: self.shell.current_drive(),
+            drives: ('A'..='Z')
+                .filter_map(|letter| {
+                    self.shell
+                        .machine
+                        .drive(letter)
+                        .map(|mount| (letter, mount.description()))
+                })
+                .collect(),
             cpu: self.settings.cpu,
             speed: self.settings.speed,
             text_mode: self.settings.text_mode,
             running: self.running,
+            batch_active: self.shell.batch_active(),
             paused: self.paused,
             status: self.status.clone(),
         }
@@ -356,7 +374,8 @@ impl App for Desktop {
                 drive,
                 source,
                 kind,
-            } if !self.running => {
+            } if !self.running && !self.shell.batch_active() => {
+                let previous = self.shell.prompt();
                 let result = match kind {
                     dosa_desktop::MountKind::SessionZip => Mount::open_session_zip(source),
                     _ => Mount::open(source),
@@ -365,8 +384,21 @@ impl App for Desktop {
                     .map_err(|error| -> Box<dyn std::error::Error> { error.into() })
                     .and_then(|mount| self.shell.mount(drive, mount))
                 {
-                    Ok(()) => format!("Mounted {drive}:"),
+                    Ok(()) => {
+                        self.refresh_prompt(&previous);
+                        format!("Mounted {drive}:")
+                    }
                     Err(error) => format!("Mount failed: {error}"),
+                };
+            }
+            MenuAction::Unmount(drive) if !self.running && !self.shell.batch_active() => {
+                let previous = self.shell.prompt();
+                self.status = match self.shell.unmount(drive) {
+                    Ok(()) => {
+                        self.refresh_prompt(&previous);
+                        format!("Unmounted {drive}:")
+                    }
+                    Err(error) => format!("Unmount failed: {error}"),
                 };
             }
             MenuAction::SetCpu(mode) if !self.running => {
@@ -595,6 +627,54 @@ fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_unmount_falls_back_to_remaining_drive_and_allows_remount() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut shell = Shell::new();
+        shell
+            .mount('d', Mount::open(folder.path()).unwrap())
+            .unwrap();
+        shell
+            .mount('e', Mount::open_writable_directory(folder.path()).unwrap())
+            .unwrap();
+        let mut desktop = Desktop::new(shell, None);
+        assert_eq!(desktop.menu().drives[&'D'], "Folder (read-only)");
+        assert_eq!(desktop.menu().drives[&'E'], "Folder (read/write)");
+        desktop.input(Input {
+            key: Key::Character('d'),
+            pressed: true,
+            text: Some("dir".into()),
+            modifiers: Default::default(),
+            scan_code: 0,
+        });
+        desktop.menu_action(MenuAction::Unmount('D'));
+        assert_eq!(desktop.menu().active_drive, 'E');
+        assert!(!desktop.menu().drives.contains_key(&'D'));
+        assert_eq!(desktop.line, "dir");
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected text mode")
+        };
+        let (column, row) = frame.cursor.unwrap();
+        let expected = b"E:\\> dir";
+        let start = usize::from(row) * usize::from(frame.columns) * 2;
+        assert_eq!(usize::from(column), expected.len());
+        assert!(
+            expected
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| frame.cells[start + index * 2] == *byte)
+        );
+        desktop.menu_action(MenuAction::Unmount('E'));
+        assert!(desktop.menu().drives.is_empty());
+        desktop.menu_action(MenuAction::Mount {
+            drive: 'D',
+            source: folder.path().into(),
+            kind: dosa_desktop::MountKind::Folder,
+        });
+        assert_eq!(desktop.menu().active_drive, 'D');
+        assert!(desktop.shell.execute("DIR").is_ok());
+    }
 
     #[test]
     fn screenshot_round_trips_guest_rgba_pixels() {
