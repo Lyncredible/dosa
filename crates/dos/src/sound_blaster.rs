@@ -1,4 +1,4 @@
-//! Sound Blaster 2.0 DSP reset, commands, and unsigned 8-bit playback.
+//! Sound Blaster 2.01 DSP reset, commands, and unsigned 8-bit playback.
 
 use std::collections::VecDeque;
 
@@ -38,6 +38,7 @@ struct Transfer {
     remaining: u64,
     auto_init: bool,
     paused: bool,
+    saved_dac: Option<u8>,
 }
 
 impl Default for SoundBlaster {
@@ -66,7 +67,7 @@ impl SoundBlaster {
     pub fn read_port(&mut self, port: u16) -> Option<u8> {
         match port {
             0x22a => Some(self.response.pop_front().unwrap_or(0xff)),
-            0x22c => Some(0x7f | (u8::from(self.reset) << 7)),
+            0x22c => Some(0x7f | (u8::from(self.reset || self.high_speed_dac().is_some()) << 7)),
             0x22e => {
                 self.irq_line = false;
                 Some(0x7f | (u8::from(!self.response.is_empty()) << 7))
@@ -78,17 +79,27 @@ impl SoundBlaster {
     pub fn write_port(&mut self, port: u16, value: u8) -> bool {
         match port {
             0x226 if value & 1 != 0 => {
-                *self = Self {
-                    reset: true,
-                    irq_pending: self.irq_pending,
-                    ..Self::default()
-                };
+                if let Some(saved_dac) = self.high_speed_dac() {
+                    // A high-speed reset ends playback and retains the programmed parameters.
+                    self.transfer = None;
+                    self.phase = 0;
+                    self.dac = saved_dac;
+                    self.response.clear();
+                    self.irq_line = false;
+                    self.reset = true;
+                } else if !self.reset {
+                    *self = Self {
+                        reset: true,
+                        irq_pending: self.irq_pending,
+                        ..Self::default()
+                    };
+                }
             }
             0x226 if self.reset => {
                 self.reset = false;
                 self.response.push_back(0xaa);
             }
-            0x22c if !self.reset => self.write_dsp(value),
+            0x22c if !self.reset && self.high_speed_dac().is_none() => self.write_dsp(value),
             0x226 | 0x22c => (),
             _ => return false,
         }
@@ -177,10 +188,11 @@ impl SoundBlaster {
         let length = u64::from(u16::from_le_bytes(args)) + 1;
         match command {
             0x10 => self.dac = args[0],
-            0x14 => self.start(length, false),
-            0x1c => self.start(self.block_size, true),
+            0x14 => self.start(length, false, None),
+            0x1c => self.start(self.block_size, true, None),
             0x40 => self.period_us = 256 - u64::from(args[0]),
             0x48 => self.block_size = length,
+            0x90 | 0x91 => self.start(self.block_size, command == 0x90, Some(self.dac)),
             0xd0 | 0xd4 => {
                 if let Some(transfer) = &mut self.transfer {
                     transfer.paused = command == 0xd0;
@@ -195,7 +207,7 @@ impl SoundBlaster {
                 }
             }
             0xe0 => self.reply(&[!args[0]]),
-            0xe1 => self.reply(&[2, 0]),
+            0xe1 => self.reply(&[2, 1]),
             0xe2 => {
                 self.identification = self
                     .identification
@@ -220,11 +232,18 @@ impl SoundBlaster {
         self.response.extend(data);
     }
 
-    fn start(&mut self, length: u64, auto_init: bool) {
+    fn high_speed_dac(&self) -> Option<u8> {
+        self.transfer
+            .as_ref()
+            .and_then(|transfer| transfer.saved_dac)
+    }
+
+    fn start(&mut self, length: u64, auto_init: bool, saved_dac: Option<u8>) {
         self.transfer = Some(Transfer {
             remaining: length,
             auto_init,
             paused: false,
+            saved_dac,
         });
         self.phase = 0;
     }
@@ -240,7 +259,7 @@ mod tests {
         dsp.write_port(0x22c, 0xe1);
         assert_eq!(dsp.read_port(0x22e), Some(0xff));
         assert_eq!(dsp.read_port(0x22a), Some(2));
-        assert_eq!(dsp.read_port(0x22a), Some(0));
+        assert_eq!(dsp.read_port(0x22a), Some(1));
         assert_eq!(dsp.read_port(0x22e), Some(0x7f));
         dsp.write_port(0x22c, 0x10);
         dsp.write_port(0x22c, 0x00);
@@ -335,6 +354,49 @@ mod tests {
         dsp.acknowledge_irq();
         dsp.read_port(0x22e);
         dsp.advance(500, &mut dma, &cpu);
+        assert!(!dsp.irq_requested());
+    }
+
+    #[test]
+    fn high_speed_auto_init_repeats_blocks_until_reset_and_preserves_dsp_parameters() {
+        let mut dsp = SoundBlaster::default();
+        let mut dma = Dma::default();
+        let mut cpu = Cpu::default();
+        cpu.write_u8(0x1000, 0, 64);
+        cpu.write_u8(0x1000, 1, 192);
+        for (port, byte) in [(3, 1), (3, 0), (0x83, 1), (0x0b, 0x59), (0x0a, 1)] {
+            dma.write_port(port, byte);
+        }
+        for byte in [0xd1, 0x10, 160, 0x40, 233, 0x48, 1, 0, 0x90] {
+            dsp.write_port(0x22c, byte);
+        }
+        assert_eq!(dsp.read_port(0x22c), Some(0xff));
+        for byte in [0xd3, 0xd0, 0xda, 0xe1] {
+            dsp.write_port(0x22c, byte);
+        }
+        assert_eq!(dsp.read_port(0x22e), Some(0x7f));
+
+        dsp.advance(2, &mut dma, &cpu);
+        assert_eq!(dsp.sample(), -0.25);
+        assert!(!dsp.irq_requested());
+        dsp.advance(1, &mut dma, &cpu);
+        assert_eq!(dsp.sample(), 0.25);
+        for _ in 0..2 {
+            assert!(dsp.irq_requested());
+            dsp.acknowledge_irq();
+            dsp.read_port(0x22e);
+            dsp.advance(3, &mut dma, &cpu);
+        }
+        dsp.acknowledge_irq();
+        dsp.write_port(0x226, 1);
+        dsp.write_port(0x226, 1);
+        dsp.write_port(0x226, 0);
+        assert_eq!(dsp.read_port(0x22c), Some(0x7f));
+        assert_eq!(dsp.read_port(0x22a), Some(0xaa));
+        assert_eq!(dsp.period_us, 23);
+        assert_eq!(dsp.block_size, 2);
+        assert_eq!(dsp.sample(), 0.125);
+        dsp.advance(100, &mut dma, &cpu);
         assert!(!dsp.irq_requested());
     }
 }

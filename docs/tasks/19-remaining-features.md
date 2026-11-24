@@ -11,7 +11,7 @@ Complete the remaining roadmap and verification requirements with focused implem
 | Writable storage | Explicit writable mount or overlay, create/write/truncate/rename/delete/directories, persistence and confinement tests |
 | Disk media | Read-only FAT and ISO 9660 volumes can mount through the CLI or a profile. Generated fixtures verify DOS access and unchanged image bytes. [Task 23](23-dosbox-x-comparison.md) tracks MSCDEX detection and sector reads, with advanced device services, partitioned images, and boot still open. |
 | AdLib | OPL2 address/data ports and polled timers implemented. A generated COM program exercises FM synthesis and the 48 kHz PC speaker mixer. See [task 21](21-adlib.md). |
-| Sound Blaster | Sound Blaster 2.0 DSP, DMA channel 1, IRQ7, and 8-bit PCM mixing verified with a generated COM program. Extended commands and native program playback verification remain in [task 22](22-sound-blaster.md). |
+| Sound Blaster | Standard and high-speed 8-bit PCM playback through DMA channel 1 and IRQ7 verified with generated COM programs. Extended commands and native program playback verification remain in [task 22](22-sound-blaster.md). |
 | Protected mode | Descriptor tables, transitions, memory semantics and exceptions for 286/386 profiles |
 | DPMI | Host services exercised by a reproducible protected-mode workload |
 | Snapshots | Versioned CPU/device state, mount identity, save/restore and invalid-state tests |

@@ -155,6 +155,15 @@ mod tests {
 
     #[test]
     fn guest_dsp_reset_dma_playback_and_irq_acknowledgment() {
+        guest_dma_playback(&[0x40, 156, 0x14, 63, 0]);
+    }
+
+    #[test]
+    fn guest_high_speed_dma_playback_and_irq_acknowledgment() {
+        guest_dma_playback(&[0x40, 233, 0x48, 63, 0, 0x91]);
+    }
+
+    fn guest_dma_playback(playback_commands: &[u8]) {
         let mut guest = vec![
             0xfa, // CLI
             0xb8, 0x0f, 0x25, 0xba, 0, 3, 0xcd, 0x21, // Set IRQ7 vector to DS:0300h
@@ -176,8 +185,8 @@ mod tests {
             guest.extend([0xb0, value, 0xe6, port]); // OUT immediate,AL
         }
         guest.extend([0xba, 0x2c, 0x02]);
-        for value in [0xd1, 0x40, 156, 0x14, 63, 0] {
-            guest.extend([0xb0, value, 0xee]); // Enable DAC, 10 kHz, 64-byte DMA
+        for value in std::iter::once(0xd1).chain(playback_commands.iter().copied()) {
+            guest.extend([0xb0, value, 0xee]); // Enable DAC and play 64 bytes by DMA.
         }
         guest.extend([0xfb, 0xf4, 0xeb, 0xfd]); // STI; HLT; JMP back to HLT
         guest.resize(0x100, 0);
@@ -213,5 +222,6 @@ mod tests {
         assert!(!machine.audio.irq_requested());
         assert_eq!(machine.audio.read_port(0x08, elapsed), Some(2));
         assert_eq!(machine.audio.read_port(0x08, elapsed), Some(0));
+        assert_eq!(machine.audio.read_port(0x22c, elapsed), Some(0x7f));
     }
 }
