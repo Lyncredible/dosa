@@ -93,6 +93,8 @@ The desktop plays PC speaker sound, AdLib OPL2 music, and 8-bit mono Sound Blast
 
 Audio offers master volume and mute while a guest runs. Unmuting restores the selected level. Keyboard menu access uses Alt+D, Alt+C, Alt+S, Alt+V, and Alt+A, followed by arrow keys and Enter.
 
+**Edit** (`Alt+E`) copies the visible DOS text screen or pastes up to 4,096 characters. At the shell prompt, pasted line breaks become spaces and Enter submits the edited command. In a running program, paste feeds the DOS BIOS keyboard queue one character at a time, including Enter for line breaks. Choose **Stop pasting** to discard the remaining paste.
+
 The desktop speed presets allow 10,000, 50,000, 100,000, or 250,000 guest instructions per display tick. Full native picker interaction and macOS desktop checks remain open.
 
 ## Compatibility and verification

@@ -287,6 +287,15 @@ impl Machine {
         }
     }
 
+    /// Queue a pasted BIOS keystroke when the previous input has been consumed.
+    pub fn paste_key(&mut self, ascii: u8, scan: u8) -> bool {
+        if !self.state.is_active() || !self.keys.is_empty() {
+            return false;
+        }
+        self.queue_bios_key(Some((ascii, scan)));
+        true
+    }
+
     fn guest_keyboard_handler(&self) -> bool {
         !bios::default_keyboard(&self.cpu) && self.has_interrupt_handler(KEYBOARD_VECTOR)
     }

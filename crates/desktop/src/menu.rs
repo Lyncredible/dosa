@@ -75,6 +75,9 @@ pub enum MountKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MenuAction {
+    CopyText,
+    PasteText,
+    StopPaste,
     QuickLaunch(PathBuf),
     SaveScreenshot(PathBuf),
     Mount {
@@ -106,6 +109,8 @@ pub struct MenuState {
     pub scaling: Scaling,
     pub running: bool,
     pub batch_active: bool,
+    pub text_visible: bool,
+    pub paste_pending: bool,
     pub paused: bool,
     pub status: String,
 }
@@ -124,6 +129,8 @@ impl Default for MenuState {
             scaling: Scaling::default(),
             running: false,
             batch_active: false,
+            text_visible: false,
+            paste_pending: false,
             paused: false,
             status: String::new(),
         }
@@ -147,14 +154,16 @@ enum Tab {
     Speed,
     View,
     Audio,
+    Edit,
 }
 
-const TABS: [(Tab, &str, u32, u32); 5] = [
+const TABS: [(Tab, &str, u32, u32); 6] = [
     (Tab::Drives, "Drives", 7, 68),
     (Tab::Cpu, "CPU", 78, 50),
     (Tab::Speed, "Speed", 131, 62),
     (Tab::View, "View", 196, 53),
     (Tab::Audio, "Audio", 252, 62),
+    (Tab::Edit, "Edit", 317, 54),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -293,6 +302,7 @@ impl Menu {
                 Some('s') => Some(Tab::Speed),
                 Some('v') => Some(Tab::View),
                 Some('a') => Some(Tab::Audio),
+                Some('e') => Some(Tab::Edit),
                 _ => None,
             };
             if let Some(tab) = tab {
@@ -397,8 +407,8 @@ impl Menu {
             }
             canvas.text(rect.x + 7, 11, label, TEXT);
         }
-        if width >= 450 {
-            canvas.text(width - 131, 11, "Alt+D/C/S/V/A", MUTED);
+        if width >= 530 {
+            canvas.text(width - 149, 11, "Alt+D/C/S/V/A/E", MUTED);
         }
         let settings = format!(
             "{}: | {} | {}{}{}",
@@ -523,6 +533,26 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
         chosen,
     };
     match tab {
+        Tab::Edit => vec![
+            item(
+                "Copy screen text",
+                Command::App(MenuAction::CopyText),
+                state.text_visible,
+                false,
+            ),
+            item(
+                "Paste text",
+                Command::App(MenuAction::PasteText),
+                state.running || !state.batch_active,
+                false,
+            ),
+            item(
+                "Stop pasting",
+                Command::App(MenuAction::StopPaste),
+                state.paste_pending,
+                false,
+            ),
+        ],
         Tab::Drives => [
             ("Mount file...", MountKind::File),
             ("Mount folder...", MountKind::Folder),

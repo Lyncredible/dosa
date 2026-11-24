@@ -17,6 +17,7 @@ png = "0.18"
 tempfile = "3"
 serde = { version = "1", features = ["derive"] }
 toml = { version = "1.2", default-features = false, features = ["parse", "serde", "std"] }
+arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }
 
 [dev-dependencies]
 fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }
