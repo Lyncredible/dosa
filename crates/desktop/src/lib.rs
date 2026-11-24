@@ -106,7 +106,7 @@ impl<A: App> Desktop<A> {
                         .with_title("Dosa")
                         .with_theme(Some(Theme::Dark))
                         .with_inner_size(LogicalSize::new(928, 624))
-                        .with_min_inner_size(LogicalSize::new(384, 272))
+                        .with_min_inner_size(LogicalSize::new(384, 360))
                         .with_visible(false),
                 )?,
             ),

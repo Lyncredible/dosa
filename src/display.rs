@@ -93,7 +93,9 @@ impl Default for Settings {
 impl Settings {
     pub fn apply(self, shell: &mut Shell) -> Result<(), dosa_dos::DosError> {
         shell.machine.set_cpu_profile(cpu_profile(self.cpu))?;
-        shell.machine.set_text_rows(text_rows(self.text_mode));
+        shell
+            .machine
+            .set_text_geometry(text_columns(self.text_mode), text_rows(self.text_mode));
         Ok(())
     }
 }
@@ -244,7 +246,11 @@ impl Desktop {
         if mode == self.settings.text_mode {
             return;
         }
-        if !self.shell.machine.set_text_rows(text_rows(mode)) {
+        if !self
+            .shell
+            .machine
+            .set_text_geometry(text_columns(mode), text_rows(mode))
+        {
             return;
         }
         self.settings.text_mode = mode;
@@ -472,9 +478,16 @@ fn cpu_profile(mode: CpuMode) -> CpuProfile {
 
 fn text_rows(mode: TextMode) -> u8 {
     match mode {
-        TextMode::Rows25 => 25,
-        TextMode::Rows43 => 43,
-        TextMode::Rows50 => 50,
+        TextMode::Rows25 | TextMode::WideRows25 => 25,
+        TextMode::Rows43 | TextMode::WideRows43 => 43,
+        TextMode::Rows50 | TextMode::WideRows50 => 50,
+    }
+}
+
+fn text_columns(mode: TextMode) -> u16 {
+    match mode {
+        TextMode::WideRows25 | TextMode::WideRows43 | TextMode::WideRows50 => 132,
+        _ => 80,
     }
 }
 
@@ -618,6 +631,9 @@ mod tests {
         assert_eq!(menu.text_mode, TextMode::Rows43);
         assert_eq!((desktop.frame().width, desktop.frame().height), (640, 344));
         assert!(instructions_per_tick(Speed::Fast) > instructions_per_tick(Speed::Normal));
+        desktop.menu_action(MenuAction::SetTextMode(TextMode::WideRows50));
+        desktop.tick();
+        assert_eq!((desktop.frame().width, desktop.frame().height), (1056, 400));
     }
 
     #[test]

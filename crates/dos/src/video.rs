@@ -10,8 +10,9 @@ mod text_tests;
 
 const TEXT: usize = 0xb8000;
 const COLS: usize = 80;
+#[cfg(test)]
 const ROW_BYTES: usize = COLS * 2;
-const MAX_TEXT_BYTES: usize = ROW_BYTES * 50;
+const MAX_TEXT_BYTES: usize = 132 * 2 * 50;
 const CGA_WIDTH: usize = 640;
 const CGA_HEIGHT: usize = 200;
 const CGA_STRIDE: usize = CGA_WIDTH / 8;
@@ -38,6 +39,7 @@ pub enum Video<'a> {
 
 #[derive(Clone, Copy)]
 struct TextGeometry {
+    columns: usize,
     scan_lines: u16,
     character_height: u16,
 }
@@ -52,6 +54,7 @@ impl TextGeometry {
             _ => 16,
         };
         Self {
+            columns: COLS,
             scan_lines,
             character_height,
         }
@@ -62,7 +65,7 @@ impl TextGeometry {
     }
 
     const fn text_bytes(self) -> usize {
-        ROW_BYTES * self.rows()
+        self.columns * 2 * self.rows()
     }
 
     const fn font_page_bytes(self) -> u16 {
@@ -139,7 +142,7 @@ impl Adapter {
                 palette: &self.palette,
             },
             _ => Video::Text(TextFrame {
-                columns: COLS as u16,
+                columns: self.text.columns as u16,
                 rows: self.text.rows() as u16,
                 character_height: self.text.character_height,
                 cells: &cpu.memory[TEXT..TEXT + self.text.text_bytes()],
@@ -200,18 +203,28 @@ impl Adapter {
     }
 
     pub(crate) fn set_console_rows(&mut self, cpu: &mut Cpu, rows: u8) -> bool {
+        self.set_console_geometry(cpu, self.console.columns as u16, rows)
+    }
+
+    pub(crate) fn set_console_geometry(&mut self, cpu: &mut Cpu, columns: u16, rows: u8) -> bool {
+        if !matches!(columns, 80 | 132) {
+            return false;
+        }
         self.console = match rows {
             25 => TextGeometry::VGA_DEFAULT,
             43 => TextGeometry {
+                columns: COLS,
                 scan_lines: 350,
                 character_height: 8,
             },
             50 => TextGeometry {
+                columns: COLS,
                 scan_lines: 400,
                 character_height: 8,
             },
             _ => return false,
         };
+        self.console.columns = usize::from(columns);
         self.restore_text(cpu);
         true
     }
@@ -308,6 +321,8 @@ impl Adapter {
 
     fn set_text_geometry(&mut self, cpu: &mut Cpu, geometry: TextGeometry, page_bytes: u16) {
         self.text = geometry;
+        self.col = self.col.min(geometry.columns - 1);
+        cpu.write_u16(0x40, 0x4a, geometry.columns as u16);
         self.row = self.row.min(geometry.rows() - 1);
         cpu.write_u16(0x40, 0x4c, page_bytes);
         cpu.write_u8(0x40, 0x84, (geometry.rows() - 1) as u8);
@@ -327,12 +342,12 @@ impl Adapter {
     }
 
     pub(crate) fn erase_previous(&mut self, cpu: &mut Cpu) {
-        let cursor = self.row * COLS + self.col;
+        let cursor = self.row * self.text.columns + self.col;
         let Some(previous) = cursor.checked_sub(1) else {
             return;
         };
-        self.row = previous / COLS;
-        self.col = previous % COLS;
+        self.row = previous / self.text.columns;
+        self.col = previous % self.text.columns;
         cpu.memory[TEXT + previous * 2] = b' ';
         self.update_cursor(cpu);
     }
@@ -352,10 +367,10 @@ impl Adapter {
                     self.write(cpu, &b"        "[..spaces]);
                 }
                 _ => {
-                    let cell = TEXT + self.row * ROW_BYTES + self.col * 2;
+                    let cell = TEXT + self.row * self.text.columns * 2 + self.col * 2;
                     cpu.memory[cell] = byte;
                     self.col += 1;
-                    if self.col == COLS {
+                    if self.col == self.text.columns {
                         self.col = 0;
                         self.row += 1;
                     }
@@ -363,7 +378,13 @@ impl Adapter {
             }
             if self.row == self.text.rows() {
                 let bottom = self.text.rows() - 1;
-                self.scroll(cpu, [0, 0, bottom as u8, (COLS - 1) as u8], 1, 0x07, false);
+                self.scroll(
+                    cpu,
+                    [0, 0, bottom as u8, (self.text.columns - 1) as u8],
+                    1,
+                    0x07,
+                    false,
+                );
                 self.row = bottom;
             }
         }
@@ -426,7 +447,7 @@ impl Adapter {
             usize::from(top),
             usize::from(left),
             usize::from(bottom).min(self.text.rows() - 1),
-            usize::from(right).min(COLS - 1),
+            usize::from(right).min(self.text.columns - 1),
         );
         if top > bottom || left > right {
             return;
@@ -436,7 +457,7 @@ impl Adapter {
         } else {
             usize::from(count)
         };
-        let row_start = |row| TEXT + ROW_BYTES * row + left * 2;
+        let row_start = |row| TEXT + self.text.columns * 2 * row + left * 2;
         let width = (right + 1 - left) * 2;
         for amount in 0..=bottom - top {
             let row = if down { bottom - amount } else { top + amount };
@@ -479,12 +500,13 @@ impl Adapter {
                 self.scroll(cpu, [ch, cl, dh, dl], al, bh, ah == 7);
             }
             0x08 if self.mode == 3 => {
-                let start = TEXT + (self.row * COLS + self.col) * 2;
+                let start = TEXT + (self.row * self.text.columns + self.col) * 2;
                 cpu.regs.ax = u16::from_le_bytes([cpu.memory[start], cpu.memory[start + 1]]);
             }
             0x09 | 0x0a if self.mode == 3 => {
-                let start = self.row * COLS + self.col;
-                let end = (start + usize::from(cpu.regs.cx)).min(COLS * self.text.rows());
+                let start = self.row * self.text.columns + self.col;
+                let end =
+                    (start + usize::from(cpu.regs.cx)).min(self.text.columns * self.text.rows());
                 for cell in start..end {
                     cpu.memory[TEXT + cell * 2] = al;
                     if ah == 0x09 {
@@ -621,7 +643,11 @@ impl Adapter {
     }
 
     fn columns(&self) -> u8 {
-        if self.mode == 0x13 { 40 } else { 80 }
+        match self.mode {
+            0x13 => 40,
+            3 => self.text.columns as u8,
+            _ => 80,
+        }
     }
 
     pub(crate) fn port_read(&mut self, port: u16) -> Option<u8> {

@@ -44,6 +44,9 @@ pub enum TextMode {
     Rows25,
     Rows43,
     Rows50,
+    WideRows25,
+    WideRows43,
+    WideRows50,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -495,6 +498,9 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
                     ("25 text rows", TextMode::Rows25),
                     ("43 text rows", TextMode::Rows43),
                     ("50 text rows", TextMode::Rows50),
+                    ("132 x 25", TextMode::WideRows25),
+                    ("132 x 43", TextMode::WideRows43),
+                    ("132 x 50", TextMode::WideRows50),
                 ]
                 .map(|(label, mode)| {
                     item(
