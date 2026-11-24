@@ -26,6 +26,7 @@ The first milestone is a GPU-rendered DOS prompt that can mount host content and
 | [20 · PC speaker and native audio](docs/tasks/20-pc-speaker.md) | 09, 19 | In progress |
 | [21 · AdLib FM audio](docs/tasks/21-adlib.md) | 19, 20 | Initial OPL2 emulation complete |
 | [22 · Sound Blaster digital audio](docs/tasks/22-sound-blaster.md) | 19, 21 | Initial 8-bit playback complete |
+| [23 · DOSBox-X feature comparison](docs/tasks/23-dosbox-x-comparison.md) | 10, 15, 16 | Prioritized |
 
 See [architecture](docs/architecture.md) for the library boundaries and execution model.
 
