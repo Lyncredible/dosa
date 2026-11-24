@@ -1,6 +1,7 @@
 //! DOS drives backed by host directories, individual files, or ZIP archives.
 
 mod fat_image;
+mod iso_image;
 mod names;
 mod writable;
 mod zip_mount;
@@ -91,6 +92,7 @@ type Result<T> = std::result::Result<T, MountError>;
 #[derive(Debug)]
 enum Source {
     FatImage(fat_image::FatImage),
+    IsoImage(iso_image::IsoImage),
     Directory(Arc<Dir>),
     WritableDirectory(WritableDirectory),
     SingleFile(Child<Mutex<File>>),
@@ -115,6 +117,7 @@ impl Mount {
             Source::SingleFile(_) => "File (read-only)",
             Source::Zip(_) => "ZIP (read-only)",
             Source::FatImage(_) => "FAT image (read-only)",
+            Source::IsoImage(_) => "ISO image (read-only)",
         }
     }
 
@@ -127,6 +130,17 @@ impl Mount {
         let image = fat_image::FatImage::open(File::open(path)?)?;
         Ok(Self {
             source: Source::FatImage(image),
+        })
+    }
+
+    /// Open the primary ISO 9660 filesystem on a read-only CD image.
+    pub fn open_iso_image(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if !fs::metadata(path)?.is_file() {
+            return Err(MountError::UnsupportedSource);
+        }
+        Ok(Self {
+            source: Source::IsoImage(iso_image::IsoImage::open(File::open(path)?)?),
         })
     }
 
@@ -185,6 +199,7 @@ impl Mount {
             }
             Source::Zip(zip) => zip.list(&components, path),
             Source::FatImage(image) => image.list(&components, path),
+            Source::IsoImage(image) => image.list(&components, path),
         }
     }
 
@@ -206,6 +221,7 @@ impl Mount {
             }
             Source::Zip(zip) => zip.metadata(&components, path),
             Source::FatImage(image) => image.metadata(&components, path),
+            Source::IsoImage(image) => image.metadata(&components, path),
         }
     }
 
@@ -237,6 +253,7 @@ impl Mount {
             }
             Source::Zip(zip) => zip.read(&components, path),
             Source::FatImage(image) => image.read(&components, path),
+            Source::IsoImage(image) => image.read(&components, path),
         }
     }
 }

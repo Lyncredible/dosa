@@ -291,7 +291,7 @@ impl Shell {
                 }
                 "ECHO." if args.is_empty() => return Ok(Command::Print(b"\r\n".to_vec())),
                 "ECHO" => return Ok(self.echo_batch(args)),
-                "MOUNT" => return Err("mount host paths using the interactive shell or --mount before starting a batch file".into()),
+                "MOUNT" | "IMGMOUNT" => return Err("mount host paths using the interactive shell or --mount before starting a batch file".into()),
                 "FOR" | "SET" | "SETLOCAL" | "ENDLOCAL" | "SHIFT" | "PAUSE" | "CHOICE" => {
                     return Err(format!("batch command {word} is unsupported").into());
                 }

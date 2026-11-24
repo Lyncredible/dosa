@@ -468,6 +468,7 @@ impl App for Desktop {
                 let previous = self.shell.prompt();
                 let result = match kind {
                     dosa_desktop::MountKind::SessionZip => Mount::open_session_zip(source),
+                    dosa_desktop::MountKind::Iso => Mount::open_iso_image(source),
                     _ => Mount::open(source),
                 };
                 self.status = match result

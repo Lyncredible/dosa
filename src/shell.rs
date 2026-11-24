@@ -153,6 +153,7 @@ impl Shell {
                 CD [path]    Show or change directory\r\n\
                 TYPE file    Print a file\r\n\
                 MOUNT C path Mount a host file, folder or ZIP\r\n\
+                IMGMOUNT D path Mount an ISO 9660 data image\r\n\
                 Start dosa with --mount-rw C=path for a writable directory.\r\n\
                 C:           Switch drives\r\n\
                 CLS          Clear the screen\r\n\
@@ -200,19 +201,29 @@ impl Shell {
                 let (drive, path) = self.resolve(unquote(args))?;
                 self.drive_mount(drive)?.read(&path)?
             }
-            "MOUNT" => {
+            command @ ("MOUNT" | "IMGMOUNT") => {
+                let usage = if command == "IMGMOUNT" {
+                    "usage: IMGMOUNT D host-iso"
+                } else {
+                    "usage: MOUNT C host-path"
+                };
                 let (letter, host) = split_word(args)?;
                 let drive = letter
                     .trim_end_matches(':')
                     .parse::<char>()
                     .ok()
                     .filter(char::is_ascii_alphabetic)
-                    .ok_or("usage: MOUNT C host-path")?
+                    .ok_or(usage)?
                     .to_ascii_uppercase();
                 if host.is_empty() {
-                    return Err("usage: MOUNT C host-path".into());
+                    return Err(usage.into());
                 }
-                self.mount(drive, Mount::open(unquote(host))?)?;
+                let mount = if command == "IMGMOUNT" {
+                    Mount::open_iso_image(unquote(host))?
+                } else {
+                    Mount::open(unquote(host))?
+                };
+                self.mount(drive, mount)?;
                 format!("Drive {drive}: mounted\r\n").into_bytes()
             }
             _ => {
