@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::LazyLock;
 use std::time::Instant;
 
@@ -39,15 +40,11 @@ const VGA: [[u8; 3]; 16] = [
     [245, 248, 253],
 ];
 const BATCH_LINES_PER_TICK: usize = 64;
+const MAX_PASTE_CHARS: usize = 4096;
 
 static GLYPHS: LazyLock<[[u8; 8]; 256]> = LazyLock::new(|| {
     std::array::from_fn(|index| {
-        let character = match index {
-            0..32 => CP437_LOW.chars().nth(index).unwrap(),
-            32..127 => index as u8 as char,
-            127 => '⌂',
-            _ => CP437_HIGH.chars().nth(index - 128).unwrap(),
-        };
+        let character = decode_cp437(index as u8);
         BASIC_FONTS
             .get(character)
             .or_else(|| LATIN_FONTS.get(character))
@@ -67,6 +64,8 @@ pub struct Desktop {
     volume: Volume,
     muted: bool,
     scaling: Scaling,
+    clipboard: Option<arboard::Clipboard>,
+    paste: VecDeque<u8>,
     settings: Settings,
     status: String,
     exit: bool,
@@ -126,6 +125,8 @@ impl Desktop {
             volume: Volume::default(),
             muted: false,
             scaling: Scaling::default(),
+            clipboard: None,
+            paste: VecDeque::new(),
             settings,
             status: String::new(),
             exit: false,
@@ -175,6 +176,44 @@ impl Desktop {
             self.status = format!("Quick launch cleanup failed: {error}");
         }
         self.write_input_prompt();
+    }
+
+    fn clipboard(&mut self) -> Result<&mut arboard::Clipboard, arboard::Error> {
+        if self.clipboard.is_none() {
+            self.clipboard = Some(arboard::Clipboard::new()?);
+        }
+        Ok(self.clipboard.as_mut().unwrap())
+    }
+
+    fn copy_screen_text(&mut self) {
+        let Video::Text(frame) = self.shell.machine.video() else {
+            return;
+        };
+        let text = screen_text(frame);
+        self.status = match self
+            .clipboard()
+            .and_then(|clipboard| clipboard.set_text(text))
+        {
+            Ok(()) => "Copied screen text".into(),
+            Err(error) => format!("Copy failed: {error}"),
+        };
+    }
+
+    fn paste_text(&mut self, text: &str) {
+        let chars = paste_characters(text).take(MAX_PASTE_CHARS);
+        if self.running {
+            self.paste = chars.map(encode_cp437).collect();
+        } else if !self.shell.batch_active() {
+            for character in chars {
+                let character = if matches!(character, '\r' | '\t') {
+                    ' '
+                } else {
+                    character
+                };
+                self.line.push(character);
+                self.shell.machine.write_console(&[encode_cp437(character)]);
+            }
+        }
     }
 
     fn submit(&mut self, line: &str) {
@@ -304,6 +343,16 @@ impl App for Desktop {
 
     fn tick(&mut self) {
         if self.running && !self.paused {
+            if let Some(&ascii) = self.paste.front() {
+                let scan = match ascii {
+                    b'\r' => 0x1c,
+                    b'\t' => 0x0f,
+                    _ => 0,
+                };
+                if self.shell.machine.paste_key(ascii, scan) {
+                    self.paste.pop_front();
+                }
+            }
             match self
                 .shell
                 .machine
@@ -314,6 +363,7 @@ impl App for Desktop {
                         self.shell.guest_finished(code);
                     }
                     self.running = false;
+                    self.paste.clear();
                     self.shell.machine.write_console(b"\r\n");
                     if !self.shell.batch_active() {
                         self.finish_command();
@@ -323,6 +373,7 @@ impl App for Desktop {
                 }
                 Err(error) => {
                     self.running = false;
+                    self.paste.clear();
                     self.shell.machine.stop();
                     let error = self.shell.guest_failed(error.into());
                     self.shell
@@ -376,6 +427,8 @@ impl App for Desktop {
             scaling: self.scaling,
             running: self.running,
             batch_active: self.shell.batch_active(),
+            text_visible: matches!(self.shell.machine.video(), Video::Text(_)),
+            paste_pending: !self.paste.is_empty(),
             paused: self.paused,
             status: self.status.clone(),
         }
@@ -383,6 +436,14 @@ impl App for Desktop {
 
     fn menu_action(&mut self, action: MenuAction) {
         match action {
+            MenuAction::CopyText => self.copy_screen_text(),
+            MenuAction::PasteText if self.running || !self.shell.batch_active() => {
+                match self.clipboard().and_then(arboard::Clipboard::get_text) {
+                    Ok(text) => self.paste_text(&text),
+                    Err(error) => self.status = format!("Paste failed: {error}"),
+                }
+            }
+            MenuAction::StopPaste => self.paste.clear(),
             MenuAction::QuickLaunch(path) if !self.running && !self.shell.batch_active() => {
                 match self.shell.quick_launch(&path) {
                     Ok(command) => {
@@ -615,6 +676,52 @@ fn draw_mouse_cursor(pixels: &mut [u8], width: u32, height: u32, cursor: &MouseC
     }
 }
 
+fn decode_cp437(byte: u8) -> char {
+    match byte {
+        0..32 => CP437_LOW.chars().nth(usize::from(byte)).unwrap(),
+        32..127 => char::from(byte),
+        127 => '⌂',
+        _ => CP437_HIGH.chars().nth(usize::from(byte - 128)).unwrap(),
+    }
+}
+
+fn screen_text(frame: TextFrame<'_>) -> String {
+    let columns = usize::from(frame.columns);
+    let cells = frame.cells.as_chunks::<2>().0;
+    let mut text = String::new();
+    for row in cells.chunks(columns) {
+        let line: String = row
+            .iter()
+            .map(|cell| {
+                if cell[0] == 0 {
+                    ' '
+                } else {
+                    decode_cp437(cell[0])
+                }
+            })
+            .collect();
+        text.push_str(line.trim_end_matches(' '));
+        text.push('\n');
+    }
+    text.truncate(text.trim_end_matches('\n').len());
+    text
+}
+
+fn paste_characters(text: &str) -> impl Iterator<Item = char> + '_ {
+    let mut previous_cr = false;
+    text.chars().filter_map(move |character| {
+        let result = match character {
+            '\n' if previous_cr => None,
+            '\r' | '\n' => Some('\r'),
+            '\t' => Some(character),
+            character if !character.is_control() => Some(character),
+            _ => None,
+        };
+        previous_cr = character == '\r';
+        result
+    })
+}
+
 fn encode_cp437(character: char) -> u8 {
     if character.is_ascii() {
         return character as u8;
@@ -659,6 +766,59 @@ fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screen_copy_decodes_cp437_and_shell_paste_stays_editable() {
+        let mut desktop = Desktop::new(Shell::new(), None);
+        desktop.shell.machine.clear_console();
+        desktop
+            .shell
+            .machine
+            .write_console(&[0xda, 0x82, b' ', b'\r', b'\n', b'\r', b'\n', b'X']);
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected text mode")
+        };
+        assert_eq!(screen_text(frame), "┌é\n\nX");
+
+        desktop.paste_text("echo ok\r\nexit\t\u{1b}");
+        assert_eq!(desktop.line, "echo ok exit ");
+        assert!(!desktop.exit);
+    }
+
+    #[test]
+    fn guest_paste_waits_for_existing_keys_and_tears_down_on_exit() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut program = Vec::new();
+        for _ in 0..4 {
+            program.extend([0xb4, 0, 0xcd, 0x16, 0x88, 0xc2, 0xb4, 2, 0xcd, 0x21]);
+        }
+        program.extend([0xb8, 0, 0x4c, 0xcd, 0x21]);
+        std::fs::write(folder.path().join("READ.COM"), program).unwrap();
+        let mut shell = Shell::new();
+        shell
+            .mount('C', Mount::open(folder.path()).unwrap())
+            .unwrap();
+        let mut desktop = Desktop::new(shell, Some("read"));
+        desktop.shell.machine.key(b'X', 0);
+        desktop.paste_text(&"x".repeat(MAX_PASTE_CHARS + 20));
+        assert_eq!(desktop.paste.len(), MAX_PASTE_CHARS);
+        desktop.menu_action(MenuAction::StopPaste);
+        assert!(desktop.paste.is_empty());
+        desktop.paste_text("A\r\néremaining");
+        desktop.tick();
+        assert_eq!(desktop.paste.front(), Some(&b'A'));
+        desktop.tick();
+        assert_eq!(desktop.paste.front(), Some(&b'\r'));
+        desktop.tick();
+        assert_eq!(desktop.paste.front(), Some(&0x82));
+        desktop.tick();
+        assert!(!desktop.running);
+        assert!(desktop.paste.is_empty());
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected text mode")
+        };
+        assert!(screen_text(frame).contains("éA")); // Carriage return overwrites the first column.
+    }
 
     #[test]
     fn quick_launch_runs_a_nested_batch_and_restores_the_shell() {
