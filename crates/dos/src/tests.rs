@@ -382,3 +382,59 @@ fn halted_guest_stays_active_and_resumes_only_after_an_enabled_irq() {
     machine.cpu.regs.flags |= 0x200;
     assert_eq!(machine.run(256).unwrap(), RunState::Exited(7));
 }
+
+#[test]
+fn blocking_int16_wait_runs_a_chained_keyboard_irq_before_resuming() {
+    let directory = Directory::new("blocked-int16");
+    fs::write(
+        directory.0.join("WAIT.COM"),
+        [0x31, 0xc0, 0xcd, 0x16, 0xb4, 0x4c, 0xcd, 0x21],
+    )
+    .unwrap();
+    let mut machine = directory.machine();
+    machine.launch('C', "wait.com", "").unwrap();
+    let segment = machine.cpu.regs.cs;
+    let old = (
+        machine.cpu.read_u16(0, 0x09 * 4),
+        machine.cpu.read_u16(0, 0x09 * 4 + 2),
+    );
+    machine.cpu.write_u16(segment, 0x180, old.0);
+    machine.cpu.write_u16(segment, 0x182, old.1);
+    machine.cpu.load(
+        segment,
+        0x120,
+        &[0x9c, 0xff, 0x1e, 0x80, 0x01, 0xcf], // PUSHF / CALL FAR [0180h] / IRET
+    );
+    machine.cpu.write_u16(0, 0x09 * 4, 0x120);
+    machine.cpu.write_u16(0, 0x09 * 4 + 2, segment);
+
+    let sp = machine.cpu.regs.sp;
+    assert_eq!(machine.run(32).unwrap(), RunState::WaitingForKey);
+    assert_eq!(machine.cpu.regs.ip, 0x0104);
+    machine.key(b'K', 0x25);
+    assert!(
+        machine.keys.is_empty(),
+        "input must be delivered by the chain"
+    );
+    assert_eq!(machine.run(1).unwrap(), RunState::Running);
+    assert_ne!(machine.cpu.regs.sp, sp, "ISR is still running");
+    assert_eq!(machine.run(32).unwrap(), RunState::Exited(b'K'));
+    assert_eq!(machine.cpu.regs.sp, sp);
+    assert!(machine.pending.is_empty());
+}
+
+#[test]
+fn masked_irq1_leaves_kbc_output_available_for_guest_port_polling() {
+    let directory = Directory::new("masked-kbc");
+    fs::write(
+        directory.0.join("POLL.COM"),
+        [0xe4, 0x60, 0xb4, 0x4c, 0xcd, 0x21], // IN AL,60h / MOV AH,4Ch / INT 21h
+    )
+    .unwrap();
+    let mut machine = directory.machine();
+    machine.launch('C', "poll.com", "").unwrap();
+    machine.pic.port_write(0x21, 0b10);
+    machine.key(b'A', 0x1e);
+    assert_eq!(machine.run(32).unwrap(), RunState::Exited(0x1e));
+    assert_eq!(machine.keyboard.port_read(0x64), Some(0));
+}

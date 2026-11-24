@@ -96,6 +96,27 @@ enum Pending {
     HandleRead,
 }
 
+#[derive(Clone, Copy)]
+struct PendingCall {
+    request: Pending,
+    address: (u16, u16),
+    stack: (u16, u16),
+}
+
+impl PendingCall {
+    fn new(request: Pending, cpu: &Cpu) -> Self {
+        Self {
+            request,
+            address: (cpu.regs.cs, cpu.regs.ip),
+            stack: (cpu.regs.ss, cpu.regs.sp),
+        }
+    }
+
+    fn returned(self, cpu: &Cpu) -> bool {
+        self.address == (cpu.regs.cs, cpu.regs.ip) && self.stack == (cpu.regs.ss, cpu.regs.sp)
+    }
+}
+
 pub struct Machine {
     cpu: Cpu,
     cpu_profile: CpuProfile,
@@ -103,7 +124,7 @@ pub struct Machine {
     mounts: BTreeMap<char, Mount>,
     files: DosFiles,
     state: RunState,
-    pending: Option<Pending>,
+    pending: Vec<PendingCall>,
     keys: VecDeque<(u8, u8)>,
     keyboard: Keyboard,
     mouse: Mouse,
@@ -139,7 +160,7 @@ impl Machine {
             mounts: BTreeMap::new(),
             files: DosFiles::new('C', String::new()),
             state: RunState::Idle,
-            pending: None,
+            pending: Vec::new(),
             keys: VecDeque::new(),
             keyboard: Keyboard::default(),
             mouse: Mouse::default(),
@@ -212,7 +233,7 @@ impl Machine {
         self.cpu = cpu;
         self.video = video;
         self.files = DosFiles::new(drive, cwd.to_owned());
-        self.pending = None;
+        self.pending.clear();
         self.keys.clear();
         self.keyboard = Keyboard::default();
         self.mouse = Mouse::default();
@@ -369,15 +390,16 @@ impl Machine {
         self.state = RunState::Running;
         let now = pit::ticks(self.clock.elapsed());
         self.pit.advance(now);
-        if let Some(pending) = self.pending.take() {
-            self.resume(pending);
-        }
         for instruction in 0..budget {
-            if self.state != RunState::Running {
+            if !matches!(self.state, RunState::Running | RunState::WaitingForKey) {
                 break;
             }
             if instruction != 0 && instruction % TIMER_SAMPLE_INTERVAL == 0 {
                 self.pit.advance(pit::ticks(self.clock.elapsed()));
+            }
+            self.poll_keyboard_wait();
+            if self.state != RunState::Running {
+                break;
             }
             if let Err(error) = self.step() {
                 self.exit(1);
@@ -386,6 +408,23 @@ impl Machine {
         }
         self.video.refresh(&self.cpu);
         Ok(self.state)
+    }
+
+    fn poll_keyboard_wait(&mut self) {
+        let Some(pending) = self.pending.last().copied() else {
+            return;
+        };
+        if !pending.returned(&self.cpu) {
+            return;
+        }
+        self.pending.pop();
+        self.state = RunState::Running;
+        self.resume(pending.request);
+        // A waiting BIOS/DOS call must let the guest handle IRQs. The
+        // continuation remains suspended until its stack and IP return.
+        if self.state == RunState::WaitingForKey && self.service_hardware_interrupt() {
+            self.state = RunState::Running;
+        }
     }
 
     fn step(&mut self) -> Result<(), DosError> {
@@ -446,12 +485,12 @@ impl Machine {
         u8::from(self.pit.irq_requested()) | (u8::from(self.keyboard.irq_requested()) << 1)
     }
 
-    fn service_hardware_interrupt(&mut self) {
+    fn service_hardware_interrupt(&mut self) -> bool {
         if !self.cpu.can_accept_maskable_interrupt() {
-            return;
+            return false;
         }
         let Some(irq) = self.pic.next_irq(self.irq_requests()) else {
-            return;
+            return false;
         };
         let vector = TIMER_VECTOR + irq;
         if irq == 0 {
@@ -463,13 +502,15 @@ impl Machine {
             }
             self.pic.acknowledge(irq);
             self.cpu.enter_interrupt(vector);
+            return true;
         }
+        false
     }
 
     fn exit(&mut self, code: u8) {
         self.set_paused(false);
         self.state = RunState::Exited(code);
-        self.pending = None;
+        self.pending.clear();
         self.files.close_all();
         self.video.restore_text(&mut self.cpu);
     }

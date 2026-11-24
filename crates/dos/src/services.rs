@@ -1,4 +1,6 @@
-use crate::{CONVENTIONAL_END, DosError, Machine, PSP, Pending, RunState, ZERO, files};
+use crate::{
+    CONVENTIONAL_END, DosError, Machine, PSP, Pending, PendingCall, RunState, ZERO, files,
+};
 use dosa_mount::Entry;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -96,7 +98,7 @@ impl Machine {
     }
 
     fn wait(&mut self, pending: Pending) {
-        self.pending = Some(pending);
+        self.pending.push(PendingCall::new(pending, &self.cpu));
         self.state = RunState::WaitingForKey;
     }
 
