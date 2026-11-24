@@ -9,7 +9,7 @@ The first milestone is a GPU-rendered DOS prompt that can mount host content and
 | [03 · GPU desktop](docs/tasks/03-desktop.md) | Architecture | Windows GPU smoke passed |
 | [04 · DOS and first runnable milestone](docs/tasks/04-dos.md) | 01, 02, 03 | Initial implementation complete |
 | [05 · DOS application compatibility](docs/tasks/05-compatibility.md) | 04 | In progress |
-| [06 · Platform validation](docs/tasks/06-platforms.md) | 04 | Windows tested, Linux and macOS type-checked |
+| [06 · Platform validation](docs/tasks/06-platforms.md) | 04 | Windows and WSLg smoke-tested, macOS type-checked |
 | [07 · CGA and planar VGA](docs/tasks/07-video.md) | 03, 04 | Initial modes complete |
 | [08 · Guest keyboard interrupts](docs/tasks/08-keyboard.md) | 04 | Initial IRQ1 delivery complete |
 | [09 · Guest timer interrupts](docs/tasks/09-timer.md) | 04, 08 | Initial PIT channel 0 and IRQ0 delivery complete |
