@@ -373,6 +373,15 @@ impl Machine {
         self.video.set_console_rows(&mut self.cpu, rows)
     }
 
+    /// Select a supported host console geometry while the guest is idle.
+    pub fn set_text_geometry(&mut self, columns: u16, rows: u8) -> bool {
+        if self.state.is_active() {
+            return false;
+        }
+        self.video
+            .set_console_geometry(&mut self.cpu, columns, rows)
+    }
+
     pub fn take_output(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.output)
     }

@@ -18,14 +18,28 @@ pub struct SettingsOverrides {
     pub cpu: Option<CpuMode>,
     pub speed: Option<Speed>,
     pub text_mode: Option<TextMode>,
+    pub text_columns: Option<u16>,
 }
 
 impl SettingsOverrides {
     pub fn apply(self, base: Settings) -> Settings {
+        let columns = self.text_columns.unwrap_or(match base.text_mode {
+            TextMode::WideRows25 | TextMode::WideRows43 | TextMode::WideRows50 => 132,
+            _ => 80,
+        });
+        let rows = self.text_mode.unwrap_or(base.text_mode);
         Settings {
             cpu: self.cpu.unwrap_or(base.cpu),
             speed: self.speed.unwrap_or(base.speed),
-            text_mode: self.text_mode.unwrap_or(base.text_mode),
+            text_mode: match (columns, rows) {
+                (132, TextMode::Rows25 | TextMode::WideRows25) => TextMode::WideRows25,
+                (132, TextMode::Rows43 | TextMode::WideRows43) => TextMode::WideRows43,
+                (132, _) => TextMode::WideRows50,
+                (_, TextMode::WideRows25) => TextMode::Rows25,
+                (_, TextMode::WideRows43) => TextMode::Rows43,
+                (_, TextMode::WideRows50) => TextMode::Rows50,
+                (_, rows) => rows,
+            },
         }
     }
 }
@@ -37,6 +51,7 @@ struct ProfileFile {
     cpu: Option<CpuValue>,
     speed: Option<String>,
     text_rows: Option<u8>,
+    text_columns: Option<u16>,
     #[serde(default)]
     mounts: Vec<MountEntry>,
 }
@@ -81,6 +96,10 @@ impl LaunchProfile {
             cpu,
             speed,
             text_mode,
+            text_columns: profile
+                .text_columns
+                .map(|columns| parse_text_columns(&columns.to_string()))
+                .transpose()?,
         }
         .apply(Settings::default());
 
@@ -144,6 +163,14 @@ impl LaunchProfile {
     }
 }
 
+pub fn parse_text_columns(value: &str) -> Result<u16, String> {
+    match value {
+        "80" => Ok(80),
+        "132" => Ok(132),
+        _ => Err("text columns must be 80 or 132".into()),
+    }
+}
+
 pub fn parse_cpu(value: &str) -> Result<CpuMode, String> {
     match value {
         "8086" => Ok(CpuMode::I8086),
@@ -171,5 +198,31 @@ pub fn parse_text_rows(value: &str) -> Result<TextMode, String> {
         "43" => Ok(TextMode::Rows43),
         "50" => Ok(TextMode::Rows50),
         _ => Err(format!("text rows must be 25, 43, or 50, got {value:?}")),
+    }
+}
+
+#[cfg(test)]
+mod wide_tests {
+    use super::*;
+
+    #[test]
+    fn row_and_column_overrides_preserve_the_other_dimension() {
+        let profile =
+            LaunchProfile::parse("text_columns = 132\ntext_rows = 43", Path::new("demo.toml"))
+                .unwrap();
+        assert_eq!(profile.settings.text_mode, TextMode::WideRows43);
+        let settings = SettingsOverrides {
+            text_mode: Some(TextMode::Rows50),
+            ..Default::default()
+        }
+        .apply(profile.settings);
+        assert_eq!(settings.text_mode, TextMode::WideRows50);
+        let settings = SettingsOverrides {
+            text_columns: Some(80),
+            ..Default::default()
+        }
+        .apply(settings);
+        assert_eq!(settings.text_mode, TextMode::Rows50);
+        assert!(parse_text_columns("256").is_err());
     }
 }

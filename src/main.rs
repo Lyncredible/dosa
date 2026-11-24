@@ -12,7 +12,9 @@ use dosa::shell::{Command, Shell};
 use dosa_dos::RunState;
 use dosa_mount::Mount;
 
-use profile::{LaunchProfile, SettingsOverrides, parse_cpu, parse_speed, parse_text_rows};
+use profile::{
+    LaunchProfile, SettingsOverrides, parse_cpu, parse_speed, parse_text_columns, parse_text_rows,
+};
 
 const USAGE: &str = "\
 Usage: dosa [OPTIONS]
@@ -23,6 +25,7 @@ Usage: dosa [OPTIONS]
   --cpu 8086|286|386   Select the guest CPU profile
   --speed SPEED        Select slow, normal, fast, or maximum desktop pacing
   --text-rows ROWS     Select 25, 43, or 50 text rows
+  --text-columns COLS  Select 80 or 132 text columns
   --headless           Run without a window (requires a startup command)
   -h, --help           Show usage
   --version            Show the version
@@ -85,6 +88,12 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             Some("--text-rows") => {
                 overrides.text_mode =
                     Some(parse_text_rows(&option_value(args.next(), "--text-rows")?)?);
+            }
+            Some("--text-columns") => {
+                overrides.text_columns = Some(parse_text_columns(&option_value(
+                    args.next(),
+                    "--text-columns",
+                )?)?);
             }
             Some("--headless") => headless = true,
             _ => return Err(format!("unknown option {:?}", arg).into()),

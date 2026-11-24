@@ -58,6 +58,26 @@ fn graphics_string_colors_and_cp437_blocks_are_visible() {
     assert_eq!(video.vga.pixel(8, 0, None), 6);
 }
 
+#[test]
+fn wide_console_wraps_scrolls_and_reports_bios_stride() {
+    for rows in [25, 43, 50] {
+        let (mut cpu, mut video) = setup();
+        assert!(video.set_console_geometry(&mut cpu, 132, rows));
+        assert_eq!(cpu.read_u16(0x40, 0x4a), 132);
+        let frame = text(&video, &cpu);
+        assert_eq!((frame.columns, frame.rows), (132, u16::from(rows)));
+        assert_eq!(frame.cells.len(), 132 * usize::from(rows) * 2);
+        video.write(&mut cpu, &vec![b'X'; 132 * usize::from(rows)]);
+        assert_eq!((video.col, video.row), (0, usize::from(rows) - 1));
+        video.erase_previous(&mut cpu);
+        assert_eq!((video.col, video.row), (131, usize::from(rows) - 2));
+        assert!(video.set_console_rows(&mut cpu, 25));
+        assert_eq!(text(&video, &cpu).columns, 132);
+        assert!(!video.set_console_geometry(&mut cpu, 256, 25));
+        assert_eq!(text(&video, &cpu).columns, 132);
+    }
+}
+
 fn setup() -> (Cpu, Adapter) {
     let mut cpu = Cpu::new();
     let mut video = Adapter::new();
