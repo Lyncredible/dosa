@@ -190,6 +190,24 @@ mod tests {
     }
 
     #[test]
+    fn mode_two_has_a_single_clock_low_pulse_and_latched_reload() {
+        let mut speaker = Speaker::new(0);
+        speaker.write_port(0x43, 0xb4);
+        speaker.write_port(0x42, 10);
+        speaker.write_port(0x42, 0);
+        speaker.write_port(0x61, 3);
+        assert!(speaker.output(8));
+        assert!(!speaker.output(9));
+        assert!(speaker.output(10));
+        speaker.advance(9);
+        speaker.write_port(0x43, 0x80);
+        assert_eq!(speaker.read_port(0x42), Some(1));
+        speaker.advance(10);
+        assert_eq!(speaker.read_port(0x42), Some(0));
+        assert_eq!(speaker.count(), 10);
+    }
+
+    #[test]
     fn dos_port_instructions_program_the_speaker() {
         let mut machine = crate::Machine::new();
         machine.cpu.regs.cs = 0x1000;
