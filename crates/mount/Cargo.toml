@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+cap-fs-ext = "4.0.3"
 cap-std = "4.0.3"
 thiserror = "2"
 zip = { version = "9.8.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }

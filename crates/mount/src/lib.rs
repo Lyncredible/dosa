@@ -1,6 +1,7 @@
-//! Read-only DOS drives backed by host directories, individual files, or ZIP archives.
+//! DOS drives backed by host directories, individual files, or ZIP archives.
 
 mod names;
+mod writable;
 mod zip_mount;
 
 use cap_std::{ambient_authority, fs::Dir};
@@ -9,8 +10,10 @@ use std::{
     fs::{self, File},
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
+use writable::WritableDirectory;
+pub use writable::{WritableFile, WriteDisposition};
 use zip_mount::ZipMount;
 
 const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -52,6 +55,10 @@ pub enum MountError {
     NotDirectory(String),
     #[error("DOS path is a directory: {0}")]
     IsDirectory(String),
+    #[error("DOS path already exists: {0}")]
+    AlreadyExists(String),
+    #[error("this drive is mounted read-only")]
+    ReadOnly,
     #[error("host path is not a regular file or directory")]
     UnsupportedSource,
     #[error("ZIP directory exceeds the mount entry limit")]
@@ -78,7 +85,8 @@ type Result<T> = std::result::Result<T, MountError>;
 
 #[derive(Debug)]
 enum Source {
-    Directory(Dir),
+    Directory(Arc<Dir>),
+    WritableDirectory(WritableDirectory),
     SingleFile(Child<Mutex<File>>),
     Zip(Box<ZipMount>),
 }
@@ -96,7 +104,7 @@ impl Mount {
         let path = path.as_ref();
         let metadata = fs::metadata(path)?;
         let source = if metadata.is_dir() {
-            Source::Directory(Dir::open_ambient_dir(path, ambient_authority())?)
+            Source::Directory(Arc::new(Dir::open_ambient_dir(path, ambient_authority())?))
         } else if metadata.is_file() {
             let file = File::open(path)?;
             if path
@@ -125,7 +133,7 @@ impl Mount {
     pub fn list(&self, path: &str) -> Result<Vec<Entry>> {
         let components = guest_components(path)?;
         match &self.source {
-            Source::Directory(root) => {
+            Source::Directory(root) | Source::WritableDirectory(WritableDirectory { root, .. }) => {
                 if components.is_empty() {
                     return list_host_children(root);
                 }
@@ -154,7 +162,9 @@ impl Mount {
             return Ok(Entry::root());
         }
         match &self.source {
-            Source::Directory(root) => Ok(host_entry(root, &components, path)?.1),
+            Source::Directory(root) | Source::WritableDirectory(WritableDirectory { root, .. }) => {
+                Ok(host_entry(root, &components, path)?.1)
+            }
             Source::SingleFile(child) => {
                 single_entry(child, &components, path)?;
                 let mut entry = child.entry.clone();
@@ -172,7 +182,7 @@ impl Mount {
             return Err(MountError::IsDirectory(path.to_owned()));
         }
         match &self.source {
-            Source::Directory(root) => {
+            Source::Directory(root) | Source::WritableDirectory(WritableDirectory { root, .. }) => {
                 let (relative, entry) = host_entry(root, &components, path)?;
                 if entry.is_dir {
                     return Err(MountError::IsDirectory(path.to_owned()));
