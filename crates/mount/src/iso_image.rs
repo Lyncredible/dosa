@@ -8,7 +8,8 @@ use std::sync::Mutex;
 use super::{Entry, MountError, Result, lock, read_bounded};
 use crate::names::{Child, assign_aliases, find_child, valid_component};
 
-const SECTOR: usize = 2048;
+pub const ISO_SECTOR_BYTES: usize = 2048;
+const SECTOR: usize = ISO_SECTOR_BYTES;
 const DIRECTORY_BUDGET: u64 = 16 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 65_536;
 
@@ -26,6 +27,24 @@ pub(super) struct IsoImage {
 }
 
 impl IsoImage {
+    pub fn sector_count(&self) -> u32 {
+        (self.volume_size / SECTOR as u64) as u32
+    }
+
+    pub fn read_sectors(&self, first: u32, bytes: &mut [u8]) -> Result<()> {
+        if bytes.is_empty() || !bytes.len().is_multiple_of(SECTOR) {
+            return Err(invalid("ISO 9660 sector buffer must contain whole sectors"));
+        }
+        let offset = u64::from(first) * SECTOR as u64;
+        if offset > self.volume_size || bytes.len() as u64 > self.volume_size - offset {
+            return Err(invalid("ISO 9660 sector read lies outside the volume"));
+        }
+        let mut file = lock(&self.file)?;
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(bytes)?;
+        Ok(())
+    }
+
     pub fn open(mut file: File) -> Result<Self> {
         let image_size = file.metadata()?.len();
         let mut primary = None;

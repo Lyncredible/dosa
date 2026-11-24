@@ -49,6 +49,7 @@ impl Machine {
             0x23 => self.exit(3),
             0x28 => {}
             0x29 => self.emit(&[al]),
+            0x2f if ah == 0x15 => self.mscdex(al),
             0x2f => self.cpu.regs.ax &= 0xff00,
             0x33 => {
                 self.cpu.regs.ax = 0;
@@ -425,7 +426,7 @@ impl Machine {
         }
     }
 
-    fn set_al(&mut self, value: u8) {
+    pub(super) fn set_al(&mut self, value: u8) {
         self.cpu.regs.ax = (self.cpu.regs.ax & 0xff00) | u16::from(value);
     }
 

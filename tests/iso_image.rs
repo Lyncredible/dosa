@@ -146,3 +146,86 @@ fn rejects_truncated_and_bad_directory_records() {
     fs::write(scratch.path(), &image).unwrap();
     assert!(Mount::open_iso_image(scratch.path()).is_err());
 }
+
+#[test]
+fn dos_program_discovers_iso_drives_and_reads_sectors_through_mscdex() {
+    let scratch = tempfile::tempdir().unwrap();
+    let image = scratch.path().join("compact disc.iso");
+    let before = fixture();
+    fs::write(&image, &before).unwrap();
+
+    fn expect(program: &mut Vec<u8>, jump_if_passed: u8, error: u8) {
+        program.extend([jump_if_passed, 5, 0xb8, error, 0x4c, 0xcd, 0x21]);
+    }
+
+    let mut absent = vec![0xbb, 0xff, 0xff, 0xb8, 0x00, 0x15, 0xcd, 0x2f];
+    absent.extend([0x83, 0xfb, 0]); // CMP BX,0
+    expect(&mut absent, 0x74, 1);
+    absent.extend([0x3c, 0]); // CMP AL,0
+    expect(&mut absent, 0x74, 2);
+    absent.extend([0xb8, 0, 0x4c, 0xcd, 0x21]);
+    fs::write(scratch.path().join("ABSENT.COM"), absent).unwrap();
+
+    let mut program = vec![0xb8, 0x00, 0x15, 0xcd, 0x2f];
+    program.extend([0x83, 0xfb, 2]); // BX has two CD-ROM drives
+    expect(&mut program, 0x74, 1);
+    program.extend([0x83, 0xf9, 3]); // First is D (zero-based 3)
+    expect(&mut program, 0x74, 2);
+    program.extend([0xb8, 0x0c, 0x15, 0xcd, 0x2f, 0x81, 0xfb, 0x17, 0x02]);
+    expect(&mut program, 0x74, 3);
+    program.extend([0xb8, 0x0d, 0x15, 0xbb, 0, 0x20, 0xcd, 0x2f]);
+    program.extend([0x81, 0x3e, 0, 0x20, 3, 5]); // D and F at ES:2000h
+    expect(&mut program, 0x74, 4);
+    program.extend([0xb8, 0x0b, 0x15, 0xb9, 2, 0, 0xcd, 0x2f, 0x3d, 0, 0]);
+    expect(&mut program, 0x74, 5); // Folder drive C is not a CD-ROM
+    program.extend([0xb8, 0x0b, 0x15, 0xb9, 5, 0, 0xcd, 0x2f, 0x3d, 0xd8, 0x5a]);
+    expect(&mut program, 0x74, 6);
+    program.extend([0x81, 0xfb, 0xad, 0xad]);
+    expect(&mut program, 0x74, 7);
+
+    program.extend([0xb8, 0x05, 0x15, 0xbb, 0, 0x20, 0x31, 0xd2, 0xcd, 0x2f]);
+    expect(&mut program, 0x73, 8);
+    program.extend([0x3d, 1, 0]); // Primary descriptor
+    expect(&mut program, 0x74, 9);
+    program.extend([0x81, 0x3e, 1, 0x20, b'C', b'D']);
+    expect(&mut program, 0x74, 10);
+
+    program.extend([
+        0xb8, 0x08, 0x15, 0xba, 2, 0, 0x31, 0xf6, 0xbf, 24, 0, 0xcd, 0x2f,
+    ]);
+    expect(&mut program, 0x73, 11);
+    program.extend([0x80, 0x3e, 0, 0x20, b'I']);
+    expect(&mut program, 0x74, 12);
+    program.extend([0x80, 0x3e, 0, 0x28, 0xb8]);
+    expect(&mut program, 0x74, 13);
+
+    program.extend([0xb8, 0x08, 0x15, 0xbe, 1, 0, 0xcd, 0x2f]); // Bad high word in sector address
+    expect(&mut program, 0x72, 14);
+    program.extend([0x3d, 21, 0]);
+    expect(&mut program, 0x74, 15);
+    program.extend([0x80, 0x3e, 0, 0x20, b'I']); // Rejected read leaves buffer intact
+    expect(&mut program, 0x74, 16);
+    program.extend([0xb8, 0x09, 0x15, 0xcd, 0x2f]);
+    expect(&mut program, 0x72, 17);
+    program.extend([0xb8, 0, 0x4c, 0xcd, 0x21]);
+    fs::write(scratch.path().join("CHECK.COM"), program).unwrap();
+
+    let run = |command, with_images| {
+        let mut process = Command::new(env!("CARGO_BIN_EXE_dosa"));
+        process.args([
+            "--headless",
+            "--mount",
+            &format!("C={}", scratch.path().display()),
+        ]);
+        if with_images {
+            for drive in ['F', 'D'] {
+                process.args(["--mount-iso", &format!("{drive}={}", image.display())]);
+            }
+        }
+        let result = process.args(["--exec", command]).output().unwrap();
+        assert!(result.status.success(), "{result:?}");
+    };
+    run("ABSENT", false);
+    run("CHECK", true);
+    assert_eq!(fs::read(image).unwrap(), before);
+}
