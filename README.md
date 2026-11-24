@@ -89,11 +89,11 @@ The desktop plays PC speaker sound and AdLib OPL2 music. Choose AdLib in the DOS
 
 Keyboard menu access uses Alt+D, Alt+C, Alt+S, and Alt+V, followed by arrow keys and Enter.
 
-The desktop speed presets allow 10,000, 50,000, 100,000, or 250,000 guest instructions per display tick. Native picker interaction and Linux/macOS desktop runtime checks remain open.
+The desktop speed presets allow 10,000, 50,000, 100,000, or 250,000 guest instructions per display tick. Full native picker interaction and macOS desktop checks remain open.
 
 ## Compatibility and verification
 
-Windows is the first desktop target and has been tested with Vulkan and Direct3D 12. The workspace type-checks for x86-64 Linux and Apple Silicon macOS. Native desktop testing on those platforms is tracked in the [task list](TASKS.md).
+Windows is the first desktop target and has been tested with Vulkan and Direct3D 12. The Linux workspace suite and WSLg Vulkan window smoke passed on Ubuntu 24.04. The workspace type-checks for Apple Silicon macOS. Additional desktop coverage is tracked in the [task list](TASKS.md).
 
 The built-in DOS services provide a subset of DOS and BIOS behavior. Compatibility depends on each program's CPU, video, file system, sound, and peripheral requirements.
 
@@ -107,4 +107,4 @@ cargo clippy --workspace --all-targets --locked
 
 See [TASKS.md](TASKS.md) for the architecture and work in progress.
 
-An optional native-window test accepts a local archive through `DOSA_SMOKE_ARCHIVE` and an executable name through `DOSA_SMOKE_PROGRAM`. Set `DOSA_SMOKE_ENTER_COUNT` to the desired number of Enter transitions, then run `cargo test --test desktop_smoke --locked`. The test mounts the archive through the application menu action and checks graphics updates in the live GPU event loop.
+Set `DOSA_SMOKE_GENERATED=1` and run `cargo test --test desktop_smoke --locked` to exercise a live window. The test builds a temporary ZIP with a DOS program that updates VGA graphics after Enter. To use your own ZIP, set `DOSA_SMOKE_ARCHIVE`, `DOSA_SMOKE_PROGRAM`, and optionally `DOSA_SMOKE_ENTER_COUNT`. The test mounts the ZIP through the application menu action and checks graphics updates in the GPU event loop.

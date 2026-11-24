@@ -1,9 +1,12 @@
-//! Optional native-window smoke test with a caller-provided DOS archive.
+//! Optional native-window smoke test with a generated or caller-provided DOS archive.
 
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::error::Error;
+use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Write;
+use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -15,19 +18,30 @@ use dosa_desktop::{
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let Some(archive) = std::env::var_os("DOSA_SMOKE_ARCHIVE") else {
-        println!("desktop smoke skipped; set DOSA_SMOKE_ARCHIVE to enable it");
-        return Ok(());
-    };
-    let program = std::env::var("DOSA_SMOKE_PROGRAM")?;
-    let key_count: u32 = std::env::var("DOSA_SMOKE_ENTER_COUNT")
-        .unwrap_or_else(|_| "0".into())
-        .parse()?;
+    let generated;
+    let (archive, program, key_count) =
+        if let Some(archive) = std::env::var_os("DOSA_SMOKE_ARCHIVE") {
+            let program = std::env::var("DOSA_SMOKE_PROGRAM")?;
+            let key_count: u32 = std::env::var("DOSA_SMOKE_ENTER_COUNT")
+                .unwrap_or_else(|_| "0".into())
+                .parse()?;
+            (PathBuf::from(archive), program, key_count)
+        } else if std::env::var_os("DOSA_SMOKE_GENERATED").is_some() {
+            generated = tempfile::tempdir()?;
+            let archive = generated.path().join("desktop fixture.zip");
+            generate_archive(&archive)?;
+            (archive, "SMOKE.COM".to_owned(), 1)
+        } else {
+            println!(
+                "desktop smoke skipped; set DOSA_SMOKE_GENERATED or DOSA_SMOKE_ARCHIVE to enable it"
+            );
+            return Ok(());
+        };
     let min_colors: usize = std::env::var("DOSA_SMOKE_MIN_COLORS")
         .unwrap_or_else(|_| "3".into())
         .parse()?;
     let mut mount_arg = std::ffi::OsString::from("C=");
-    mount_arg.push(&archive);
+    mount_arg.push(archive.as_os_str());
     let listing = Command::new(env!("CARGO_BIN_EXE_dosa"))
         .arg("--mount")
         .arg(mount_arg)
@@ -51,7 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut desktop = Desktop::new(Shell::new(), None);
     desktop.menu_action(MenuAction::Mount {
         drive: 'C',
-        source: archive.into(),
+        source: archive,
         kind: MountKind::Zip,
     });
     let status = desktop.menu().status;
@@ -77,6 +91,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "desktop smoke passed: archive mounted, graphics rendered, {key_count} input transitions"
     );
+    Ok(())
+}
+
+fn generate_archive(path: &std::path::Path) -> Result<(), Box<dyn Error>> {
+    let guest = [
+        0xb8, 0x13, 0x00, 0xcd, 0x10, // INT 10h, set VGA mode 13h
+        0xb8, 0x00, 0xa0, 0x8e, 0xc0, // MOV ES,A000h
+        0x26, 0xc7, 0x06, 0, 0, 1, 2, // MOV WORD [ES:0],0201h
+        0xb4, 0x00, 0xcd, 0x16, // INT 16h, wait for input
+        0x26, 0xc6, 0x06, 0, 0, 3, // MOV BYTE [ES:0],3
+        0xeb, 0xfe, // JMP $ to retain the graphics frame
+    ];
+    let mut archive = zip::ZipWriter::new(File::create(path)?);
+    archive.start_file("SMOKE.COM", zip::write::SimpleFileOptions::default())?;
+    archive.write_all(&guest)?;
+    archive.finish()?;
     Ok(())
 }
 
