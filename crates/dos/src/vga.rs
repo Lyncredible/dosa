@@ -278,6 +278,12 @@ impl MemoryDevice for Aperture {
     fn write(&self, offset: usize, value: u8) {
         lock(&self.0).write(offset, value);
     }
+
+    fn peek(&self, offset: usize) -> Option<u8> {
+        let ram = lock(&self.0);
+        let (address, _) = ram.address_and_mask(offset);
+        Some(ram.read_planes(offset, ram.cells[address]))
+    }
 }
 
 struct PlaneRam {
@@ -317,17 +323,21 @@ impl PlaneRam {
     fn read(&mut self, offset: usize) -> u8 {
         let (address, _) = self.address_and_mask(offset);
         self.latches = self.cells[address];
+        self.read_planes(offset, self.latches)
+    }
+
+    fn read_planes(&self, offset: usize, planes: [u8; 4]) -> u8 {
         if self.graphics[5] & 8 == 0 {
             let plane = if self.sequencer[4] & 8 != 0 {
                 offset % 4
             } else {
                 usize::from(self.graphics[4] & 3)
             };
-            return self.latches[plane];
+            return planes[plane];
         }
         let compare = self.graphics[2];
         let care = self.graphics[7];
-        self.latches
+        planes
             .iter()
             .enumerate()
             .fold(0xff, |result, (plane, &latch)| {
@@ -435,6 +445,7 @@ mod tests {
         vga.write_port(0x3ce, 4);
         vga.write_port(0x3cf, 2);
         assert_eq!(cpu.read_u8(ram, 0), 3);
+        assert_eq!(cpu.peek_u8(ram, 1), Some(0));
 
         vga.write_port(0x3c5, 0x0f);
         vga.write_port(0x3ce, 5);

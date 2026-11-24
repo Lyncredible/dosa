@@ -62,6 +62,7 @@ pub struct Desktop {
     line: String,
     running: bool,
     paused: bool,
+    inspecting: bool,
     volume: Volume,
     muted: bool,
     recording: Option<Recording>,
@@ -124,6 +125,7 @@ impl Desktop {
             line: String::new(),
             running: false,
             paused: false,
+            inspecting: false,
             volume: Volume::default(),
             muted: false,
             recording: None,
@@ -338,6 +340,92 @@ impl Desktop {
             };
         }
     }
+
+    fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+        self.shell.machine.set_paused(paused);
+        if paused {
+            self.shell.machine.mouse_buttons(0);
+        } else {
+            self.inspecting = false;
+        }
+    }
+
+    fn update_guest(&mut self, result: Result<RunState, dosa_dos::DosError>) {
+        match result {
+            Ok(state @ (RunState::Idle | RunState::Exited(_))) => {
+                if let RunState::Exited(code) = state {
+                    self.shell.guest_finished(code);
+                }
+                self.running = false;
+                self.set_paused(false);
+                self.paste.clear();
+                self.shell.machine.write_console(b"\r\n");
+                if !self.shell.batch_active() {
+                    self.finish_command();
+                }
+            }
+            Ok(RunState::Running | RunState::WaitingForKey | RunState::WaitingForInterrupt) => {}
+            Err(error) => {
+                self.running = false;
+                self.set_paused(false);
+                self.paste.clear();
+                self.shell.machine.stop();
+                let error = self.shell.guest_failed(error.into());
+                self.shell
+                    .machine
+                    .write_console(format!("\r\n{error}\r\n").as_bytes());
+                self.finish_command();
+            }
+        }
+        // The guest's output has already been written to video memory.
+        self.shell.machine.take_output();
+    }
+
+    fn inspection(&self) -> Vec<String> {
+        if !self.inspecting {
+            return Vec::new();
+        }
+        let Some(guest) = self.shell.machine.paused_guest() else {
+            return Vec::new();
+        };
+        let r = guest.registers();
+        let memory = |label, segment, offset: u16| {
+            use std::fmt::Write;
+            let mut line = format!("{label} {segment:04X}:{offset:04X}");
+            for index in 0..8 {
+                match guest.peek(segment, offset.wrapping_add(index)) {
+                    Some(byte) => write!(line, " {byte:02X}").unwrap(),
+                    None => line.push_str(" ??"),
+                }
+            }
+            line
+        };
+        let state = match guest.state {
+            RunState::WaitingForKey => "Waiting for keyboard input",
+            RunState::WaitingForInterrupt => "Waiting for an interrupt",
+            _ => "Paused at instruction boundary",
+        };
+        vec![
+            state.into(),
+            format!(
+                "AX {:04X}  BX {:04X}  CX {:04X}  DX {:04X}",
+                r.ax, r.bx, r.cx, r.dx
+            ),
+            format!(
+                "SI {:04X}  DI {:04X}  BP {:04X}  SP {:04X}",
+                r.si, r.di, r.bp, r.sp
+            ),
+            format!(
+                "CS {:04X}  DS {:04X}  ES {:04X}  SS {:04X}",
+                r.cs, r.ds, r.es, r.ss
+            ),
+            format!("IP {:04X}  FLAGS {:04X}", r.ip, r.flags),
+            memory("Code ", r.cs, r.ip),
+            memory("Data ", r.ds, r.si),
+            memory("Stack", r.ss, r.sp),
+        ]
+    }
 }
 
 impl Drop for Desktop {
@@ -388,37 +476,11 @@ impl App for Desktop {
                     self.paste.pop_front();
                 }
             }
-            match self
+            let result = self
                 .shell
                 .machine
-                .run(instructions_per_tick(self.settings.speed))
-            {
-                Ok(state @ (RunState::Idle | RunState::Exited(_))) => {
-                    if let RunState::Exited(code) = state {
-                        self.shell.guest_finished(code);
-                    }
-                    self.running = false;
-                    self.paste.clear();
-                    self.shell.machine.write_console(b"\r\n");
-                    if !self.shell.batch_active() {
-                        self.finish_command();
-                    }
-                }
-                Ok(RunState::Running | RunState::WaitingForKey | RunState::WaitingForInterrupt) => {
-                }
-                Err(error) => {
-                    self.running = false;
-                    self.paste.clear();
-                    self.shell.machine.stop();
-                    let error = self.shell.guest_failed(error.into());
-                    self.shell
-                        .machine
-                        .write_console(format!("\r\n{error}\r\n").as_bytes());
-                    self.finish_command();
-                }
-            }
-            // The guest's output has already been written to video memory.
-            self.shell.machine.take_output();
+                .run(instructions_per_tick(self.settings.speed));
+            self.update_guest(result);
         }
         if !self.running && !self.paused && !self.exit && self.shell.batch_active() {
             if self.recording.is_some() {
@@ -470,6 +532,7 @@ impl App for Desktop {
             text_visible: matches!(self.shell.machine.video(), Video::Text(_)),
             paste_pending: !self.paste.is_empty(),
             paused: self.paused,
+            inspection: self.inspection(),
             status: self.status.clone(),
         }
     }
@@ -557,11 +620,19 @@ impl App for Desktop {
             MenuAction::StopRecording => self.finish_recording(false),
             MenuAction::SetScaling(scaling) => self.scaling = scaling,
             MenuAction::SetPaused(paused) if self.running => {
-                self.paused = paused;
-                self.shell.machine.set_paused(paused);
-                if paused {
-                    self.shell.machine.mouse_buttons(0);
+                self.set_paused(paused);
+            }
+            MenuAction::SetInspection(inspecting) if self.running => {
+                if inspecting {
+                    self.set_paused(true);
                 }
+                self.inspecting = inspecting;
+            }
+            MenuAction::StepInstruction if self.running && self.paused => {
+                self.inspecting = true;
+                let result = self.shell.machine.step_paused();
+                self.update_guest(result);
+                self.render();
             }
             MenuAction::SetTextMode(mode) if !self.running => self.set_text_mode(mode),
             MenuAction::Exit => self.exit = true,

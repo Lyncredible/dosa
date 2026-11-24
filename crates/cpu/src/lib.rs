@@ -129,6 +129,10 @@ impl std::error::Error for CpuError {}
 pub trait MemoryDevice: Send + Sync {
     fn read(&self, offset: usize) -> u8;
     fn write(&self, offset: usize, value: u8);
+    /// Inspect a byte without changing the device, if supported.
+    fn peek(&self, _offset: usize) -> Option<u8> {
+        None
+    }
 }
 
 struct MemoryMapping {
@@ -358,6 +362,17 @@ impl Cpu {
             map.device.read(address - map.start)
         } else {
             self.memory[address]
+        }
+    }
+
+    pub fn peek_u8(&self, segment: u16, offset: u16) -> Option<u8> {
+        let address = Self::linear(segment, offset.into());
+        if let Some(map) = &self.mapping
+            && (map.start..map.end).contains(&address)
+        {
+            map.device.peek(address - map.start)
+        } else {
+            Some(self.memory[address])
         }
     }
 

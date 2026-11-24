@@ -96,6 +96,8 @@ pub enum MenuAction {
     SetTextMode(TextMode),
     SetScaling(Scaling),
     SetPaused(bool),
+    SetInspection(bool),
+    StepInstruction,
     Exit,
 }
 
@@ -116,6 +118,7 @@ pub struct MenuState {
     pub text_visible: bool,
     pub paste_pending: bool,
     pub paused: bool,
+    pub inspection: Vec<String>,
     pub status: String,
 }
 
@@ -137,6 +140,7 @@ impl Default for MenuState {
             text_visible: false,
             paste_pending: false,
             paused: false,
+            inspection: Vec::new(),
             status: String::new(),
         }
     }
@@ -160,15 +164,17 @@ enum Tab {
     View,
     Audio,
     Edit,
+    Debug,
 }
 
-const TABS: [(Tab, &str, u32, u32); 6] = [
+const TABS: [(Tab, &str, u32, u32); 7] = [
     (Tab::Drives, "Drives", 7, 68),
     (Tab::Cpu, "CPU", 78, 50),
     (Tab::Speed, "Speed", 131, 62),
     (Tab::View, "View", 196, 53),
     (Tab::Audio, "Audio", 252, 62),
     (Tab::Edit, "Edit", 317, 54),
+    (Tab::Debug, "Debug", 374, 65),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -309,6 +315,7 @@ impl Menu {
                 Some('v') => Some(Tab::View),
                 Some('a') => Some(Tab::Audio),
                 Some('e') => Some(Tab::Edit),
+                Some('g') => Some(Tab::Debug),
                 _ => None,
             };
             if let Some(tab) = tab {
@@ -321,6 +328,9 @@ impl Menu {
             }
         }
         let Some(tab) = self.active else {
+            if !state.inspection.is_empty() && input.key == Key::Function(10) {
+                return (true, Some(Command::App(MenuAction::StepInstruction)));
+            }
             return (false, None);
         };
         let items = options(tab, state, self.drive(state), fullscreen);
@@ -376,7 +386,13 @@ impl Menu {
             let count = options(tab, state, self.drive(state), fullscreen).len() as u32;
             BAR_HEIGHT + ROW_HEIGHT * count + if tab == Tab::Drives { 75 } else { 5 }
         });
+        let inspection_height = BAR_HEIGHT + 12 + state.inspection.len() as u32 * 18;
         let height = menu_height
+            .max(if state.inspection.is_empty() {
+                BAR_HEIGHT
+            } else {
+                inspection_height
+            })
             .min((f64::from(size.height) / scale).floor() as u32)
             .max(1);
         let left = self.active.map_or(0, |tab| popup_left(tab, width));
@@ -413,8 +429,8 @@ impl Menu {
             }
             canvas.text(rect.x + 7, 11, label, TEXT);
         }
-        if width >= 530 {
-            canvas.text(width - 149, 11, "Alt+D/C/S/V/A/E", MUTED);
+        if width >= 610 {
+            canvas.text(width - 166, 11, "Alt+D/C/S/V/A/E/G", MUTED);
         }
         let settings = format!(
             "{}: | {} | {}{}{}{}",
@@ -429,6 +445,20 @@ impl Menu {
         if !state.status.is_empty() {
             let position = 30 + settings.chars().count() as u32 * GLYPH_ADVANCE;
             canvas.text(position, 36, &state.status, ACCENT);
+        }
+        if !state.inspection.is_empty() {
+            canvas.fill(
+                Rect {
+                    x: 0,
+                    y: BAR_HEIGHT,
+                    w: width.min(410),
+                    h: inspection_height - BAR_HEIGHT,
+                },
+                PANEL,
+            );
+            for (row, line) in state.inspection.iter().enumerate() {
+                canvas.text(12, BAR_HEIGHT + 8 + row as u32 * 18, line, TEXT);
+            }
         }
         if let Some(tab) = self.active {
             let items = options(tab, state, drive, fullscreen);
@@ -637,6 +667,33 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
             item("Record audio to WAV...", Command::RecordAudio, true, false)
         }))
         .collect(),
+        Tab::Debug => {
+            let inspecting = !state.inspection.is_empty();
+            vec![
+                item(
+                    if inspecting {
+                        "Hide inspection"
+                    } else {
+                        "Inspect guest"
+                    },
+                    Command::App(MenuAction::SetInspection(!inspecting)),
+                    state.running,
+                    inspecting,
+                ),
+                item(
+                    "Step instruction (F10)",
+                    Command::App(MenuAction::StepInstruction),
+                    state.running && state.paused,
+                    false,
+                ),
+                item(
+                    "Resume guest",
+                    Command::App(MenuAction::SetPaused(false)),
+                    state.running && state.paused,
+                    false,
+                ),
+            ]
+        }
         Tab::View => {
             let mut items = Vec::from(
                 [
@@ -900,6 +957,33 @@ mod tests {
             );
             state.recording = true;
         }
+    }
+
+    #[test]
+    fn debug_shortcut_steps_only_while_inspection_is_visible() {
+        let mut menu = Menu::default();
+        let mut state = MenuState {
+            running: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            menu.key(&input(Key::Function(10), false), None, &state, false),
+            (false, None)
+        );
+        menu.key(&input(Key::Character('g'), true), Some('g'), &state, false);
+        assert_eq!(
+            menu.key(&input(Key::Enter, false), None, &state, false),
+            (true, Some(Command::App(MenuAction::SetInspection(true))))
+        );
+        state.paused = true;
+        state.inspection.push("AX 0000".into());
+        assert_eq!(
+            menu.key(&input(Key::Function(10), false), None, &state, false),
+            (true, Some(Command::App(MenuAction::StepInstruction)))
+        );
+        let frame = menu.paint(PhysicalSize::new(800, 500), 1.0, &state, false);
+        assert!(frame.height > BAR_HEIGHT);
+        assert_eq!(&frame.rgba[(800 * BAR_HEIGHT as usize) * 4..][..4], &PANEL);
     }
 
     #[test]

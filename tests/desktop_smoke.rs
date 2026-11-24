@@ -101,6 +101,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     desktop.input(key_event(Key::Character(' '), Some(program), true));
     desktop.input(key_event(Key::Enter, None, true));
+    if wav_path.is_some() {
+        desktop.menu_action(MenuAction::SetInspection(true));
+        assert!(desktop.menu().paused);
+    }
     let result = Rc::new(Cell::new(None));
     let now = Instant::now();
     dosa_desktop::run(Smoke {
@@ -182,6 +186,29 @@ impl App for Smoke {
     fn tick(&mut self) {
         self.desktop.tick();
         let now = Instant::now();
+        let menu = self.desktop.menu();
+        if menu.paused && !menu.inspection.is_empty() {
+            let elapsed = now.duration_since(self.started);
+            if elapsed >= Duration::from_millis(125)
+                && menu
+                    .inspection
+                    .iter()
+                    .any(|line| line.starts_with("IP 0100"))
+            {
+                self.desktop.menu_action(MenuAction::StepInstruction);
+                assert!(
+                    self.desktop
+                        .menu()
+                        .inspection
+                        .iter()
+                        .any(|line| line.starts_with("IP 0103"))
+                );
+            } else if elapsed >= Duration::from_millis(250) {
+                self.desktop.menu_action(MenuAction::SetPaused(false));
+                assert!(self.desktop.menu().inspection.is_empty());
+            }
+            return;
+        }
         if now.duration_since(self.started) >= Duration::from_secs(120) {
             self.result.set(Some(Err(
                 "timed out waiting for guest graphics or input response",

@@ -27,8 +27,8 @@ pub use mouse::MouseCursor;
 pub use video::{TextFrame, Video};
 
 use bios::{Hook, TIMER_VECTOR};
-pub use dosa_cpu::CpuProfile;
 use dosa_cpu::{Cpu, CpuError, Step};
+pub use dosa_cpu::{CpuProfile, Registers};
 use dosa_mount::{Mount, MountError};
 use files::DosFiles;
 use keyboard::{KEYBOARD_VECTOR, Keyboard, MAX_KEYS};
@@ -52,6 +52,7 @@ pub enum DosError {
     InvalidCommandTail,
     InvalidProgram(&'static str),
     Busy,
+    GuestNotPaused,
     Mount(MountError),
     Cpu(CpuError),
     CpuAfterDeniedWrite { error: CpuError, drive: char },
@@ -69,6 +70,7 @@ impl fmt::Display for DosError {
             ),
             Self::InvalidProgram(message) => f.write_str(message),
             Self::Busy => f.write_str("a DOS program is already running"),
+            Self::GuestNotPaused => f.write_str("pause a DOS program before stepping"),
             Self::Mount(error) => write!(f, "{error}"),
             Self::Cpu(error) => write!(f, "{error}"),
             Self::CpuAfterDeniedWrite { error, drive } => write!(
@@ -99,6 +101,22 @@ impl RunState {
             self,
             Self::Running | Self::WaitingForKey | Self::WaitingForInterrupt
         )
+    }
+}
+
+/// A read-only view of the guest at a paused instruction boundary.
+pub struct PausedGuest<'a> {
+    cpu: &'a Cpu,
+    pub state: RunState,
+}
+
+impl PausedGuest<'_> {
+    pub fn registers(&self) -> Registers {
+        self.cpu.regs
+    }
+
+    pub fn peek(&self, segment: u16, offset: u16) -> Option<u8> {
+        self.cpu.peek_u8(segment, offset)
     }
 }
 
@@ -230,6 +248,27 @@ impl Machine {
         } else if !paused && let Some(since) = self.paused_since.take() {
             self.clock += since.elapsed();
         }
+    }
+
+    pub fn paused_guest(&self) -> Option<PausedGuest<'_>> {
+        self.paused_since.map(|_| PausedGuest {
+            cpu: &self.cpu,
+            state: self.state,
+        })
+    }
+
+    pub fn step_paused(&mut self) -> Result<RunState, DosError> {
+        if self.paused_since.is_none() || !self.state.is_active() {
+            return Err(DosError::GuestNotPaused);
+        }
+        self.run_budget(1)
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.paused_since.map_or_else(
+            || self.clock.elapsed(),
+            |paused| paused.duration_since(self.clock),
+        )
     }
 
     pub fn launch(&mut self, drive: char, path: &str, args: &str) -> Result<(), DosError> {
@@ -439,6 +478,10 @@ impl Machine {
         if budget == 0 || self.paused_since.is_some() || !self.state.is_active() {
             return Ok(self.state);
         }
+        self.run_budget(budget)
+    }
+
+    fn run_budget(&mut self, budget: usize) -> Result<RunState, DosError> {
         self.state = RunState::Running;
         self.advance_timers();
         for instruction in 0..budget {
@@ -462,7 +505,7 @@ impl Machine {
     }
 
     fn advance_timers(&mut self) {
-        let elapsed = self.clock.elapsed();
+        let elapsed = self.elapsed();
         self.pit.advance(pit::ticks(elapsed));
         self.audio.advance(elapsed, &self.cpu);
     }
@@ -513,7 +556,7 @@ impl Machine {
             Step::Continue => {}
             Step::Interrupt(vector) => self.interrupt(vector)?,
             Step::PortRead { port, width } => {
-                let elapsed = self.clock.elapsed();
+                let elapsed = self.elapsed();
                 self.audio.advance(elapsed, &self.cpu);
                 let mut value = 0;
                 for byte in 0..width {
@@ -538,7 +581,7 @@ impl Machine {
                 for byte in 0..width {
                     let port = port.wrapping_add(u16::from(byte));
                     let value = (value >> (byte * 8)) as u8;
-                    let elapsed = self.clock.elapsed();
+                    let elapsed = self.elapsed();
                     self.audio.advance(elapsed, &self.cpu);
                     if !self.audio.write_port(port, value, elapsed, &mut self.cpu)
                         && !self.pic.port_write(port, value)
