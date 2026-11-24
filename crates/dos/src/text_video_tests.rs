@@ -1,5 +1,62 @@
 use super::*;
 
+#[test]
+fn graphics_bios_text_draws_wraps_and_keeps_repeat_cursor() {
+    for (mode, columns, height) in [(0x12, 80, 16), (0x13, 40, 8)] {
+        let (mut cpu, mut video) = setup();
+        bios(&mut video, &mut cpu, mode, 0, 0, 0);
+        bios(&mut video, &mut cpu, 0x0200, 0, 0, columns - 1);
+        bios(&mut video, &mut cpu, 0x0941, 15, 2, 0);
+        assert_eq!((video.col, video.row), (usize::from(columns - 1), 0));
+        assert!((0..8).any(|x| (0..height).any(|y| video.vga.pixel(
+            (usize::from(columns) - 1) * 8 + x,
+            y,
+            None
+        ) != 0)));
+        bios(&mut video, &mut cpu, 0x0e42, 15, 0, 0);
+        assert_eq!((video.col, video.row), (0, 1));
+        bios(&mut video, &mut cpu, 0x0200, 0, 0, 0xffff);
+        assert_eq!(video.col, usize::from(columns) - 1);
+        let bottom = video.row;
+        bios(&mut video, &mut cpu, 0x0e0a, 15, 0, 0);
+        assert_eq!(video.row, bottom);
+    }
+}
+
+#[test]
+fn graphics_text_handles_tiny_crtc_height_and_restores_text_cursor() {
+    let (mut cpu, mut video) = setup();
+    bios(&mut video, &mut cpu, 0x0200, 0, 0, 0x0304);
+    bios(&mut video, &mut cpu, 0x12, 0, 0, 0);
+    assert_eq!((video.col, video.row), (0, 0));
+    video.port_write(0x3d4, 7);
+    video.port_write(0x3d5, 0);
+    video.port_write(0x3d4, 0x12);
+    video.port_write(0x3d5, 0);
+    bios(&mut video, &mut cpu, 0x0200, 0, 0, 0xffff);
+    bios(&mut video, &mut cpu, 0x0e0a, 15, 0, 0);
+    cpu.regs.es = 0x2000;
+    cpu.regs.bp = 0;
+    cpu.write_u8(0x2000, 0, b'A');
+    bios(&mut video, &mut cpu, 0x1300, 15, 1, 0xffff);
+    assert_eq!(video.row, 0);
+    video.restore_text(&mut cpu);
+    assert_eq!((video.col, video.row), (4, 3));
+}
+
+#[test]
+fn graphics_string_colors_and_cp437_blocks_are_visible() {
+    let (mut cpu, mut video) = setup();
+    bios(&mut video, &mut cpu, 0x13, 0, 0, 0);
+    cpu.regs.es = 0x2000;
+    cpu.regs.bp = 0;
+    cpu.load(0x2000, 0, &[0xdb, 5, 0xdb, 6]);
+    bios(&mut video, &mut cpu, 0x1303, 0, 2, 0);
+    assert_eq!((video.col, video.row), (2, 0));
+    assert_eq!(video.vga.pixel(0, 0, None), 5);
+    assert_eq!(video.vga.pixel(8, 0, None), 6);
+}
+
 fn setup() -> (Cpu, Adapter) {
     let mut cpu = Cpu::new();
     let mut video = Adapter::new();

@@ -460,6 +460,7 @@ version = "0.1.0"
 dependencies = [
  "dosa-cpu",
  "dosa-mount",
+ "font8x8",
 ]
 
 [[package]]

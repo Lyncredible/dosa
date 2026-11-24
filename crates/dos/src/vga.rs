@@ -140,6 +140,23 @@ impl Vga {
         if self.planar16 { 640 } else { WIDTH }
     }
 
+    pub(crate) fn scroll_up(&self, scanlines: usize) {
+        let (start, stride) = self.start_and_stride();
+        let height = self.height();
+        let cells_per_row = self.width() / if self.planar16 { 8 } else { 4 };
+        let mut ram = lock(&self.ram);
+        for y in 0..height {
+            for x in 0..cells_per_row {
+                let target = (start + y * stride + x) % PLANE_BYTES;
+                ram.cells[target] = if y + scanlines < height {
+                    ram.cells[(start + (y + scanlines) * stride + x) % PLANE_BYTES]
+                } else {
+                    [0; 4]
+                };
+            }
+        }
+    }
+
     pub(crate) fn reset_attribute_latch(&mut self) {
         self.attribute_data = false;
     }
