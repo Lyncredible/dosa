@@ -78,6 +78,7 @@ fn live_read_handle_accepts_readonly_host_file_but_rejects_replacement() {
     permissions.set_readonly(true);
     fs::set_permissions(&path, permissions).unwrap();
     let mount = Mount::open_writable_directory(scratch.path()).unwrap();
+    assert!(mount.is_readonly("READONLY.DAT").unwrap());
     let handle = mount.open_readable_file("READONLY.DAT").unwrap();
     assert_eq!(handle.read_at(0, 8).unwrap(), b"readable");
     assert!(matches!(

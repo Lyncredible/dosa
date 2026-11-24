@@ -231,7 +231,10 @@ impl DosFiles {
     ) -> Result<u16, u16> {
         let (_, mount, path) = self.resolve_mount(mounts, name)?;
         let entry = mount.metadata(&path).map_err(mount_code)?;
-        Ok(u16::from(attributes(&entry, !mount.is_writable())))
+        Ok(u16::from(attributes(
+            &entry,
+            mount.is_readonly(&path).map_err(mount_code)?,
+        )))
     }
 
     pub(crate) fn close(&mut self, handle: u16) -> Result<(), u16> {
@@ -340,10 +343,16 @@ impl DosFiles {
                     && matches(&entry.name, name)
             })
             .map(|entry| {
-                let attributes = attributes(&entry, !mount.is_writable());
-                (entry, attributes)
+                let path = if directory.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{directory}\\{}", entry.name)
+                };
+                let readonly = mount.is_readonly(&path).map_err(mount_code)?;
+                let attributes = attributes(&entry, readonly);
+                Ok((entry, attributes))
             })
-            .collect();
+            .collect::<Result<_, u16>>()?;
         self.next()
     }
 
