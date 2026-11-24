@@ -597,3 +597,54 @@ fn simultaneous_read_and_write_handles_see_current_contents() {
     assert_eq!(output.stdout, b"new");
     assert_eq!(fs::read(dir.0.join("SHARED.DAT")).unwrap(), b"new");
 }
+
+#[test]
+fn host_readonly_file_reports_dos_attributes_and_remains_readable() {
+    let dir = Fixture::new();
+    let data = dir.0.join("READONLY.DAT");
+    fs::write(&data, b"readable").unwrap();
+    let original_permissions = fs::metadata(&data).unwrap().permissions();
+    let mut permissions = original_permissions.clone();
+    permissions.set_readonly(true);
+    fs::set_permissions(&data, permissions).unwrap();
+
+    let mut program = Vec::new();
+    fn dos_call(program: &mut Vec<u8>, setup: &[u8]) {
+        program.extend_from_slice(setup);
+        program.extend_from_slice(&[0xcd, 0x21, 0x73, 5, 0xb8, 1, 0x4c, 0xcd, 0x21]);
+    }
+    dos_call(&mut program, &[0xba, 0, 3, 0xb8, 0, 0x43]);
+    program.extend_from_slice(&[
+        0x80, 0xe1, 1, 0x80, 0xf9, 1, // Check AH43h's readonly bit.
+        0x74, 5, 0xb8, 1, 0x4c, 0xcd, 0x21,
+    ]);
+    dos_call(&mut program, &[0xba, 0, 3, 0xb9, 0, 0, 0xb8, 0, 0x4e]);
+    program.extend_from_slice(&[
+        0xa0, 0x95, 0, 0x24, 1, 0x3c, 1, // Check FindFirst's DTA attributes.
+        0x74, 5, 0xb8, 1, 0x4c, 0xcd, 0x21,
+    ]);
+    dos_call(&mut program, &[0xba, 0, 3, 0xb8, 0, 0x3d]);
+    program.extend_from_slice(&[0x89, 0xc3]);
+    dos_call(&mut program, &[0xba, 0x20, 3, 0xb9, 8, 0, 0xb4, 0x3f]);
+    dos_call(
+        &mut program,
+        &[0xbb, 1, 0, 0xba, 0x20, 3, 0xb9, 8, 0, 0xb4, 0x40],
+    );
+    program.extend_from_slice(&[
+        0xba, 0, 3, 0xb8, 2, 0x3d, 0xcd, 0x21, 0x72, 5, 0xb8, 1, 0x4c, 0xcd, 0x21, 0xb8, 0, 0x4c,
+        0xcd, 0x21,
+    ]);
+    program.resize(0x200, 0);
+    program.extend_from_slice(b"READONLY.DAT\0");
+    fs::write(dir.0.join("ATTR.COM"), program).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .arg("--mount-rw")
+        .arg(format!("C={}", dir.0.display()))
+        .args(["--headless", "--exec", "attr"])
+        .output()
+        .unwrap();
+    fs::set_permissions(&data, original_permissions).unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"readable");
+    assert_eq!(fs::read(&data).unwrap(), b"readable");
+}

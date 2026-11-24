@@ -182,6 +182,27 @@ impl Mount {
         matches!(self.source, Source::WritableDirectory(_))
     }
 
+    /// Report the effective guest read-only flag for an existing path.
+    pub fn is_readonly(&self, path: &str) -> Result<bool> {
+        if self.metadata(path)?.is_dir {
+            return Ok(false);
+        }
+        if !self.is_writable() {
+            return Ok(true);
+        }
+        let directory = self.writable()?;
+        let _guard = lock(&directory.transaction)?;
+        let target = resolve_target(&directory.root, path)?;
+        let entry = target
+            .existing
+            .ok_or_else(|| MountError::NotFound(path.to_owned()))?;
+        Ok(target
+            .parent
+            .symlink_metadata(entry.host_name)?
+            .permissions()
+            .readonly())
+    }
+
     pub fn open_writable_file(
         &self,
         path: &str,
