@@ -11,6 +11,7 @@ use winit::keyboard::{Key as LogicalKey, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Fullscreen, Theme, Window, WindowId};
 
+mod audio;
 mod input;
 mod menu;
 mod pointer;
@@ -31,6 +32,13 @@ pub trait App {
     fn frame(&self) -> Frame<'_>;
 
     fn input(&mut self, event: Input);
+
+    /// Drain mono 48 kHz audio produced by the guest since the previous tick.
+    fn audio(&mut self) -> Vec<f32> {
+        Vec::new()
+    }
+
+    fn audio_error(&mut self, _error: &str) {}
 
     fn pointer(&mut self, _event: PointerEvent) {}
 
@@ -75,6 +83,8 @@ pub fn run(app: impl App + 'static) -> Result<(), Box<dyn Error>> {
         menu: menu::Menu::default(),
         menu_keys: HashSet::new(),
         error: None,
+        audio: None,
+        audio_attempted: false,
     };
 
     event_loop.run_app(&mut desktop)?;
@@ -86,6 +96,8 @@ pub fn run(app: impl App + 'static) -> Result<(), Box<dyn Error>> {
 
 struct Desktop<A> {
     app: A,
+    audio: Option<audio::Audio>,
+    audio_attempted: bool,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     next_tick: Instant,
@@ -355,6 +367,22 @@ impl<A: App> ApplicationHandler for Desktop<A> {
         let now = Instant::now();
         if now >= self.next_tick {
             self.app.tick();
+            let samples = self.app.audio();
+            if !samples.is_empty() && !self.audio_attempted {
+                self.audio_attempted = true;
+                match audio::Audio::open() {
+                    Ok(audio) => self.audio = Some(audio),
+                    Err(error) => self.app.audio_error(&error.to_string()),
+                }
+            }
+            if let Some(audio) = &self.audio {
+                let menu = self.app.menu();
+                if menu.enabled && (menu.paused || !menu.running) {
+                    audio.clear();
+                } else {
+                    audio.push(samples);
+                }
+            }
             self.sync_pointer(&window, false);
             if self.app.should_exit() {
                 event_loop.exit();

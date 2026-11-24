@@ -23,6 +23,7 @@ The first milestone is a GPU-rendered DOS prompt that can mount host content and
 | [17 · DOS batch files](docs/tasks/17-batch-files.md) | 04, 15 | Initial interpreter implemented |
 | [18 · VGA sixteen-color graphics](docs/tasks/18-video16.md) | 07 | In progress |
 | [19 · Remaining feature completion](docs/tasks/19-remaining-features.md) | 05, 06, 16 | In progress |
+| [20 · PC speaker and native audio](docs/tasks/20-pc-speaker.md) | 09, 19 | In progress |
 
 See [architecture](docs/architecture.md) for the library boundaries and execution model.
 
