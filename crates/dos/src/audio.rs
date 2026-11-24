@@ -1,8 +1,10 @@
-//! Mix PC speaker and FM audio into the desktop's mono PCM stream.
+//! Mix the guest audio devices into the desktop's mono PCM stream.
 
 use std::{collections::VecDeque, time::Duration};
 
-use crate::{adlib::Adlib, pit, speaker::Speaker};
+use dosa_cpu::Cpu;
+
+use crate::{adlib::Adlib, dma::Dma, pit, sound_blaster::SoundBlaster, speaker::Speaker};
 
 pub(super) const SAMPLE_RATE: u64 = 48_000;
 const MAX_SAMPLES: usize = SAMPLE_RATE as usize / 5;
@@ -10,6 +12,8 @@ const MAX_SAMPLES: usize = SAMPLE_RATE as usize / 5;
 pub(super) struct Audio {
     speaker: Speaker,
     adlib: Adlib,
+    dma: Dma,
+    sound_blaster: SoundBlaster,
     sample: u64,
     samples: VecDeque<f32>,
 }
@@ -19,17 +23,27 @@ impl Audio {
         Self {
             speaker: Speaker::new(pit::ticks(elapsed)),
             adlib: Adlib::new(),
+            dma: Dma::default(),
+            sound_blaster: SoundBlaster::default(),
             sample: sample_at(elapsed),
             samples: VecDeque::new(),
         }
     }
 
-    pub fn advance(&mut self, elapsed: Duration) {
+    pub fn advance(&mut self, elapsed: Duration, cpu: &Cpu) {
         let end = sample_at(elapsed);
-        self.sample = self.sample.max(end.saturating_sub(MAX_SAMPLES as u64));
+        let start = self.sample.max(end.saturating_sub(MAX_SAMPLES as u64));
+        if start > self.sample {
+            self.sound_blaster
+                .advance(start - self.sample, &mut self.dma, cpu);
+            self.sample = start;
+        }
         while self.sample < end {
             let tick = (u128::from(self.sample) * pit::FREQUENCY / u128::from(SAMPLE_RATE)) as u64;
-            let value = (self.speaker.sample(tick) + self.adlib.sample()).clamp(-1.0, 1.0);
+            self.sound_blaster.advance(1, &mut self.dma, cpu);
+            let value =
+                (self.speaker.sample(tick) + self.adlib.sample() + self.sound_blaster.sample())
+                    .clamp(-1.0, 1.0);
             if self.samples.len() == MAX_SAMPLES {
                 self.samples.pop_front();
             }
@@ -43,17 +57,43 @@ impl Audio {
         self.samples.drain(..).collect()
     }
 
+    pub fn irq_requested(&self) -> bool {
+        self.sound_blaster.irq_requested()
+    }
+
+    pub fn acknowledge_irq(&mut self) {
+        self.sound_blaster.acknowledge_irq();
+    }
+
     pub fn read_port(&mut self, port: u16, elapsed: Duration) -> Option<u8> {
         self.speaker
             .read_port(port)
-            .or_else(|| self.adlib.read_port(port, elapsed.as_micros() as u64))
+            .or_else(|| self.dma.read_port(port))
+            .or_else(|| self.sound_blaster.read_port(port))
+            .or_else(|| {
+                self.adlib
+                    .read_port(adlib_port(port), elapsed.as_micros() as u64)
+            })
     }
 
-    pub fn write_port(&mut self, port: u16, value: u8, elapsed: Duration) -> bool {
+    pub fn write_port(&mut self, port: u16, value: u8, elapsed: Duration, cpu: &mut Cpu) -> bool {
+        if self.dma.write_port(port, value) || self.sound_blaster.write_port(port, value) {
+            self.sound_blaster
+                .transfer_identification(&mut self.dma, cpu);
+            return true;
+        }
         self.speaker.write_port(port, value)
             || self
                 .adlib
-                .write_port(port, value, elapsed.as_micros() as u64)
+                .write_port(adlib_port(port), value, elapsed.as_micros() as u64)
+    }
+}
+
+fn adlib_port(port: u16) -> u16 {
+    match port {
+        0x228 => 0x388,
+        0x229 => 0x389,
+        _ => port,
     }
 }
 
@@ -93,7 +133,7 @@ mod tests {
         machine.launch('C', "FM.COM", "").unwrap();
         machine.run(40).unwrap();
         assert_eq!(machine.cpu.regs.bx as u8, 0x06);
-        machine.audio.advance(Duration::from_secs(1));
+        machine.audio.advance(Duration::from_secs(1), &machine.cpu);
         let samples = machine.take_audio();
         assert_eq!(samples.len(), MAX_SAMPLES);
         assert!(samples.iter().all(|sample| (-1.0..=1.0).contains(sample)));
@@ -102,7 +142,69 @@ mod tests {
 
         machine.stop();
         machine.launch('C', "IDLE.COM", "").unwrap();
-        machine.audio.advance(Duration::from_secs(1));
+        machine.audio.advance(Duration::from_secs(1), &machine.cpu);
         assert_eq!(machine.take_audio(), vec![0.0; MAX_SAMPLES]);
+    }
+
+    #[test]
+    fn guest_dsp_reset_dma_playback_and_irq_acknowledgment() {
+        let mut guest = vec![
+            0xfa, // CLI
+            0xb8, 0x0f, 0x25, 0xba, 0, 3, 0xcd, 0x21, // Set IRQ7 vector to DS:0300h
+            0xba, 0x26, 0x02, 0xb0, 1, 0xee, 0x30, 0xc0, 0xee, // Reset DSP
+            0xba, 0x2a, 0x02, 0xec, 0xa2, 1, 4, // Store reset response
+            0xb0, 0x7f, 0xe6, 0x21, // Enable only IRQ7
+        ];
+        for (port, value) in [
+            (0x0a, 5),
+            (0x0c, 0),
+            (0x02, 0),
+            (0x02, 2),
+            (0x83, 1),
+            (0x03, 63),
+            (0x03, 0),
+            (0x0b, 0x49),
+            (0x0a, 1),
+        ] {
+            guest.extend([0xb0, value, 0xe6, port]); // OUT immediate,AL
+        }
+        guest.extend([0xba, 0x2c, 0x02]);
+        for value in [0xd1, 0x40, 156, 0x14, 63, 0] {
+            guest.extend([0xb0, value, 0xee]); // Enable DAC, 10 kHz, 64-byte DMA
+        }
+        guest.extend([0xfb, 0xf4, 0xeb, 0xfd]); // STI; HLT; JMP back to HLT
+        guest.resize(0x100, 0);
+        guest.extend((0..64).map(|index| if index % 2 == 0 { 64 } else { 192 }));
+        guest.resize(0x200, 0);
+        guest.extend([
+            0x50, 0x52, 0xba, 0x2e, 0x02, 0xec, // Read DSP status to acknowledge IRQ
+            0xfe, 0x06, 0, 4, // INC BYTE [0400h]
+            0xb0, 0x20, 0xe6, 0x20, // PIC EOI
+            0x5a, 0x58, 0xcf, // Restore registers and IRET
+        ]);
+        let directory = Directory::new("sound-blaster");
+        directory.write("PCM.COM", &guest);
+        let mut machine = directory.machine();
+        machine.launch('C', "PCM.COM", "").unwrap();
+        let env = machine.cpu.read_u16(crate::loader::PSP, 0x2c);
+        let env: Vec<_> = (0..64)
+            .map(|offset| machine.cpu.read_u8(env, offset))
+            .collect();
+        assert!(
+            env.split(|&byte| byte == 0)
+                .any(|part| part == crate::sound_blaster::ENVIRONMENT.as_bytes())
+        );
+
+        machine.run(200).unwrap();
+        assert_eq!(machine.cpu.read_u8(crate::loader::PSP, 0x401), 0xaa);
+        let elapsed = machine.clock.elapsed() + Duration::from_millis(20);
+        machine.audio.advance(elapsed, &machine.cpu);
+        let samples = machine.take_audio();
+        assert!(samples.contains(&-0.25) && samples.contains(&0.25));
+        machine.run(100).unwrap();
+        assert_eq!(machine.cpu.read_u8(crate::loader::PSP, 0x400), 1);
+        assert!(!machine.audio.irq_requested());
+        assert_eq!(machine.audio.read_port(0x08, elapsed), Some(2));
+        assert_eq!(machine.audio.read_port(0x08, elapsed), Some(0));
     }
 }
