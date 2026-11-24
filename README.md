@@ -85,6 +85,8 @@ Use Drives to select a drive letter and mount a file, folder, or ZIP through a n
 
 View offers pause/resume, fullscreen, and 80- or 132-column text presets with 25, 43, or 50 rows. DOS mouse support maps the host pointer into the guest viewport and releases held buttons when leaving the viewport or opening a menu.
 
+The desktop plays PC speaker sound and AdLib OPL2 music. Choose AdLib in the DOS program's audio settings when offered.
+
 Keyboard menu access uses Alt+D, Alt+C, Alt+S, and Alt+V, followed by arrow keys and Enter.
 
 The desktop speed presets allow 10,000, 50,000, 100,000, or 250,000 guest instructions per display tick. Native picker interaction and Linux/macOS desktop runtime checks remain open.

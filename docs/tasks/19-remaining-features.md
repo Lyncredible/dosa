@@ -10,7 +10,7 @@ Complete the remaining roadmap and verification requirements with focused implem
 | PIT and speaker | Channel 0 mode timing, channels 1/2, port 61h gating, synthetic tone samples and native audio playback |
 | Writable storage | Explicit writable mount or overlay, create/write/truncate/rename/delete/directories, persistence and confinement tests |
 | Disk media | Read-only FAT volume mounts accept `--mount-fat` or a profile flag. A generated FAT12 fixture verifies geometry, short and long names, DOS CLI access and unchanged image bytes. Partitioned images, ISO/MSCDEX and boot are tracked separately. |
-| AdLib | FM device, register timing, synthesis and mixer validation |
+| AdLib | OPL2 address/data ports and polled timers implemented. A generated COM program exercises FM synthesis and the 48 kHz PC speaker mixer. See [task 21](21-adlib.md). |
 | Sound Blaster | DSP, DMA, IRQ, digital samples and native mixer validation |
 | Protected mode | Descriptor tables, transitions, memory semantics and exceptions for 286/386 profiles |
 | DPMI | Host services exercised by a reproducible protected-mode workload |

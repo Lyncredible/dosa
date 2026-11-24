@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 pub(super) const BIOS_DIVISOR: u64 = 65_536;
-const FREQUENCY: u128 = 1_193_182;
+pub(super) const FREQUENCY: u128 = 1_193_182;
 
 pub(super) fn ticks(elapsed: Duration) -> u64 {
     (elapsed.as_nanos() * FREQUENCY / 1_000_000_000) as u64

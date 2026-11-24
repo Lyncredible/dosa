@@ -1,15 +1,8 @@
-//! PIT channel 2 and the PC speaker gate sampled at 48 kHz.
-
-use std::collections::VecDeque;
-
-pub(super) const SAMPLE_RATE: u64 = 48_000;
-const PIT_RATE: u64 = 1_193_182;
-const MAX_SAMPLES: usize = SAMPLE_RATE as usize / 5;
+//! PIT channel 2 and the PC speaker gate.
 
 pub(super) struct Speaker {
     now: u64,
     epoch: u64,
-    sample: u64,
     divisor: u32,
     access: u8,
     mode: u8,
@@ -17,7 +10,6 @@ pub(super) struct Speaker {
     read_high: bool,
     latched: Option<u16>,
     gate: u8,
-    samples: VecDeque<f32>,
 }
 
 impl Speaker {
@@ -25,7 +17,6 @@ impl Speaker {
         Self {
             now,
             epoch: now,
-            sample: now.saturating_mul(SAMPLE_RATE) / PIT_RATE,
             divisor: 65536,
             access: 3,
             mode: 3,
@@ -33,33 +24,21 @@ impl Speaker {
             read_high: false,
             latched: None,
             gate: 0,
-            samples: VecDeque::new(),
         }
     }
 
     pub fn advance(&mut self, now: u64) {
-        let end = now.saturating_mul(SAMPLE_RATE) / PIT_RATE;
-        self.sample = self.sample.max(end.saturating_sub(MAX_SAMPLES as u64));
-        while self.sample < end {
-            let tick = self.sample.saturating_mul(PIT_RATE) / SAMPLE_RATE;
-            let value = if self.gate & 2 == 0 {
-                0.0
-            } else if self.output(tick) {
-                0.12
-            } else {
-                -0.12
-            };
-            if self.samples.len() == MAX_SAMPLES {
-                self.samples.pop_front();
-            }
-            self.samples.push_back(value);
-            self.sample += 1;
-        }
         self.now = now;
     }
 
-    pub fn drain(&mut self) -> Vec<f32> {
-        self.samples.drain(..).collect()
+    pub fn sample(&self, tick: u64) -> f32 {
+        if self.gate & 2 == 0 {
+            0.0
+        } else if self.output(tick) {
+            0.12
+        } else {
+            -0.12
+        }
     }
 
     fn output(&self, now: u64) -> bool {
@@ -222,14 +201,13 @@ mod tests {
         );
         machine.state = crate::RunState::Running;
         machine.run(20).unwrap();
-        assert_eq!(machine.speaker.divisor, 100);
-        assert_eq!(machine.speaker.gate & 3, 3);
-        machine.speaker.advance(PIT_RATE);
-        assert!(machine.take_audio().iter().any(|sample| *sample != 0.0));
+        machine.audio.advance(std::time::Duration::from_secs(1));
+        let samples = machine.take_audio();
+        assert!(samples.contains(&0.12) && samples.contains(&-0.12));
     }
 
     #[test]
-    fn tone_frequency_gate_latch_and_buffer_are_bounded() {
+    fn tone_frequency_gate_and_latch_are_sampled() {
         let mut speaker = Speaker::new(0);
         speaker.write_port(0x43, 0xb6);
         speaker.write_port(0x42, 100);
@@ -243,12 +221,9 @@ mod tests {
         assert_eq!(speaker.read_port(0x42), Some(80));
         speaker.advance(30);
         assert_eq!(speaker.read_port(0x42), Some(0));
-        speaker.advance(PIT_RATE);
-        let samples = speaker.drain();
-        assert_eq!(samples.len(), MAX_SAMPLES);
-        assert!(samples.contains(&0.12) && samples.contains(&-0.12));
+        assert_eq!(speaker.sample(49), 0.12);
+        assert_eq!(speaker.sample(50), -0.12);
         speaker.write_port(0x61, 0);
-        speaker.advance(PIT_RATE + 100);
-        assert!(speaker.drain().iter().all(|sample| *sample == 0.0));
+        assert_eq!(speaker.sample(100), 0.0);
     }
 }

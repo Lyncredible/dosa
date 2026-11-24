@@ -2,16 +2,20 @@ use crate::{Machine, RunState, Video};
 use dosa_mount::Mount;
 use std::{fs, path::PathBuf};
 
-struct Directory(PathBuf);
+pub(super) struct Directory(PathBuf);
 
 impl Directory {
-    fn new(name: &str) -> Self {
+    pub(super) fn new(name: &str) -> Self {
         let path = std::env::temp_dir().join(format!("dosa-dos-{}-{name}", std::process::id()));
         fs::create_dir_all(&path).unwrap();
         Self(path)
     }
 
-    fn machine(&self) -> Machine {
+    pub(super) fn write(&self, name: &str, bytes: &[u8]) {
+        fs::write(self.0.join(name), bytes).unwrap();
+    }
+
+    pub(super) fn machine(&self) -> Machine {
         let mut machine = Machine::new();
         machine.mount('C', Mount::open(&self.0).unwrap()).unwrap();
         machine
