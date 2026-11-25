@@ -5,7 +5,7 @@ Use the Microsoft MS-DOS 6.22 User’s Guide and the Microsoft Help command refe
 | Area | Current behavior and remaining work |
 | --- | --- |
 | Directory listings | `DIR /W`, `/B`, `/L`, `/?`, and filename patterns work. Default listings show names and sizes. Add pagination, recursion, ordering, attributes, volume and space summaries, timestamps, and the `DIRCMD` environment. [DIR reference](https://dos-help.soulsphere.org/help.hlp/Dir.html) |
-| Files and directories | `CD`/`CHDIR`, `TYPE`, `MD`/`MKDIR`, and `RD`/`RMDIR` work. Directory mutations use writable mounts and preserve the current directory and non-empty directories. Add `COPY`, `DEL`/`ERASE`, and `REN`/`RENAME` with wildcard and prompt behavior. |
+| Files and directories | `CD`/`CHDIR`, `TYPE`, `MD`/`MKDIR`, and `RD`/`RMDIR` work. Directory mutations use writable mounts and preserve the current directory and non-empty directories. `REN`/`RENAME` supports wildcard names within one directory. Add `COPY` and `DEL`/`ERASE` with wildcard and prompt behavior. [RENAME reference](https://dos-help.soulsphere.org/help.hlp/rename.html) |
 | Environment and prompt | Add `SET`, `PATH`, `PROMPT`, and executable lookup through PATH. Share the shell environment with new guests and batch expansion. |
 | Batch control | `CALL`, `ECHO`, `GOTO`, `REM`, and part of `IF` work. Add the remaining `IF` forms, `FOR`, `PAUSE`, `SHIFT`, and documented batch interactions. See [task 17](17-batch-files.md). |
 | System and session | `CLS`, `EXIT`, and drive changes work. Add `BREAK`, `CHCP`, `CTTY`, `DATE`, `LH`/`LOADHIGH`, `TIME`, `VER`, `VERIFY`, and `VOL`. Track any dependencies on emulated devices, code pages, and memory managers. |

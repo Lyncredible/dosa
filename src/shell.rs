@@ -7,6 +7,7 @@ use dosa_mount::Mount;
 
 mod batch;
 mod directory;
+mod rename;
 
 use batch::Batch;
 pub use batch::BatchStep;
@@ -184,10 +185,14 @@ impl Shell {
             "HELP" if args.eq_ignore_ascii_case("RD") || args.eq_ignore_ascii_case("RMDIR") => {
                 RMDIR_HELP.as_bytes().to_vec()
             }
+            "HELP" if args.eq_ignore_ascii_case("REN") || args.eq_ignore_ascii_case("RENAME") => {
+                rename::HELP.as_bytes().to_vec()
+            }
             "HELP" => b"DIR [path] [/W] [/B] [/L]   List files\r\n\
                 CD [path]                  Show or change directory\r\n\
                 MD path                    Make a directory (MKDIR)\r\n\
                 RD path                    Remove an empty directory (RMDIR)\r\n\
+                REN source name            Rename files (RENAME)\r\n\
                 TYPE file                  Print a file\r\n\
                 MOUNT drive path           Mount host files or images (see HELP MOUNT)\r\n\
                 BOOT A|C path              Boot a floppy or hard disk image\r\n\
@@ -217,6 +222,7 @@ impl Shell {
             }
             "MD" | "MKDIR" => return self.change_directory_entry(args, true),
             "RD" | "RMDIR" => return self.change_directory_entry(args, false),
+            "REN" | "RENAME" => return self.rename(args),
             "MOUNT" => self.mount_command(args, false)?,
             "IMGMOUNT" => self.mount_command(args, true)?,
             "BOOT" => {

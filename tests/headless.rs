@@ -110,6 +110,46 @@ fn shell_directory_commands_work_from_batch_and_prompt() {
 }
 
 #[test]
+fn rename_handles_dos_wildcards_without_overwriting_files() {
+    let fixture = Fixture::new();
+    let mount = format!("C={}", fixture.0.display());
+    let run = |access: &str, command: &str| {
+        Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([access, &mount, "--headless", "--exec", command])
+            .output()
+            .unwrap()
+    };
+    fs::create_dir(fixture.0.join("FOLDER.TXT")).unwrap();
+    fs::write(fixture.0.join("ALPHA.TXT"), b"alpha").unwrap();
+    fs::write(fixture.0.join("BETA.TXT"), b"beta").unwrap();
+    fs::write(
+        fixture.0.join("RENAME.BAT"),
+        b"@echo off\r\nren *.txt Z???.BAK\r\n",
+    )
+    .unwrap();
+    let output = run("--mount-rw", "RENAME.BAT");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read(fixture.0.join("ZLPH.BAK")).unwrap(), b"alpha");
+    assert_eq!(fs::read(fixture.0.join("ZETA.BAK")).unwrap(), b"beta");
+    assert!(fixture.0.join("FOLDER.TXT").is_dir());
+
+    for (access, command) in [
+        ("--mount", "ren ZETA.BAK OTHER.BAK"),
+        ("--mount-rw", "ren ZETA.BAK C:\\OTHER.BAK"),
+        ("--mount-rw", "ren ZETA.BAK ZLPH.BAK"),
+    ] {
+        let output = run(access, command);
+        assert!(!output.status.success(), "{command}: {output:?}");
+        assert_eq!(fs::read(fixture.0.join("ZETA.BAK")).unwrap(), b"beta");
+        assert_eq!(fs::read(fixture.0.join("ZLPH.BAK")).unwrap(), b"alpha");
+    }
+    let output = run("--mount-rw", "rename C:\\ZETA.BAK FINAL.");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read(fixture.0.join("FINAL")).unwrap(), b"beta");
+    assert!(!fixture.0.join("ZETA.BAK").exists());
+}
+
+#[test]
 fn dir_formats_wide_bare_and_lowercase_listings() {
     let fixture = Fixture::new();
     fs::create_dir(fixture.0.join("AAA")).unwrap();
