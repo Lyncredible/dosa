@@ -750,11 +750,14 @@ impl App for Desktop {
             if event.key != Key::Other && !event.modifiers.logo {
                 let key = match event.key {
                     Key::Character('c' | 'C') if event.modifiers.ctrl => 3,
+                    Key::Character('z' | 'Z') if event.modifiers.ctrl => 0x1a,
+                    Key::Function(6) if self.shell.copy_text_waiting() => 0x1a,
                     Key::Character(character) if !event.modifiers.ctrl => {
                         self.shell.machine.code_page().encode(character)
                     }
                     Key::Enter => 13,
                     Key::Backspace => 8,
+                    Key::Tab => 9,
                     Key::Escape => 27,
                     _ => 0,
                 };
@@ -974,6 +977,40 @@ mod tests {
         desktop.paste_text("echo ok\r\nexit\t\u{1b}");
         assert_eq!(desktop.line, "echo ok exit ");
         assert!(!desktop.exit);
+    }
+
+    #[test]
+    fn copy_con_desktop_finishes_with_f6_and_enter() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut shell = Shell::new();
+        shell
+            .mount(
+                'C',
+                Mount::open_writable_directory(directory.path()).unwrap(),
+            )
+            .unwrap();
+        let mut desktop = Desktop::new(shell, None);
+        desktop.submit("COPY CON NOTE.TXT");
+        assert!(desktop.shell.input_waiting());
+        for (key, text) in [
+            (Key::Character('a'), Some("a".to_owned())),
+            (Key::Enter, None),
+            (Key::Function(6), None),
+            (Key::Enter, None),
+        ] {
+            desktop.input(Input {
+                key,
+                text,
+                scan_code: 0,
+                pressed: true,
+                modifiers: Default::default(),
+            });
+        }
+        assert!(!desktop.shell.input_waiting());
+        assert_eq!(
+            std::fs::read(directory.path().join("NOTE.TXT")).unwrap(),
+            b"a\r\n"
+        );
     }
 
     #[test]

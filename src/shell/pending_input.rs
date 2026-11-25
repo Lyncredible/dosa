@@ -1,12 +1,17 @@
 use std::error::Error;
 
 use super::{
-    Command, Shell, clock::ClockInput, copy::CopyOperation, delete::Deletion, directory::Pager,
+    Command, Shell,
+    clock::ClockInput,
+    copy::{CopyOperation, CopyText},
+    delete::Deletion,
+    directory::Pager,
 };
 
 pub(super) enum PendingInput {
     Delete(Deletion),
     Copy(CopyOperation),
+    CopyText(CopyOperation, CopyText),
     Page(Pager),
     Clock(ClockInput),
 }
@@ -17,13 +22,21 @@ impl Shell {
     }
 
     pub fn line_input_waiting(&self) -> bool {
-        matches!(self.pending_input, Some(PendingInput::Clock(_)))
+        matches!(
+            self.pending_input,
+            Some(PendingInput::Clock(_) | PendingInput::CopyText(..))
+        )
+    }
+
+    pub(crate) fn copy_text_waiting(&self) -> bool {
+        matches!(self.pending_input, Some(PendingInput::CopyText(..)))
     }
 
     pub fn pending_input_requirement(&self) -> &'static str {
         match self.pending_input {
             Some(PendingInput::Page(_)) => "DIR /P needs a key",
             Some(PendingInput::Clock(_)) => "DATE or TIME needs a line",
+            Some(PendingInput::CopyText(..)) => "COPY CON needs input ending with Ctrl+Z and Enter",
             _ => "confirmation needs Y or N",
         }
     }
@@ -32,9 +45,16 @@ impl Shell {
         let Some(pending) = self.pending_input.take() else {
             return Ok(None);
         };
-        if let PendingInput::Clock(clock) = pending {
-            return Ok(clock.key(self, key));
-        }
+        let pending = match pending {
+            PendingInput::Clock(clock) => return Ok(clock.key(self, key)),
+            PendingInput::CopyText(copy, input) => {
+                return input
+                    .key(copy, self, key)
+                    .map(Some)
+                    .map_err(|error| self.guest_failed(error));
+            }
+            pending => pending,
+        };
         let key = key.to_ascii_uppercase();
         let approved = key == b'Y';
         let result = match (pending, key) {
