@@ -7,8 +7,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key as LogicalKey, PhysicalKey};
-use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+use winit::keyboard::PhysicalKey;
 use winit::window::{Fullscreen, Theme, Window, WindowId};
 
 mod audio;
@@ -285,15 +284,10 @@ impl<A: App> ApplicationHandler for Desktop<A> {
                     } else if self.menu_keys.remove(&physical) {
                         return;
                     }
-                    let shortcut = match event.key_without_modifiers() {
-                        LogicalKey::Character(text) => text.chars().next(),
-                        _ => None,
-                    };
                     let input = self.keyboard.translate(event);
                     let state = self.app.menu();
                     let (handled, command) = if state.enabled {
-                        self.menu
-                            .key(&input, shortcut, &state, window.fullscreen().is_some())
+                        self.menu.key(&input, &state, window.fullscreen().is_some())
                     } else {
                         (false, None)
                     };
@@ -325,7 +319,6 @@ impl<A: App> ApplicationHandler for Desktop<A> {
                     self.menu.mouse(
                         state.is_pressed(),
                         button == MouseButton::Left,
-                        menu::logical_width(window.inner_size(), window.scale_factor()),
                         &menu_state,
                         window.fullscreen().is_some(),
                     )

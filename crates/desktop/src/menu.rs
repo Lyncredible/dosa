@@ -6,16 +6,18 @@ use winit::window::Window;
 
 use crate::{Frame, Input, Key};
 
-pub(crate) const BAR_HEIGHT: u32 = 52;
-const TAB_HEIGHT: u32 = 34;
-const ROW_HEIGHT: u32 = 27;
+pub(crate) const BAR_HEIGHT: u32 = 36;
+const ROW_HEIGHT: u32 = 24;
 const POPUP_WIDTH: u32 = 250;
+const POPUP_LEFT: u32 = 6;
+const POPUP_TOP: u32 = BAR_HEIGHT + 4;
+const CATEGORY_HEADER: u32 = 24;
 const GLYPH_SIZE: u32 = 11;
 const GLYPH_ADVANCE: u32 = 9;
-const NAVY: [u8; 4] = [25, 30, 43, 255];
-const PANEL: [u8; 4] = [33, 40, 55, 255];
-const RULE: [u8; 4] = [60, 73, 95, 255];
-const ACTIVE: [u8; 4] = [65, 79, 108, 255];
+const NAVY: [u8; 4] = [21, 23, 29, 255];
+const PANEL: [u8; 4] = [31, 34, 43, 255];
+const RULE: [u8; 4] = [48, 53, 67, 255];
+const ACTIVE: [u8; 4] = [48, 57, 75, 255];
 const TEXT: [u8; 4] = [239, 242, 250, 255];
 const MUTED: [u8; 4] = [174, 186, 208, 255];
 const DISABLED: [u8; 4] = [133, 144, 164, 255];
@@ -172,15 +174,33 @@ enum Tab {
     Debug,
 }
 
-const TABS: [(Tab, &str, u32, u32); 7] = [
-    (Tab::Drives, "Drives", 7, 68),
-    (Tab::Cpu, "CPU", 78, 50),
-    (Tab::Speed, "Speed", 131, 62),
-    (Tab::View, "View", 196, 53),
-    (Tab::Audio, "Audio", 252, 62),
-    (Tab::Edit, "Edit", 317, 54),
-    (Tab::Debug, "Debug", 374, 65),
+const CATEGORIES: [(Tab, &str); 7] = [
+    (Tab::Drives, "Drives"),
+    (Tab::Cpu, "CPU"),
+    (Tab::Speed, "Speed"),
+    (Tab::View, "View"),
+    (Tab::Audio, "Audio"),
+    (Tab::Edit, "Edit"),
+    (Tab::Debug, "Debug"),
 ];
+const ROOT_ROWS: usize = CATEGORIES.len() + 1;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Panel {
+    Root,
+    Category(Tab),
+}
+
+impl Panel {
+    fn rows_top(self) -> u32 {
+        POPUP_TOP
+            + if self == Self::Root {
+                4
+            } else {
+                CATEGORY_HEADER
+            }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Command {
@@ -206,19 +226,16 @@ impl Rect {
     }
 }
 
-fn tab_rect(tab: Tab) -> Rect {
-    let &(_, _, x, w) = TABS.iter().find(|(entry, ..)| *entry == tab).unwrap();
-    Rect {
-        x,
-        y: 3,
-        w,
-        h: TAB_HEIGHT - 6,
-    }
-}
+const MENU_BUTTON: Rect = Rect {
+    x: 7,
+    y: 5,
+    w: 36,
+    h: 26,
+};
 
 #[derive(Default)]
 pub(crate) struct Menu {
-    active: Option<Tab>,
+    active: Option<Panel>,
     selected: usize,
     drive: Option<char>,
     point: Option<(u32, u32)>,
@@ -253,7 +270,6 @@ impl Menu {
         &mut self,
         pressed: bool,
         left: bool,
-        width: u32,
         state: &MenuState,
         fullscreen: bool,
     ) -> (bool, Option<Command>) {
@@ -271,28 +287,43 @@ impl Menu {
             self.active = None;
             return (true, None);
         };
-        if let Some((tab, ..)) = TABS.iter().find(|(tab, ..)| tab_rect(*tab).contains(point)) {
-            if self.active == Some(*tab) {
+        if MENU_BUTTON.contains(point) {
+            if self.active.is_some() {
                 self.active = None;
             } else {
-                self.open(*tab, state);
+                self.open_root();
             }
             return (true, None);
         }
-        let Some(tab) = self.active else {
+        let Some(panel) = self.active else {
             return (true, None);
         };
-        let left = popup_left(tab, width);
+        if panel == Panel::Root {
+            if let Some(index) =
+                (0..ROOT_ROWS).find(|&index| row_rect(panel, index).contains(point))
+            {
+                return (true, self.select_root(index, state));
+            }
+            self.active = None;
+            return (true, None);
+        }
+        let Panel::Category(tab) = panel else {
+            unreachable!()
+        };
+        if category_header().contains(point) {
+            self.open_root();
+            return (true, None);
+        }
         let drive = self.drive(state);
         let items = options(tab, state, drive, fullscreen);
         for (index, item) in items.iter().enumerate() {
-            if row_rect(left, index).contains(point) {
+            if row_rect(panel, index).contains(point) {
                 return (true, self.activate(item));
             }
         }
         if tab == Tab::Drives {
             for index in 0..26 {
-                if drive_rect(left, index).contains(point) {
+                if drive_rect(index).contains(point) {
                     self.drive = Some(char::from(b'A' + index as u8));
                     return (true, None);
                 }
@@ -305,42 +336,47 @@ impl Menu {
     pub(crate) fn key(
         &mut self,
         input: &Input,
-        shortcut_key: Option<char>,
         state: &MenuState,
         fullscreen: bool,
     ) -> (bool, Option<Command>) {
         if !input.pressed {
             return (false, None);
         }
-        if input.modifiers.alt && !input.modifiers.ctrl && !input.modifiers.logo {
-            let tab = match shortcut_key.map(|key| key.to_ascii_lowercase()) {
-                Some('d') => Some(Tab::Drives),
-                Some('c') => Some(Tab::Cpu),
-                Some('s') => Some(Tab::Speed),
-                Some('v') => Some(Tab::View),
-                Some('a') => Some(Tab::Audio),
-                Some('e') => Some(Tab::Edit),
-                Some('g') => Some(Tab::Debug),
-                _ => None,
-            };
-            if let Some(tab) = tab {
-                self.open(tab, state);
-                return (true, None);
-            }
-            if input.key == Key::Enter {
-                self.active = None;
-                return (true, Some(Command::Fullscreen));
-            }
+        if input.key == Key::Enter
+            && input.modifiers.alt
+            && !input.modifiers.ctrl
+            && !input.modifiers.logo
+        {
+            self.active = None;
+            return (true, Some(Command::Fullscreen));
         }
-        let Some(tab) = self.active else {
+        let Some(panel) = self.active else {
             if !state.inspection.is_empty() && input.key == Key::Function(10) {
                 return (true, Some(Command::App(MenuAction::StepInstruction)));
             }
+            if !state.running && input.key == Key::Function(10) {
+                self.open_root();
+                return (true, None);
+            }
             return (false, None);
+        };
+        if panel == Panel::Root {
+            match input.key {
+                Key::Escape => self.active = None,
+                Key::Down => self.selected = (self.selected + 1) % ROOT_ROWS,
+                Key::Up => self.selected = (self.selected + ROOT_ROWS - 1) % ROOT_ROWS,
+                Key::Enter | Key::Right => return (true, self.select_root(self.selected, state)),
+                _ => {}
+            }
+            return (true, None);
+        }
+        let Panel::Category(tab) = panel else {
+            unreachable!()
         };
         let items = options(tab, state, self.drive(state), fullscreen);
         match input.key {
             Key::Escape => self.active = None,
+            Key::Left | Key::Backspace => self.open_root(),
             Key::Down | Key::Up => {
                 let count = items.len();
                 let step = if input.key == Key::Down { 1 } else { count - 1 };
@@ -364,10 +400,25 @@ impl Menu {
         (true, None)
     }
 
+    fn open_root(&mut self) {
+        self.active = Some(Panel::Root);
+        self.selected = 0;
+    }
+
+    fn select_root(&mut self, index: usize, state: &MenuState) -> Option<Command> {
+        if let Some(&(tab, _)) = CATEGORIES.get(index) {
+            self.open(tab, state);
+            None
+        } else {
+            self.active = None;
+            Some(Command::App(MenuAction::ResetGuest))
+        }
+    }
+
     fn open(&mut self, tab: Tab, state: &MenuState) {
         let items = options(tab, state, self.drive(state), false);
         self.selected = items.iter().position(|item| item.enabled).unwrap_or(0);
-        self.active = Some(tab);
+        self.active = Some(Panel::Category(tab));
     }
 
     fn activate(&mut self, option: &Item) -> Option<Command> {
@@ -387,10 +438,29 @@ impl Menu {
         fullscreen: bool,
     ) -> Frame<'_> {
         let width = logical_width(size, scale);
-        let menu_height = self.active.map_or(BAR_HEIGHT, |tab| {
-            let count = options(tab, state, self.drive(state), fullscreen).len() as u32;
-            BAR_HEIGHT + ROW_HEIGHT * count + if tab == Tab::Drives { 75 } else { 5 }
-        });
+        let drive = self.drive(state);
+        let panel = self.active;
+        let items = match panel {
+            Some(Panel::Category(tab)) => options(tab, state, drive, fullscreen),
+            _ => Vec::new(),
+        };
+        let menu_height = match panel {
+            None => BAR_HEIGHT,
+            Some(panel) => {
+                panel.rows_top()
+                    + ROW_HEIGHT
+                        * if panel == Panel::Root {
+                            ROOT_ROWS as u32
+                        } else {
+                            items.len() as u32
+                        }
+                    + if panel == Panel::Category(Tab::Drives) {
+                        64
+                    } else {
+                        5
+                    }
+            }
+        };
         let inspection_height = BAR_HEIGHT + 12 + state.inspection.len() as u32 * 18;
         let height = menu_height
             .max(if state.inspection.is_empty() {
@@ -400,8 +470,6 @@ impl Menu {
             })
             .min((f64::from(size.height) / scale).floor() as u32)
             .max(1);
-        let left = self.active.map_or(0, |tab| popup_left(tab, width));
-        let drive = self.drive(state);
         self.pixels.resize(width as usize * height as usize * 4, 0);
         self.pixels.fill(0);
         let mut canvas = Canvas {
@@ -427,15 +495,19 @@ impl Menu {
             },
             RULE,
         );
-        for (tab, label, ..) in TABS {
-            let rect = tab_rect(tab);
-            if self.active == Some(tab) || self.point.is_some_and(|point| rect.contains(point)) {
-                canvas.fill(rect, ACTIVE);
-            }
-            canvas.text(rect.x + 7, 11, label, TEXT);
+        if panel.is_some() || self.point.is_some_and(|point| MENU_BUTTON.contains(point)) {
+            canvas.fill(MENU_BUTTON, ACTIVE);
         }
-        if width >= 610 {
-            canvas.text(width - 166, 11, "Alt+D/C/S/V/A/E/G", MUTED);
+        for y in [11, 17, 23] {
+            canvas.fill(
+                Rect {
+                    x: 17,
+                    y,
+                    w: 16,
+                    h: 2,
+                },
+                TEXT,
+            );
         }
         let settings = format!(
             "{}: | {} | {}{}{}{}",
@@ -446,11 +518,12 @@ impl Menu {
             if state.muted { " | Muted" } else { "" },
             if state.recording { " | REC" } else { "" },
         );
-        canvas.text(12, 36, &settings, MUTED);
-        if !state.status.is_empty() {
-            let position = 30 + settings.chars().count() as u32 * GLYPH_ADVANCE;
-            canvas.text(position, 36, &state.status, ACCENT);
-        }
+        let (title, color) = if state.status.is_empty() {
+            (&settings, MUTED)
+        } else {
+            (&state.status, ACCENT)
+        };
+        canvas.text(55, 12, title, color);
         if !state.inspection.is_empty() {
             canvas.fill(
                 Rect {
@@ -465,28 +538,57 @@ impl Menu {
                 canvas.text(12, BAR_HEIGHT + 8 + row as u32 * 18, line, TEXT);
             }
         }
-        if let Some(tab) = self.active {
-            let items = options(tab, state, drive, fullscreen);
+        if let Some(panel) = panel {
             canvas.fill(
                 Rect {
-                    x: left,
-                    y: BAR_HEIGHT,
+                    x: POPUP_LEFT,
+                    y: POPUP_TOP,
                     w: POPUP_WIDTH,
-                    h: menu_height - BAR_HEIGHT,
+                    h: menu_height - POPUP_TOP,
                 },
                 RULE,
             );
             canvas.fill(
                 Rect {
-                    x: left + 1,
-                    y: BAR_HEIGHT,
+                    x: POPUP_LEFT + 1,
+                    y: POPUP_TOP + 1,
                     w: POPUP_WIDTH - 2,
-                    h: menu_height - BAR_HEIGHT - 1,
+                    h: menu_height - POPUP_TOP - 2,
                 },
                 PANEL,
             );
+            if panel == Panel::Root {
+                for (index, label) in CATEGORIES
+                    .iter()
+                    .map(|&(_, name)| name)
+                    .chain(std::iter::once("Reset guest"))
+                    .enumerate()
+                {
+                    let rect = row_rect(panel, index);
+                    if index == self.selected
+                        || self.point.is_some_and(|point| rect.contains(point))
+                    {
+                        canvas.fill(rect, ACTIVE);
+                    }
+                    canvas.text(rect.x + 14, rect.y + 7, label, TEXT);
+                    if index < CATEGORIES.len() {
+                        canvas.text(rect.x + rect.w - 22, rect.y + 7, ">", MUTED);
+                    }
+                }
+            } else if let Panel::Category(tab) = panel {
+                let header = category_header();
+                if self.point.is_some_and(|point| header.contains(point)) {
+                    canvas.fill(header, ACTIVE);
+                }
+                let label = CATEGORIES
+                    .iter()
+                    .find(|&&(category, _)| category == tab)
+                    .unwrap()
+                    .1;
+                canvas.text(header.x + 12, header.y + 6, &format!("<  {label}"), ACCENT);
+            }
             for (index, item) in items.iter().enumerate() {
-                let rect = row_rect(left, index);
+                let rect = row_rect(panel, index);
                 if item.enabled
                     && (index == self.selected
                         || self.point.is_some_and(|point| rect.contains(point)))
@@ -494,22 +596,22 @@ impl Menu {
                     canvas.fill(rect, ACTIVE);
                 }
                 if item.chosen {
-                    canvas.text(rect.x + 9, rect.y + 8, ">", ACCENT);
+                    canvas.text(rect.x + 9, rect.y + 7, ">", ACCENT);
                 }
                 let color = if item.enabled { TEXT } else { DISABLED };
-                canvas.text(rect.x + 25, rect.y + 8, item.label, color);
+                canvas.text(rect.x + 25, rect.y + 7, item.label, color);
             }
-            if tab == Tab::Drives {
+            if panel == Panel::Category(Tab::Drives) {
                 let info = state.drives.get(&drive).copied().unwrap_or("Not mounted");
                 let label = format!("{drive}: {info}");
                 canvas.text(
-                    left + 12,
-                    BAR_HEIGHT + DRIVE_ACTION_ROWS * ROW_HEIGHT + 6,
+                    POPUP_LEFT + 12,
+                    panel.rows_top() + DRIVE_ACTION_ROWS * ROW_HEIGHT + 3,
                     &label,
                     MUTED,
                 );
                 for index in 0..26 {
-                    let rect = drive_rect(left, index);
+                    let rect = drive_rect(index);
                     let letter = char::from(b'A' + index as u8);
                     if letter == drive || self.point.is_some_and(|point| rect.contains(point)) {
                         canvas.fill(rect, ACTIVE);
@@ -535,14 +637,19 @@ pub(crate) fn logical_width(size: PhysicalSize<u32>, scale: f64) -> u32 {
     ((f64::from(size.width) / scale).floor() as u32).max(1)
 }
 
-fn popup_left(tab: Tab, width: u32) -> u32 {
-    tab_rect(tab).x.min(width.saturating_sub(POPUP_WIDTH))
+fn category_header() -> Rect {
+    Rect {
+        x: POPUP_LEFT + 1,
+        y: POPUP_TOP + 1,
+        w: POPUP_WIDTH - 2,
+        h: CATEGORY_HEADER - 1,
+    }
 }
 
-fn row_rect(left: u32, index: usize) -> Rect {
+fn row_rect(panel: Panel, index: usize) -> Rect {
     Rect {
-        x: left + 1,
-        y: BAR_HEIGHT + ROW_HEIGHT * index as u32,
+        x: POPUP_LEFT + 1,
+        y: panel.rows_top() + ROW_HEIGHT * index as u32,
         w: POPUP_WIDTH - 2,
         h: ROW_HEIGHT,
     }
@@ -550,10 +657,13 @@ fn row_rect(left: u32, index: usize) -> Rect {
 
 const DRIVE_ACTION_ROWS: u32 = 9;
 
-fn drive_rect(left: u32, index: u32) -> Rect {
+fn drive_rect(index: u32) -> Rect {
     Rect {
-        x: left + 8 + (index % 13) * 18,
-        y: BAR_HEIGHT + DRIVE_ACTION_ROWS * ROW_HEIGHT + 22 + (index / 13) * 21,
+        x: POPUP_LEFT + 8 + (index % 13) * 18,
+        y: Panel::Category(Tab::Drives).rows_top()
+            + DRIVE_ACTION_ROWS * ROW_HEIGHT
+            + 18
+            + (index / 13) * 21,
         w: 17,
         h: 20,
     }
@@ -760,12 +870,6 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
                 false,
             ));
             items.push(item("Save screenshot...", Command::Screenshot, true, false));
-            items.push(item(
-                "Reset guest",
-                Command::App(MenuAction::ResetGuest),
-                true,
-                false,
-            ));
             items.push(item("Exit", Command::App(MenuAction::Exit), true, false));
             items
         }
@@ -884,18 +988,41 @@ mod tests {
     }
 
     #[test]
+    fn alt_letters_pass_to_the_guest_and_reset_is_in_the_root_menu() {
+        let mut menu = Menu::default();
+        let state = MenuState {
+            running: true,
+            ..Default::default()
+        };
+        for key in ['d', 'c', 's', 'v', 'a', 'e', 'g', 'x', 'y', 'z'] {
+            assert_eq!(
+                menu.key(&input(Key::Character(key), true), &state, false),
+                (false, None)
+            );
+        }
+        menu.open_root();
+        menu.key(&input(Key::Up, false), &state, false);
+        assert_eq!(
+            menu.key(&input(Key::Enter, false), &state, false),
+            (true, Some(Command::App(MenuAction::ResetGuest)))
+        );
+        assert!(!menu.blocks_pointer());
+    }
+
+    #[test]
     fn keyboard_can_select_mount_target_and_kind() {
         let mut menu = Menu::default();
         let state = MenuState::default();
         assert_eq!(
-            menu.key(&input(Key::Character('x'), true), Some('d'), &state, false),
+            menu.key(&input(Key::Function(10), false), &state, false),
             (true, None)
         );
-        menu.key(&input(Key::Character('z'), false), None, &state, false);
-        menu.key(&input(Key::Down, false), None, &state, false);
-        menu.key(&input(Key::Down, false), None, &state, false);
+        menu.key(&input(Key::Enter, false), &state, false);
+        menu.key(&input(Key::Character('z'), false), &state, false);
+        menu.key(&input(Key::Down, false), &state, false);
+        menu.key(&input(Key::Down, false), &state, false);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), None, &state, false),
+            menu.key(&input(Key::Enter, false), &state, false),
             (true, Some(Command::Mount(MountKind::SessionZip, 'Z')))
         );
         assert!(!menu.blocks_pointer());
@@ -910,12 +1037,12 @@ mod tests {
         };
         menu.open(Tab::Drives, &state);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), None, &state, false),
+            menu.key(&input(Key::Enter, false), &state, false),
             (true, None)
         );
         menu.open(Tab::Speed, &state);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), None, &state, false),
+            menu.key(&input(Key::Enter, false), &state, false),
             (true, Some(Command::App(MenuAction::SetSpeed(Speed::Slow))))
         );
     }
@@ -926,10 +1053,10 @@ mod tests {
         let mut state = MenuState::default();
         state.drives.insert('D', "Folder (read-only)");
         menu.open(Tab::Drives, &state);
-        menu.key(&input(Key::Character('d'), false), None, &state, false);
-        menu.key(&input(Key::Up, false), None, &state, false);
+        menu.key(&input(Key::Character('d'), false), &state, false);
+        menu.key(&input(Key::Up, false), &state, false);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), None, &state, false),
+            menu.key(&input(Key::Enter, false), &state, false),
             (true, Some(Command::App(MenuAction::Unmount('D'))))
         );
         state.batch_active = true;
@@ -948,18 +1075,18 @@ mod tests {
             volume: Volume::Half,
             ..Default::default()
         };
-        menu.key(&input(Key::Character('a'), true), Some('a'), &state, false);
+        menu.open(Tab::Audio, &state);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), None, &state, false),
+            menu.key(&input(Key::Enter, false), &state, false),
             (true, Some(Command::App(MenuAction::SetMuted(true))))
         );
         assert_eq!(state.audio_gain(), 0.5);
         state.muted = true;
         assert_eq!(state.audio_gain(), 0.0);
         menu.open(Tab::Audio, &state);
-        menu.key(&input(Key::Down, false), None, &state, false);
+        menu.key(&input(Key::Down, false), &state, false);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), None, &state, false),
+            menu.key(&input(Key::Enter, false), &state, false),
             (
                 true,
                 Some(Command::App(MenuAction::SetVolume(Volume::Quiet)))
@@ -976,9 +1103,9 @@ mod tests {
             Command::App(MenuAction::StopRecording),
         ] {
             menu.open(Tab::Audio, &state);
-            menu.key(&input(Key::Up, false), None, &state, false);
+            menu.key(&input(Key::Up, false), &state, false);
             assert_eq!(
-                menu.key(&input(Key::Enter, false), None, &state, false),
+                menu.key(&input(Key::Enter, false), &state, false),
                 (true, Some(expected))
             );
             state.recording = true;
@@ -993,18 +1120,18 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            menu.key(&input(Key::Function(10), false), None, &state, false),
+            menu.key(&input(Key::Function(10), false), &state, false),
             (false, None)
         );
-        menu.key(&input(Key::Character('g'), true), Some('g'), &state, false);
+        menu.open(Tab::Debug, &state);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), None, &state, false),
+            menu.key(&input(Key::Enter, false), &state, false),
             (true, Some(Command::App(MenuAction::SetInspection(true))))
         );
         state.paused = true;
         state.inspection.push("AX 0000".into());
         assert_eq!(
-            menu.key(&input(Key::Function(10), false), None, &state, false),
+            menu.key(&input(Key::Function(10), false), &state, false),
             (true, Some(Command::App(MenuAction::StepInstruction)))
         );
         let frame = menu.paint(PhysicalSize::new(800, 500), 1.0, &state, false);
@@ -1017,19 +1144,22 @@ mod tests {
         let mut menu = Menu::default();
         let state = MenuState::default();
         menu.move_pointer(PhysicalPosition::new(20.0, 16.0), 2.0);
-        assert_eq!(menu.mouse(true, true, 400, &state, false), (true, None));
-        assert_eq!(menu.mouse(false, true, 400, &state, false), (true, None));
+        assert_eq!(menu.mouse(true, true, &state, false), (true, None));
+        assert_eq!(menu.mouse(false, true, &state, false), (true, None));
         assert!(menu.blocks_pointer());
         let frame = menu.paint(PhysicalSize::new(800, 500), 2.0, &state, false);
         assert_eq!(frame.width, 400);
-        let row = (BAR_HEIGHT * frame.width) as usize;
+        let row = (Panel::Root.rows_top() * frame.width) as usize;
         assert_eq!(frame.rgba[4 * (row + 16) + 3], 255);
         assert_eq!(frame.rgba[4 * (row + 380) + 3], 0);
-        menu.move_pointer(PhysicalPosition::new(24.0, 170.0), 2.0);
+        menu.move_pointer(PhysicalPosition::new(24.0, 106.0), 2.0);
+        assert_eq!(menu.mouse(true, true, &state, false), (true, None));
+        assert_eq!(menu.mouse(false, true, &state, false), (true, None));
+        menu.move_pointer(PhysicalPosition::new(24.0, 194.0), 2.0);
         assert_eq!(
-            menu.mouse(true, true, 400, &state, false),
+            menu.mouse(true, true, &state, false),
             (true, Some(Command::Mount(MountKind::Folder, 'C')))
         );
-        assert_eq!(menu.mouse(false, true, 400, &state, false), (true, None));
+        assert_eq!(menu.mouse(false, true, &state, false), (true, None));
     }
 }
