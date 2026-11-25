@@ -7,6 +7,8 @@ use dosa_mount::Mount;
 
 mod batch;
 mod condition;
+mod confirmation;
+mod copy;
 mod delete;
 mod directory;
 mod for_loop;
@@ -16,6 +18,7 @@ mod search_path;
 
 use batch::Batch;
 pub use batch::{BatchStep, PAUSE_MESSAGE};
+use confirmation::Confirmation;
 
 const MOUNT_HELP: &str = "MOUNT drive [/ISO | /FAT | /RW | /SESSION] host-path\r\n\
     Files, directories, and ZIPs open read-only by default.\r\n\
@@ -43,7 +46,7 @@ pub struct Shell {
     drive: char,
     directories: BTreeMap<char, String>,
     batch: Option<Batch>,
-    deletion: Option<delete::Deletion>,
+    confirmation: Option<Confirmation>,
     errorlevel: u8,
     quick_launch: Option<QuickLaunch>,
 }
@@ -67,7 +70,7 @@ impl Shell {
             drive: 'C',
             directories: BTreeMap::new(),
             batch: None,
-            deletion: None,
+            confirmation: None,
             errorlevel: 0,
             quick_launch: None,
         }
@@ -110,7 +113,7 @@ impl Shell {
 
     pub(crate) fn reset(&mut self) -> Result<(), dosa_dos::DosError> {
         self.batch = None;
-        self.deletion = None;
+        self.confirmation = None;
         self.errorlevel = 0;
         self.machine.reset();
         self.finish_quick_launch()?;
@@ -232,6 +235,7 @@ impl Shell {
             "HELP" if args.eq_ignore_ascii_case("RD") || args.eq_ignore_ascii_case("RMDIR") => {
                 RMDIR_HELP.as_bytes().to_vec()
             }
+            "HELP" if args.eq_ignore_ascii_case("COPY") => copy::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("DEL") || args.eq_ignore_ascii_case("ERASE") => {
                 delete::HELP.as_bytes().to_vec()
             }
@@ -243,6 +247,7 @@ impl Shell {
                 MD path                    Make a directory (MKDIR)\r\n\
                 RD path                    Remove an empty directory (RMDIR)\r\n\
                 REN source name            Rename files (RENAME)\r\n\
+                COPY source [destination]  Copy or combine files\r\n\
                 DEL path [/P]              Delete files (ERASE)\r\n\
                 TYPE file                  Print a file\r\n\
                 SET [variable=[value]]     Display or change environment variables\r\n\
@@ -277,6 +282,7 @@ impl Shell {
             "RD" | "RMDIR" => return self.change_directory_entry(args, false),
             "PATH" => return self.path_command(args),
             "REN" | "RENAME" => return self.rename(args),
+            "COPY" => return self.copy(args),
             "DEL" | "ERASE" => return self.delete(args),
             "MOUNT" => self.mount_command(args, false)?,
             "IMGMOUNT" => self.mount_command(args, true)?,

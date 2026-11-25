@@ -19,7 +19,8 @@ use writable::WritableDirectory;
 pub use writable::{WritableFile, WriteDisposition};
 use zip_mount::ZipMount;
 
-const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+/// Upper bound on a single mounted file read or write.
+pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DEPTH: usize = 64;
 
 /// A directory entry as it appears from DOS.

@@ -4,7 +4,7 @@ use std::error::Error;
 use dosa_dos::matches_dos_pattern;
 use dosa_mount::{Entry, MountError};
 
-use super::{Command, Shell, split_word};
+use super::{Command, Confirmation, Shell, split_word};
 
 const USAGE: &str = "usage: DEL [drive:][path]filename [/P]";
 pub(super) const HELP: &str = "DEL [drive:][path]filename [/P]\r\n\
@@ -90,7 +90,7 @@ impl Shell {
         }
         if matches!(pattern, "*" | "*.*") {
             let label = deleting.display_path("");
-            self.deletion = Some(deleting);
+            self.confirmation = Some(Confirmation::Delete(deleting));
             return Ok(Command::Confirm(
                 format!("Delete all files in {label} (Y/N)? ").into_bytes(),
             ));
@@ -104,58 +104,33 @@ impl Shell {
             return Command::Prompt;
         };
         let path = deleting.display_path(&entry.name);
-        self.deletion = Some(deleting);
+        self.confirmation = Some(Confirmation::Delete(deleting));
         Command::Confirm(format!("Delete {path} (Y/N)? ").into_bytes())
-    }
-
-    pub fn confirmation_waiting(&self) -> bool {
-        self.deletion.is_some()
-    }
-
-    pub fn resume_confirmation(&mut self, key: u8) -> Result<Option<Command>, Box<dyn Error>> {
-        let key = key.to_ascii_uppercase();
-        if !matches!(key, b'Y' | b'N' | 3 | 27) {
-            return Ok(None);
-        }
-        let Some(mut deleting) = self.deletion.take() else {
-            return Ok(None);
-        };
-        let result = (|| {
-            if matches!(key, 3 | 27) {
-                return Ok(Command::Prompt);
-            }
-            if !deleting.per_file {
-                if key == b'Y' {
-                    deleting.remove_all(self)?;
-                }
-                return Ok(Command::Prompt);
-            }
-            let entry = deleting
-                .files
-                .pop_front()
-                .expect("one file is awaiting confirmation");
-            if key == b'Y' {
-                deleting.remove(self, &entry)?;
-            }
-            Ok(self.prompt_deletion(deleting))
-        })();
-        let command = result.map_err(|error| self.guest_failed(error))?;
-        let mut output = match key {
-            b'Y' => b"Y\r\n".to_vec(),
-            b'N' => b"N\r\n".to_vec(),
-            _ => b"\r\n".to_vec(),
-        };
-        Ok(Some(match command {
-            Command::Confirm(prompt) => {
-                output.extend(prompt);
-                Command::Confirm(output)
-            }
-            _ => Command::Print(output),
-        }))
     }
 }
 
 impl Deletion {
+    pub(super) fn confirm(
+        mut self,
+        shell: &mut Shell,
+        approved: bool,
+    ) -> Result<Command, Box<dyn Error>> {
+        if !self.per_file {
+            if approved {
+                self.remove_all(shell)?;
+            }
+            return Ok(Command::Prompt);
+        }
+        let entry = self
+            .files
+            .pop_front()
+            .expect("one file is awaiting confirmation");
+        if approved {
+            self.remove(shell, &entry)?;
+        }
+        Ok(shell.prompt_deletion(self))
+    }
+
     fn display_path(&self, name: &str) -> String {
         format!("{}:\\{}", self.drive, self.in_parent(name))
     }
