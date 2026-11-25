@@ -24,7 +24,7 @@ Usage: dosa [OPTIONS]
   --mount DRIVE=PATH   Mount a host file, directory, or ZIP (repeatable)
   --mount-rw DRIVE=DIR Mount a writable host directory (repeatable)
   --mount-session DRIVE=ZIP Mount a writable ZIP copy until exit (repeatable)
-  --mount-fat DRIVE=IMG Mount a read-only FAT volume or MBR image (repeatable)
+  --mount-fat DRIVE[:PARTITION]=IMG Mount a read-only FAT volume or MBR partition
   --mount-iso DRIVE=ISO Mount a read-only ISO 9660 data image (repeatable)
   --exec COMMAND       Run a DOS shell command on startup
   --cpu 8086|286|386   Select the guest CPU profile
@@ -73,13 +73,13 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
                 let value = args
                     .next()
                     .ok_or_else(|| format!("{option} needs DRIVE=PATH"))?;
-                let (drive, path) = parse_mount(&value)?;
+                let (drive, path, partition) = parse_mount(&value, option == "--mount-fat")?;
                 mounts.push(StartupMount {
                     drive,
                     path,
                     access: match option {
                         "--mount-rw" => MountAccess::WritableDirectory,
-                        "--mount-fat" => MountAccess::FatImage,
+                        "--mount-fat" => MountAccess::FatImage(partition),
                         "--mount-iso" => MountAccess::IsoImage,
                         "--mount-session" => MountAccess::SessionZip,
                         _ => MountAccess::ReadOnly,
@@ -137,7 +137,8 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     } in launch.mounts
     {
         let mount = match access {
-            MountAccess::FatImage => Mount::open_fat_image(&path),
+            MountAccess::FatImage(None) => Mount::open_fat_image(&path),
+            MountAccess::FatImage(Some(number)) => Mount::open_fat_partition(&path, number),
             MountAccess::IsoImage => Mount::open_iso_image(&path),
             MountAccess::WritableDirectory => Mount::open_writable_directory(&path),
             MountAccess::SessionZip => Mount::open_session_zip(&path),
@@ -168,17 +169,36 @@ fn option_value(value: Option<OsString>, option: &str) -> Result<String, String>
         .map_err(|_| format!("{option} needs UTF-8 text"))
 }
 
-fn parse_mount(value: &std::ffi::OsStr) -> Result<(char, PathBuf), &'static str> {
+fn parse_mount(
+    value: &std::ffi::OsStr,
+    allow_partition: bool,
+) -> Result<(char, PathBuf, Option<u16>), &'static str> {
     // The drive prefix is ASCII. Preserve the native encoding of the host path.
     let bytes = value.as_encoded_bytes();
-    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b'=' {
-        return Err("--mount needs a letter and a host path, for example C=games");
-    }
+    let invalid = "--mount needs a letter and a host path, for example C=games";
+    let separator = bytes.iter().position(|&byte| byte == b'=').ok_or(invalid)?;
+    let (drive, partition) = match &bytes[..separator] {
+        [drive] if drive.is_ascii_alphabetic() => (*drive, None),
+        [drive, b':', digits @ ..] if allow_partition && drive.is_ascii_alphabetic() => {
+            let number = std::str::from_utf8(digits)
+                .ok()
+                .filter(|value| value.bytes().all(|digit| digit.is_ascii_digit()))
+                .and_then(|value| value.parse::<u16>().ok())
+                .filter(|&number| number != 0)
+                .ok_or("FAT partition number must be a positive integer")?;
+            (*drive, Some(number))
+        }
+        _ => return Err(invalid),
+    };
     // SAFETY: the split immediately follows the ASCII '=' in this OsStr's own encoding.
-    let path = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(&bytes[2..]) };
+    let path = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(&bytes[separator + 1..]) };
+    if path.is_empty() {
+        return Err(invalid);
+    }
     Ok((
-        char::from(bytes[0].to_ascii_uppercase()),
+        char::from(drive.to_ascii_uppercase()),
         PathBuf::from(path),
+        partition,
     ))
 }
 
@@ -244,9 +264,9 @@ mod tests {
     #[test]
     fn parses_native_mounts() {
         assert_eq!(
-            parse_mount(std::ffi::OsStr::new("d=some path/games.zip")),
-            Ok(('D', PathBuf::from("some path/games.zip")))
+            parse_mount(std::ffi::OsStr::new("d=some path/games.zip"), false),
+            Ok(('D', PathBuf::from("some path/games.zip"), None))
         );
-        assert!(parse_mount(std::ffi::OsStr::new("D=")).is_err());
+        assert!(parse_mount(std::ffi::OsStr::new("D="), false).is_err());
     }
 }

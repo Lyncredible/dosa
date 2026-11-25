@@ -10,6 +10,7 @@ const READ_BUDGET: u64 = MAX_FILE_BYTES * 2;
 const READ_OPERATIONS: usize = 2_000_000;
 const MAX_DIRECTORY_ENTRIES: usize = 65_536;
 const MBR_SECTOR_BYTES: u64 = 512;
+const MAX_LOGICAL_PARTITIONS: u16 = 128;
 
 #[derive(Debug)]
 pub(super) struct FatImage {
@@ -24,7 +25,7 @@ struct Region {
 }
 
 impl FatImage {
-    pub fn open(mut file: File) -> Result<Self> {
+    pub fn open(mut file: File, partition: Option<u16>) -> Result<Self> {
         let length = file.metadata()?.len();
         let mut header = [0; 512];
         file.read_exact(&mut header)?;
@@ -36,11 +37,19 @@ impl FatImage {
             open_volume(&mut file, region)?.unmount()?;
             Ok(region)
         });
-        let region = match raw {
-            Ok(region) => region,
-            Err(raw_error) => {
-                let Some(mut region) = primary_fat_partition(&header, length)? else {
-                    return Err(raw_error.into());
+        let region = match (raw, partition) {
+            (Ok(region), None) => region,
+            (raw, partition) => {
+                let Some(mut region) = mbr_fat_partition(&mut file, &header, length, partition)?
+                else {
+                    let error = match partition {
+                        Some(number) => io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("FAT partition {number} was not found"),
+                        ),
+                        None => raw.expect_err("raw volume already handled"),
+                    };
+                    return Err(error.into());
                 };
                 file.seek(SeekFrom::Start(region.start))?;
                 file.read_exact(&mut header)?;
@@ -127,36 +136,122 @@ fn volume_bytes(header: &[u8; 512], capacity: u64) -> io::Result<u64> {
     Ok(bytes)
 }
 
-fn primary_fat_partition(header: &[u8; 512], length: u64) -> io::Result<Option<Region>> {
+fn mbr_fat_partition(
+    file: &mut File,
+    header: &[u8; 512],
+    length: u64,
+    selected: Option<u16>,
+) -> io::Result<Option<Region>> {
     if header[510..] != [0x55, 0xaa] {
         return Ok(None);
     }
     let mut regions = Vec::<Region>::new();
     let mut fat = None;
-    for entry in header[446..510].as_chunks::<16>().0 {
-        if entry[4] == 0 {
+    let mut extended = None;
+    for (index, entry) in header[446..510].as_chunks::<16>().0.iter().enumerate() {
+        let Some((kind, region)) =
+            partition_entry(entry, 0, length, "invalid or truncated MBR partition")?
+        else {
             continue;
-        }
-        let address = |field: &[u8]| u64::from(u32::from_le_bytes(field.try_into().unwrap()));
-        let start = address(&entry[8..12]) * MBR_SECTOR_BYTES;
-        let bytes = address(&entry[12..16]) * MBR_SECTOR_BYTES;
-        let end = start + bytes;
-        if !matches!(entry[0], 0 | 0x80) || start == 0 || bytes == 0 || end > length {
-            return Err(invalid_data("invalid or truncated MBR partition"));
-        }
-        if regions
-            .iter()
-            .any(|region| start < region.start + region.bytes && region.start < end)
-        {
+        };
+        if regions.iter().any(|other| {
+            region.start < other.start + other.bytes && other.start < region.start + region.bytes
+        }) {
             return Err(invalid_data("overlapping MBR partitions"));
         }
-        let region = Region { start, bytes };
         regions.push(region);
-        if matches!(entry[4], 0x01 | 0x04 | 0x06 | 0x0b | 0x0c | 0x0e) {
+        if is_fat(kind) && selected.is_none_or(|number| number == (index + 1) as u16) {
             fat.get_or_insert(region);
         }
+        if is_extended(kind) && extended.replace(region).is_some() {
+            return Err(invalid_data("multiple MBR extended partitions"));
+        }
     }
-    Ok(fat)
+    match (fat, extended) {
+        (None, Some(container)) if selected.is_none_or(|number| number >= 5) => {
+            logical_fat_partition(file, container, selected)
+        }
+        _ => Ok(fat),
+    }
+}
+
+fn logical_fat_partition(
+    file: &mut File,
+    container: Region,
+    selected: Option<u16>,
+) -> io::Result<Option<Region>> {
+    let end = container.start + container.bytes;
+    let mut current = container.start;
+    let mut header = [0; 512];
+    for number in 5..5 + MAX_LOGICAL_PARTITIONS {
+        file.seek(SeekFrom::Start(current))?;
+        file.read_exact(&mut header)?;
+        if header[510..] != [0x55, 0xaa] {
+            return Err(invalid_data("invalid extended boot record signature"));
+        }
+        let entries = header[446..510].as_chunks::<16>().0;
+        let data = partition_entry(
+            &entries[0],
+            current,
+            end,
+            "logical partition exceeds its extended container",
+        )?;
+        let mut minimum_next = current + MBR_SECTOR_BYTES;
+        if let Some((kind, region)) = data {
+            if is_extended(kind) {
+                return Err(invalid_data("invalid logical partition type"));
+            }
+            if is_fat(kind) && selected.is_none_or(|wanted| wanted == number) {
+                return Ok(Some(region));
+            }
+            minimum_next = region.start + region.bytes;
+        }
+        // Data starts relative to its own EBR. The chain link is relative
+        // to the start of the enclosing extended partition.
+        let link = partition_entry(
+            &entries[1],
+            container.start,
+            end,
+            "invalid extended boot record link",
+        )?;
+        let Some((kind, next)) = link else {
+            return Ok(None);
+        };
+        if !is_extended(kind) || next.start < minimum_next {
+            return Err(invalid_data(
+                "backward or overlapping extended boot record link",
+            ));
+        }
+        current = next.start;
+    }
+    Err(invalid_data("too many logical partitions"))
+}
+
+fn partition_entry(
+    entry: &[u8; 16],
+    base: u64,
+    end: u64,
+    message: &'static str,
+) -> io::Result<Option<(u8, Region)>> {
+    let kind = entry[4];
+    if kind == 0 {
+        return Ok(None);
+    }
+    let offset = u64::from(u32::from_le_bytes(entry[8..12].try_into().unwrap())) * MBR_SECTOR_BYTES;
+    let bytes = u64::from(u32::from_le_bytes(entry[12..16].try_into().unwrap())) * MBR_SECTOR_BYTES;
+    let start = base + offset;
+    if !matches!(entry[0], 0 | 0x80) || offset == 0 || bytes == 0 || start + bytes > end {
+        return Err(invalid_data(message));
+    }
+    Ok(Some((kind, Region { start, bytes })))
+}
+
+fn is_fat(kind: u8) -> bool {
+    matches!(kind, 0x01 | 0x04 | 0x06 | 0x0b | 0x0c | 0x0e)
+}
+
+fn is_extended(kind: u8) -> bool {
+    matches!(kind, 0x05 | 0x0f | 0x85)
 }
 
 fn open_volume(file: &mut File, region: Region) -> io::Result<FileSystem<ImageReader<'_>>> {

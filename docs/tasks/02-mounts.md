@@ -16,4 +16,4 @@ Use `--mount-session`, `session_zip = true` in a profile, or Drives → **Mount 
 
 ## FAT disk images
 
-Dosa mounts raw FAT volumes and the first primary FAT partition in MBR table order. The reader keeps all FAT seeks and reads within the declared volume. Tests exercise a generated FAT16 partition from DOS and reject overlapping and truncated layouts. [UEFI legacy MBR layout](https://uefi.org/specs/UEFI/2.11/05_GUID_Partition_Table_Format.html)
+Dosa mounts raw FAT volumes and primary or logical FAT partitions. Automatic selection checks primary slots first. The CLI and launch profiles can select by partition number. Tests verify DOS reads through a chain of three extended boot records and reject backwards and out-of-bounds links. The reader confines FAT seeks and reads to the declared volume. [UEFI legacy MBR layout](https://uefi.org/specs/UEFI/2.11/05_GUID_Partition_Table_Format.html) [Microsoft EBR layout](https://learn.microsoft.com/windows/win32/api/winioctl/ni-winioctl-ioctl_disk_set_drive_layout_ex)
