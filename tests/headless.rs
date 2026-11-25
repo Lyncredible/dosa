@@ -506,7 +506,7 @@ fn batch_if_compares_strings_and_tests_dos_files() {
                 &format!("C={}", fixture.0.display()),
                 "--headless",
                 "--exec",
-                "VERIFY",
+                "VERIFY.BAT",
             ])
             .output()
             .unwrap()
