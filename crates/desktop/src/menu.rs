@@ -91,6 +91,7 @@ pub enum MenuAction {
     },
     SetCpu(CpuMode),
     Unmount(char),
+    UseWritableZip(char),
     SetSpeed(Speed),
     SetVolume(Volume),
     SetMuted(bool),
@@ -106,6 +107,7 @@ pub enum MenuAction {
 pub struct MenuState {
     pub enabled: bool,
     pub active_drive: char,
+    pub write_blocked_zip: Option<char>,
     pub drives: std::collections::BTreeMap<char, &'static str>,
     pub cpu: CpuMode,
     pub speed: Speed,
@@ -128,6 +130,7 @@ impl Default for MenuState {
         Self {
             enabled: false,
             active_drive: 'C',
+            write_blocked_zip: None,
             drives: Default::default(),
             cpu: CpuMode::default(),
             speed: Speed::default(),
@@ -544,7 +547,7 @@ fn row_rect(left: u32, index: usize) -> Rect {
     }
 }
 
-const DRIVE_ACTION_ROWS: u32 = 8;
+const DRIVE_ACTION_ROWS: u32 = 9;
 
 fn drive_rect(left: u32, index: u32) -> Rect {
     Rect {
@@ -605,6 +608,16 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
             "Quick launch...",
             Command::QuickLaunch,
             can_change_mounts,
+            false,
+        )))
+        .chain(std::iter::once(item(
+            if state.running {
+                "Stop and use ZIP copy"
+            } else {
+                "Use writable ZIP copy"
+            },
+            Command::App(MenuAction::UseWritableZip(drive)),
+            state.write_blocked_zip == Some(drive),
             false,
         )))
         .chain(std::iter::once(item(
