@@ -98,7 +98,12 @@ impl Frame {
         })
     }
 
-    fn expand(&self, mut rest: &str, errorlevel: u8) -> Result<String, String> {
+    fn expand(
+        &self,
+        mut rest: &str,
+        errorlevel: u8,
+        environment: &dosa_dos::Environment,
+    ) -> Result<String, String> {
         if rest.len() > MAX_COMMAND_BYTES {
             return Err(command_length_error());
         }
@@ -117,17 +122,16 @@ impl Frame {
                     }
                 }
                 _ => {
-                    if let Some((name, after)) = after_percent.split_once('%')
-                        && name.eq_ignore_ascii_case("ERRORLEVEL")
-                    {
-                        append_command_text(&mut output, &errorlevel.to_string())?;
+                    if let Some((name, after)) = after_percent.split_once('%') {
+                        if name.eq_ignore_ascii_case("ERRORLEVEL") {
+                            append_command_text(&mut output, &errorlevel.to_string())?;
+                        } else if let Some(value) = environment.get(name) {
+                            append_command_text(&mut output, value)?;
+                        }
                         rest = after;
                         continue;
                     }
-                    return Err(
-                        "unsupported batch expansion; use %0–%9, %*, %ERRORLEVEL%, or %%"
-                            .to_owned(),
-                    );
+                    return Err("unterminated environment expansion in batch line".to_owned());
                 }
             }
             rest = &after_percent[1..];
@@ -175,7 +179,11 @@ impl Batch {
         Ok(())
     }
 
-    fn next(&mut self, errorlevel: u8) -> Result<Option<Line>, String> {
+    fn next(
+        &mut self,
+        errorlevel: u8,
+        environment: &dosa_dos::Environment,
+    ) -> Result<Option<Line>, String> {
         while let Some(frame) = self.frames.last_mut() {
             let Some(raw) = frame.script.lines.get(frame.next_line) else {
                 self.frames.pop();
@@ -187,7 +195,7 @@ impl Batch {
                 return Err(format!("batch line limit of {MAX_BATCH_LINES} exceeded"));
             }
             self.remaining -= 1;
-            let raw = raw.trim();
+            let raw = raw.trim_start();
             let (command, quiet) = raw
                 .strip_prefix('@')
                 .map_or((raw, false), |command| (command.trim_start(), true));
@@ -199,7 +207,7 @@ impl Batch {
                 }));
             }
             return Ok(Some(Line {
-                command: frame.expand(command, errorlevel)?,
+                command: frame.expand(command, errorlevel, environment)?,
                 echo: self.echo && !quiet,
             }));
         }
@@ -246,7 +254,7 @@ impl Shell {
         let Some(batch) = self.batch.as_mut() else {
             return Ok(None);
         };
-        let Some(line) = batch.next(self.errorlevel)? else {
+        let Some(line) = batch.next(self.errorlevel, self.machine.environment())? else {
             self.batch = None;
             return Ok(None);
         };
@@ -293,7 +301,7 @@ impl Shell {
                 "ECHO" => return Ok(self.echo_batch(args)),
                 "MOUNT" | "IMGMOUNT" => return Err("mount host paths using the interactive shell or --mount before starting a batch file".into()),
                 "BOOT" => return Err("boot host disk images from the interactive shell".into()),
-                "FOR" | "SET" | "SETLOCAL" | "ENDLOCAL" | "SHIFT" | "PAUSE" | "CHOICE" => {
+                "FOR" | "SETLOCAL" | "ENDLOCAL" | "SHIFT" | "PAUSE" | "CHOICE" => {
                     return Err(format!("batch command {word} is unsupported").into());
                 }
                 _ => return self.execute(line),

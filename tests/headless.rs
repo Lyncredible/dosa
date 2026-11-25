@@ -150,6 +150,61 @@ fn rename_handles_dos_wildcards_without_overwriting_files() {
 }
 
 #[test]
+fn batch_environment_expands_and_reaches_a_guest_through_the_psp() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.0.join("ENV.COM"),
+        [
+            0x8e, 0x1e, 0x2c, 0, // MOV DS,[002Ch], PSP environment segment
+            0xbb, 1, 0, // MOV BX,1, standard output
+            0xb9, 0x80, 0, // MOV CX,128
+            0x31, 0xd2, 0xb4, 0x40, 0xcd, 0x21, // Write from DS:0000
+            0xb8, 0, 0x4c, 0xcd, 0x21, // Exit
+        ],
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("SETUP.BAT"),
+        b"@echo off\r\nset demo=discarded\r\nset DEMO=one=two  \r\necho [%demo%]\r\ncall CHILD.BAT\r\nenv.com\r\nset demo=\r\necho [%demo%]\r\nset\r\n",
+    )
+    .unwrap();
+    fs::write(fixture.0.join("CHILD.BAT"), b"echo child %DEMO%\r\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args([
+            "--mount",
+            &format!("C={}", fixture.0.display()),
+            "--headless",
+            "--exec",
+            "SETUP",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        output
+            .stdout
+            .starts_with(b"[one=two  ]\r\nchild one=two\r\n")
+    );
+    assert!(
+        output
+            .stdout
+            .windows(b"DEMO=one=two  \0".len())
+            .any(|part| part == b"DEMO=one=two  \0")
+    );
+    assert!(
+        output
+            .stdout
+            .windows(b"\0\0\x01\0C:\\ENV.COM\0".len())
+            .any(|part| part == b"\0\0\x01\0C:\\ENV.COM\0")
+    );
+    assert!(
+        output
+            .stdout
+            .ends_with(b"[]\r\nBLASTER=A220 I7 D1 T3\r\nCOMSPEC=COMMAND.COM\r\nPATH=\\\r\n")
+    );
+}
+
+#[test]
 fn dir_formats_wide_bare_and_lowercase_listings() {
     let fixture = Fixture::new();
     fs::create_dir(fixture.0.join("AAA")).unwrap();

@@ -20,6 +20,8 @@ const MOUNT_HELP: &str = "MOUNT drive [/ISO | /FAT | /RW | /SESSION] host-path\r
     /SESSION  Mount a temporary writable copy of a ZIP.\r\n";
 const MKDIR_HELP: &str = "MKDIR [drive:]path\r\nMD [drive:]path\r\nCreate a directory. The parent directory must exist.\r\n";
 const RMDIR_HELP: &str = "RMDIR [drive:]path\r\nRD [drive:]path\r\nRemove an empty directory. Change out of it first.\r\n";
+const SET_HELP: &str =
+    "SET [variable=[value]]\r\nList, set, or clear DOS environment variables.\r\n";
 
 pub enum Command {
     Print(Vec<u8>),
@@ -164,7 +166,11 @@ impl Shell {
     }
 
     pub fn execute(&mut self, line: &str) -> Result<Command, Box<dyn Error>> {
-        let (word, args) = split_word(line.trim())?;
+        let (word, args) = split_word(line.trim_start())?;
+        if word.eq_ignore_ascii_case("SET") {
+            return self.set_variable(args);
+        }
+        let args = args.trim_end();
         if let Some((command, _)) = word.split_once('/')
             && command.eq_ignore_ascii_case("DIR")
         {
@@ -179,6 +185,7 @@ impl Shell {
             "ECHO" => format!("{args}\r\n").into_bytes(),
             "REM" => return Ok(Command::Prompt),
             "HELP" if args.eq_ignore_ascii_case("MOUNT") => MOUNT_HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("SET") => SET_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("MD") || args.eq_ignore_ascii_case("MKDIR") => {
                 MKDIR_HELP.as_bytes().to_vec()
             }
@@ -194,6 +201,7 @@ impl Shell {
                 RD path                    Remove an empty directory (RMDIR)\r\n\
                 REN source name            Rename files (RENAME)\r\n\
                 TYPE file                  Print a file\r\n\
+                SET [variable=[value]]     Display or change environment variables\r\n\
                 MOUNT drive path           Mount host files or images (see HELP MOUNT)\r\n\
                 BOOT A|C path              Boot a floppy or hard disk image\r\n\
                 C:                         Switch drives\r\n\
@@ -258,6 +266,26 @@ impl Shell {
             }
         };
         Ok(Command::Print(output))
+    }
+
+    fn set_variable(&mut self, args: &str) -> Result<Command, Box<dyn Error>> {
+        if args.trim_end() == "/?" {
+            return Ok(Command::Print(SET_HELP.as_bytes().to_vec()));
+        }
+        if args.is_empty() {
+            let output = self
+                .machine
+                .environment()
+                .variables()
+                .map(|(name, value)| format!("{name}={value}\r\n"))
+                .collect::<String>();
+            return Ok(Command::Print(output.into_bytes()));
+        }
+        let (name, value) = args
+            .split_once('=')
+            .ok_or("usage: SET [variable=[value]]")?;
+        self.machine.environment_mut().set(name, value)?;
+        Ok(Command::Prompt)
     }
 
     fn change_directory_entry(&self, args: &str, create: bool) -> Result<Command, Box<dyn Error>> {

@@ -1,9 +1,9 @@
-use crate::{DosError, sound_blaster};
+use crate::{DosError, Environment, environment};
 use dosa_cpu::{Cpu, CpuProfile};
 
 pub(crate) const PSP: u16 = 0x1000;
 pub(crate) const CONVENTIONAL_END: u16 = 0xa000;
-const ENVIRONMENT: u16 = PSP - 0x22;
+const ENVIRONMENT: u16 = PSP - (environment::CAPACITY / 16) as u16;
 const LOAD: u16 = PSP + 0x10;
 
 pub(crate) fn load(
@@ -11,6 +11,7 @@ pub(crate) fn load(
     name: &str,
     args: &str,
     profile: CpuProfile,
+    environment: &Environment,
 ) -> Result<Cpu, DosError> {
     let mut cpu = Cpu::with_profile(profile);
     let args = if args.is_empty() {
@@ -22,14 +23,7 @@ pub(crate) fn load(
         return Err(DosError::InvalidCommandTail);
     }
 
-    let env = format!(
-        "PATH=\\\0COMSPEC=COMMAND.COM\0{}\0\0\x01\0{name}\0",
-        sound_blaster::ENVIRONMENT
-    );
-    if env.len() > usize::from(PSP - ENVIRONMENT) * 16 {
-        return Err(DosError::InvalidProgram("executable path is too long"));
-    }
-    cpu.load(ENVIRONMENT, 0, env.as_bytes());
+    cpu.load(ENVIRONMENT, 0, &environment.encode(name)?);
     cpu.load(PSP, 0, &[0xcd, 0x20]);
     cpu.write_u16(PSP, 2, CONVENTIONAL_END);
     cpu.write_u16(PSP, 0x16, PSP);
