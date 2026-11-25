@@ -1,5 +1,5 @@
 use crate::{
-    Entry, MAX_DEPTH, MountError, Result, lock,
+    DosTimestamp, Entry, MAX_DEPTH, MountError, Result, lock,
     names::{Child, assign_aliases, find_child, valid_component},
     read_bounded,
 };
@@ -19,10 +19,14 @@ const ZIP_COPY_LIMIT: u64 = 512 * 1024 * 1024;
 enum PendingNode {
     #[default]
     ImplicitDirectory,
-    Directory(BTreeMap<String, PendingNode>),
+    Directory {
+        children: BTreeMap<String, PendingNode>,
+        modified: Option<DosTimestamp>,
+    },
     File {
         index: usize,
         size: u64,
+        modified: Option<DosTimestamp>,
     },
 }
 
@@ -41,10 +45,13 @@ impl PendingNode {
             }
             return Ok(());
         };
-        if !matches!(self, Self::Directory(_)) {
-            *self = Self::Directory(BTreeMap::new());
+        if !matches!(self, Self::Directory { .. }) {
+            *self = Self::Directory {
+                children: BTreeMap::new(),
+                modified: None,
+            };
         }
-        let Self::Directory(children) = self else {
+        let Self::Directory { children, .. } = self else {
             unreachable!("directory created above");
         };
         let child = match children.entry((*head).to_owned()) {
@@ -58,26 +65,41 @@ impl PendingNode {
             }
         };
         // Prefer a directory over a file when both occupy the same name.
-        if tail.is_empty() && matches!(child, Self::Directory(_)) {
+        if tail.is_empty()
+            && let Self::Directory { modified, .. } = child
+        {
+            if let Self::Directory {
+                modified: Some(timestamp),
+                ..
+            } = leaf
+            {
+                *modified = Some(timestamp);
+            }
             return Ok(());
         }
         child.insert(tail, leaf, count)
     }
 
     fn finalize(self, name: String) -> Child<Node> {
-        let (item, is_dir, size) = match self {
-            Self::ImplicitDirectory => (Node::Directory(Vec::new()), true, 0),
-            Self::Directory(children) => {
+        let (item, is_dir, size, modified) = match self {
+            Self::ImplicitDirectory => (Node::Directory(Vec::new()), true, 0, None),
+            Self::Directory { children, modified } => {
                 let mut children: Vec<_> = children
                     .into_iter()
                     .map(|(name, node)| node.finalize(name))
                     .collect();
                 assign_aliases(&mut children);
-                (Node::Directory(children), true, 0)
+                (Node::Directory(children), true, 0, modified)
             }
-            Self::File { index, size } => (Node::File(index), false, size),
+            Self::File {
+                index,
+                size,
+                modified,
+            } => (Node::File(index), false, size, modified),
         };
-        Child::new(Entry::new(name, is_dir, size), item)
+        let mut entry = Entry::new(name, is_dir, size);
+        entry.modified = modified;
+        Child::new(entry, item)
     }
 }
 
@@ -108,12 +130,26 @@ impl ZipMount {
             if path.len() > MAX_DEPTH || !path.iter().all(|component| valid_component(component)) {
                 continue;
             }
+            let modified = file.last_modified().and_then(|time| {
+                DosTimestamp::from_fields(
+                    time.year(),
+                    time.month(),
+                    time.day(),
+                    time.hour(),
+                    time.minute(),
+                    time.second(),
+                )
+            });
             let node = if file.is_dir() {
-                PendingNode::Directory(BTreeMap::new())
+                PendingNode::Directory {
+                    children: BTreeMap::new(),
+                    modified,
+                }
             } else {
                 PendingNode::File {
                     index: id,
                     size: file.size(),
+                    modified,
                 }
             };
             index.insert(&path, node, &mut count)?;

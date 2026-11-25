@@ -90,8 +90,20 @@ fn fat_attributes_match_dir_filters_and_guest_find() {
         .find(|entry| &entry[..11] == b"MASKED  DAT")
         .unwrap();
     masked[11] = attributes::HIDDEN | attributes::SYSTEM;
+    masked[22..24].copy_from_slice(&0x7883u16.to_le_bytes());
+    masked[24..26].copy_from_slice(&0x285du16.to_le_bytes());
     let path = scratch.path().join("attribute fixture.img");
     std::fs::write(&path, image).unwrap();
+    let mount = Mount::open_fat_image(&path).unwrap();
+    assert_eq!(
+        mount
+            .metadata("MASKED.DAT")
+            .unwrap()
+            .modified
+            .unwrap()
+            .packed(),
+        (0x285d, 0x7883)
+    );
 
     // FindFirst hides the entry for CX=0, returns it for CX=6, and puts both
     // flags in the default DTA. Get Attributes returns the same bits in CX.

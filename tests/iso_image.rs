@@ -63,7 +63,8 @@ fn fixture() -> Vec<u8> {
     ]
     .concat();
     image[20 * SECTOR..20 * SECTOR + root_records.len()].copy_from_slice(&root_records);
-    let newer = directory_record(24, 11, false, b"NOTES.TXT;2");
+    let mut newer = directory_record(24, 11, false, b"NOTES.TXT;2");
+    newer[18..25].copy_from_slice(&[100, 2, 29, 15, 4, 6, 0]);
     image[21 * SECTOR..21 * SECTOR + newer.len()].copy_from_slice(&newer);
     let nested = [
         directory_record(22, 2048, true, &[0]),
@@ -95,6 +96,15 @@ fn mounts_generated_iso_via_cli_profile_shell_and_desktop() {
         ["BIN", "NOTES.TXT"]
     );
     assert!(!mount.is_writable() && mount.is_readonly("notes.txt").unwrap());
+    assert_eq!(
+        mount
+            .metadata("notes.txt")
+            .unwrap()
+            .modified
+            .unwrap()
+            .packed(),
+        (0x285d, 0x7883)
+    );
     assert!(mount.read("../NOTES.TXT").is_err());
 
     let profile = scratch.path().join("disc.toml");

@@ -1,7 +1,7 @@
 use std::{cmp::Ordering, error::Error, fmt::Write};
 
 use dosa_dos::{Video, matches_dos_pattern};
-use dosa_mount::{Entry, attributes};
+use dosa_mount::{DosTimestamp, Entry, attributes};
 
 use super::{Command, PAUSE_MESSAGE, PendingInput, Shell, split_word};
 
@@ -11,7 +11,7 @@ pub(super) const HELP: &str = "DIR [drive:][path][pattern] [/W] [/B] [/L] [/S] [
     /L  Show names in lowercase.\r\n\
     /S  Search subdirectories.\r\n\
     /P  Pause after each screen.\r\n\
-    /O  Sort by name (N), extension (E), size (S), or directory group (G).\r\n\
+    /O  Sort by name (N), extension (E), date (D), size (S), or directory group (G).\r\n\
         Prefix a sort letter with - to reverse it.\r\n\
     /A  Include hidden and system entries, or filter by H, S, D, A, or R.\r\n\
         Prefix an attribute with - to exclude it.\r\n\
@@ -148,6 +148,7 @@ struct SortKey {
 enum SortField {
     Name,
     Extension,
+    Date,
     Size,
     Directory,
 }
@@ -162,6 +163,7 @@ impl SortKey {
             let field = match if descending { chars.next() } else { Some(key) } {
                 Some('N') => SortField::Name,
                 Some('E') => SortField::Extension,
+                Some('D') => SortField::Date,
                 Some('S') => SortField::Size,
                 Some('G') => SortField::Directory,
                 _ => return Err(format!("invalid DIR sort order {order}").into()),
@@ -175,6 +177,7 @@ impl SortKey {
         let result = match self.field {
             SortField::Name => a.name.cmp(&b.name),
             SortField::Extension => extension(a).cmp(&extension(b)),
+            SortField::Date => a.modified.cmp(&b.modified),
             SortField::Size => a.size.cmp(&b.size),
             SortField::Directory => b.is_dir.cmp(&a.is_dir),
         };
@@ -388,14 +391,34 @@ fn format_listing(
         }
     } else {
         for Entry {
-            name, is_dir, size, ..
+            name,
+            is_dir,
+            size,
+            modified,
+            ..
         } in entries
         {
             if is_dir {
-                let _ = write!(text, "{name:<14} <DIR>\r\n");
+                let _ = write!(text, "{name:<14} {:>8}", "<DIR>");
             } else {
-                let _ = write!(text, "{name:<14} {size:>8}\r\n");
+                let _ = write!(text, "{name:<14} {size:>8}");
             }
+            if let Some(timestamp) = modified {
+                write_timestamp(text, timestamp);
+            }
+            text.push_str("\r\n");
         }
     }
+}
+
+fn write_timestamp(text: &mut String, timestamp: DosTimestamp) {
+    let (year, month, day) = timestamp.date();
+    let (hour, minute, _) = timestamp.time();
+    let suffix = if hour < 12 { 'a' } else { 'p' };
+    let hour = (hour + 11) % 12 + 1;
+    let _ = write!(
+        text,
+        "  {month:02}-{day:02}-{:02}  {hour:>2}:{minute:02}{suffix}",
+        year % 100
+    );
 }

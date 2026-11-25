@@ -411,11 +411,13 @@ impl Machine {
                 });
                 self.result(result);
             }
-            0x57 if al == 0 && self.files.is_open(bx) => {
-                self.cpu.regs.cx = 0;
-                self.cpu.regs.dx = 0x0021;
-                self.success();
-            }
+            0x57 if al == 0 => match self.files.modified(bx) {
+                Ok(timestamp) => {
+                    (self.cpu.regs.dx, self.cpu.regs.cx) = timestamp.packed();
+                    self.success();
+                }
+                Err(code) => self.failure(code),
+            },
             0x5a | 0x5b => self.failure(5),
             // File writes are committed before returning from AH=40h.
             0x68 if self.files.is_open(bx) => self.success(),
@@ -456,9 +458,12 @@ impl Machine {
                 let (segment, offset) = self.dta;
                 self.cpu
                     .write_u8(segment, offset.wrapping_add(0x15), attributes);
-                self.cpu.write_u16(segment, offset.wrapping_add(0x16), 0);
-                self.cpu
-                    .write_u16(segment, offset.wrapping_add(0x18), 0x0021);
+                let (date, time) = entry
+                    .modified
+                    .unwrap_or(dosa_mount::DosTimestamp::EPOCH)
+                    .packed();
+                self.cpu.write_u16(segment, offset.wrapping_add(0x16), time);
+                self.cpu.write_u16(segment, offset.wrapping_add(0x18), date);
                 let size = u32::try_from(entry.size).unwrap_or(u32::MAX);
                 self.cpu
                     .load(segment, offset.wrapping_add(0x1a), &size.to_le_bytes());

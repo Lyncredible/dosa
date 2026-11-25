@@ -4,6 +4,8 @@ mod fat_image;
 mod iso_image;
 pub use iso_image::ISO_SECTOR_BYTES;
 mod names;
+mod timestamp;
+pub use timestamp::DosTimestamp;
 mod writable;
 mod zip_mount;
 
@@ -44,6 +46,7 @@ pub struct Entry {
     pub size: u64,
     /// DOS attributes reported by the backing filesystem.
     pub attributes: u8,
+    pub modified: Option<DosTimestamp>,
 }
 
 impl Entry {
@@ -62,12 +65,17 @@ impl Entry {
             is_dir,
             size,
             attributes,
+            modified: None,
         }
     }
 
     fn from_host(name: String, metadata: &cap_std::fs::Metadata) -> Self {
         let is_dir = metadata.is_dir();
         let mut entry = Self::new(name, is_dir, if is_dir { 0 } else { metadata.len() });
+        entry.modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| DosTimestamp::from_host(time.into_std()));
         if metadata.permissions().readonly() && !is_dir {
             entry.attributes |= attributes::READ_ONLY;
         }
@@ -227,7 +235,9 @@ impl Mount {
                     .and_then(|name| name.to_str())
                     .filter(|name| valid_component(name))
                     .ok_or(MountError::UnsupportedSource)?;
-                let entry = Entry::new(name.to_owned(), false, file.metadata()?.len());
+                let metadata = file.metadata()?;
+                let mut entry = Entry::new(name.to_owned(), false, metadata.len());
+                entry.modified = metadata.modified().ok().and_then(DosTimestamp::from_host);
                 let mut child = Child::new(entry, Mutex::new(file));
                 assign_aliases(std::slice::from_mut(&mut child));
                 Source::SingleFile(child)
@@ -288,7 +298,9 @@ impl Mount {
             Source::SingleFile(child) => {
                 single_entry(child, &components, path)?;
                 let mut entry = child.entry.clone();
-                entry.size = lock(&child.item)?.metadata()?.len();
+                let metadata = lock(&child.item)?.metadata()?;
+                entry.size = metadata.len();
+                entry.modified = metadata.modified().ok().and_then(DosTimestamp::from_host);
                 Ok(entry)
             }
             Source::Zip(zip) => zip.metadata(&components, path),

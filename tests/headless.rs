@@ -660,6 +660,81 @@ fn batch_pause_reads_headless_input_and_confirms_cancellation() {
 }
 
 #[test]
+fn dos_file_dates_match_directory_sorting_and_guest_services() {
+    use std::fs::FileTimes;
+    use std::time::Duration;
+    use zip::write::SimpleFileOptions;
+
+    let fixture = Fixture::new();
+    let path = fixture.0.join("TIMES.ZIP");
+    let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+    for (name, timestamp) in [
+        (
+            "NEW.DAT",
+            zip::DateTime::from_date_and_time(2001, 1, 1, 0, 0, 0).unwrap(),
+        ),
+        (
+            "OLD.DAT",
+            zip::DateTime::from_date_and_time(2000, 2, 29, 15, 4, 6).unwrap(),
+        ),
+    ] {
+        zip.start_file(
+            name,
+            SimpleFileOptions::default().last_modified_time(timestamp),
+        )
+        .unwrap();
+        zip.write_all(b"x").unwrap();
+    }
+    zip.finish().unwrap();
+    let host_file = fs::File::create(fixture.0.join("OLD.DAT")).unwrap();
+    host_file
+        .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(951_836_646)))
+        .unwrap();
+
+    // FindFirst and Get File Date and Time must return 2000-02-29 15:04:06.
+    let mut probe = vec![
+        0xba, 0, 2, 0x31, 0xc9, 0xb4, 0x4e, 0xcd, 0x21, 0x73, 5, 0xb8, 1, 0x4c, 0xcd, 0x21, 0xa1,
+        0x96, 0, 0x3d, 0x83, 0x78, 0x74, 5, 0xb8, 2, 0x4c, 0xcd, 0x21, 0xa1, 0x98, 0, 0x3d, 0x5d,
+        0x28, 0x74, 5, 0xb8, 3, 0x4c, 0xcd, 0x21, 0xba, 0, 2, 0xb8, 0, 0x3d, 0xcd, 0x21, 0x73, 5,
+        0xb8, 4, 0x4c, 0xcd, 0x21, 0x89, 0xc3, 0xb8, 0, 0x57, 0xcd, 0x21, 0x73, 5, 0xb8, 5, 0x4c,
+        0xcd, 0x21, 0x81, 0xf9, 0x83, 0x78, 0x74, 5, 0xb8, 6, 0x4c, 0xcd, 0x21, 0x81, 0xfa, 0x5d,
+        0x28, 0x74, 5, 0xb8, 7, 0x4c, 0xcd, 0x21, 0xb8, 0, 0x4c, 0xcd, 0x21,
+    ];
+    probe.resize(0x100, 0);
+    probe.extend_from_slice(b"D:\\OLD.DAT\0");
+    fs::write(fixture.0.join("ZIPTIME.COM"), &probe).unwrap();
+    probe[0x100] = b'C';
+    fs::write(fixture.0.join("HOSTTIME.COM"), &probe).unwrap();
+
+    let c = format!("C={}", fixture.0.display());
+    let d = format!("D={}", path.display());
+    let run = |command: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([
+                "--mount-rw",
+                &c,
+                "--mount",
+                &d,
+                "--headless",
+                "--exec",
+                command,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{command}: {output:?}");
+        output.stdout
+    };
+    assert_eq!(run("DIR D:\\ /B/OD"), b"OLD.DAT\r\nNEW.DAT\r\n");
+    assert_eq!(run("DIR D:\\ /B/O-D"), b"NEW.DAT\r\nOLD.DAT\r\n");
+    for file in ["C:\\OLD.DAT", "D:\\OLD.DAT"] {
+        let listing = String::from_utf8(run(&format!("DIR {file}"))).unwrap();
+        assert!(listing.contains("02-29-00   3:04p"), "{listing}");
+    }
+    assert!(run("ZIPTIME").is_empty());
+    assert!(run("HOSTTIME").is_empty());
+}
+
+#[test]
 fn dir_formats_wide_bare_and_lowercase_listings() {
     let fixture = Fixture::new();
     fs::create_dir(fixture.0.join("AAA")).unwrap();

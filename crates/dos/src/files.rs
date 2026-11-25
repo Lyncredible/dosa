@@ -1,4 +1,6 @@
-use dosa_mount::{Entry, Mount, MountError, WritableFile, WriteDisposition, attributes};
+use dosa_mount::{
+    DosTimestamp, Entry, Mount, MountError, WritableFile, WriteDisposition, attributes,
+};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -18,7 +20,10 @@ struct File {
 }
 
 enum FileSource {
-    ReadOnly(Vec<u8>),
+    ReadOnly {
+        contents: Vec<u8>,
+        modified: Option<DosTimestamp>,
+    },
     Writable {
         file: WritableFile,
         readable: bool,
@@ -125,7 +130,13 @@ impl DosFiles {
                 readable: true,
                 writable: false,
             },
-            0 => FileSource::ReadOnly(self.read_file(mount, &path)?),
+            0 => {
+                let entry = mount.metadata(&path).map_err(mount_code)?;
+                FileSource::ReadOnly {
+                    contents: self.read_file(mount, &path, entry.size)?,
+                    modified: entry.modified,
+                }
+            }
             1 | 2 => FileSource::Writable {
                 file: mount
                     .open_writable_file(&path, WriteDisposition::OpenExisting)
@@ -217,17 +228,19 @@ impl DosFiles {
         Ok(())
     }
 
-    fn read_file(&self, mount: &Mount, path: &str) -> Result<Vec<u8>, u16> {
+    fn read_file(&self, mount: &Mount, path: &str, size: u64) -> Result<Vec<u8>, u16> {
         let remaining = MAX_OPEN_BYTES
             - self
                 .handles
                 .values()
                 .map(|f| match &f.source {
-                    FileSource::ReadOnly(bytes) => bytes.len() as u64,
+                    FileSource::ReadOnly {
+                        contents: bytes, ..
+                    } => bytes.len() as u64,
                     FileSource::Writable { .. } => 0,
                 })
                 .sum::<u64>();
-        if mount.metadata(path).map_err(mount_code)?.size > remaining {
+        if size > remaining {
             return Err(8);
         }
         let bytes = mount.read(path).map_err(mount_code)?;
@@ -251,6 +264,15 @@ impl DosFiles {
         self.handles.remove(&handle).map(|_| ()).ok_or(6)
     }
 
+    pub(crate) fn modified(&self, handle: u16) -> Result<DosTimestamp, u16> {
+        let file = self.handles.get(&handle).ok_or(6u16)?;
+        let modified = match &file.source {
+            FileSource::ReadOnly { modified, .. } => *modified,
+            FileSource::Writable { file, .. } => file.modified().map_err(mount_code)?,
+        };
+        Ok(modified.unwrap_or(DosTimestamp::EPOCH))
+    }
+
     pub(crate) fn is_open(&self, handle: u16) -> bool {
         self.handles.contains_key(&handle)
     }
@@ -261,7 +283,7 @@ impl DosFiles {
             Some(FileSource::Writable {
                 writable: false, ..
             }) => Err(5),
-            Some(FileSource::ReadOnly(_)) => Err(5),
+            Some(FileSource::ReadOnly { .. }) => Err(5),
             None => Err(6),
         }
     }
@@ -269,7 +291,9 @@ impl DosFiles {
     pub(crate) fn read(&mut self, handle: u16, length: usize) -> Result<Cow<'_, [u8]>, u16> {
         let file = self.handles.get_mut(&handle).ok_or(6u16)?;
         let data = match &file.source {
-            FileSource::ReadOnly(bytes) => Cow::Borrowed(read_slice(bytes, file.position, length)),
+            FileSource::ReadOnly {
+                contents: bytes, ..
+            } => Cow::Borrowed(read_slice(bytes, file.position, length)),
             FileSource::Writable {
                 file: source,
                 readable: true,
@@ -322,7 +346,9 @@ impl DosFiles {
             0 => 0,
             1 => file.position,
             2 => match &file.source {
-                FileSource::ReadOnly(bytes) => bytes.len(),
+                FileSource::ReadOnly {
+                    contents: bytes, ..
+                } => bytes.len(),
                 FileSource::Writable { file: source, .. } => {
                     source.length().map_err(mount_code)? as usize
                 }
