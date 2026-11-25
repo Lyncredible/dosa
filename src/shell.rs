@@ -7,6 +7,7 @@ use dosa_mount::Mount;
 
 mod batch;
 mod condition;
+mod delete;
 mod directory;
 mod for_loop;
 mod prompt;
@@ -32,6 +33,7 @@ pub enum Command {
     Launched,
     Clear,
     Pause,
+    Confirm(Vec<u8>),
     Prompt,
     Exit,
 }
@@ -41,6 +43,7 @@ pub struct Shell {
     drive: char,
     directories: BTreeMap<char, String>,
     batch: Option<Batch>,
+    deletion: Option<delete::Deletion>,
     errorlevel: u8,
     quick_launch: Option<QuickLaunch>,
 }
@@ -64,12 +67,16 @@ impl Shell {
             drive: 'C',
             directories: BTreeMap::new(),
             batch: None,
+            deletion: None,
             errorlevel: 0,
             quick_launch: None,
         }
     }
 
     pub fn mount(&mut self, drive: char, mount: Mount) -> Result<(), Box<dyn Error>> {
+        if self.confirmation_waiting() {
+            return Err(dosa_dos::DosError::Busy.into());
+        }
         let drive = drive.to_ascii_uppercase();
         let select = self.directories.is_empty();
         self.machine.mount(drive, mount)?;
@@ -81,6 +88,9 @@ impl Shell {
     }
 
     pub(crate) fn unmount(&mut self, drive: char) -> Result<(), dosa_dos::DosError> {
+        if self.confirmation_waiting() {
+            return Err(dosa_dos::DosError::Busy);
+        }
         let drive = drive.to_ascii_uppercase();
         self.machine.unmount(drive)?;
         self.directories.remove(&drive);
@@ -90,12 +100,17 @@ impl Shell {
         Ok(())
     }
 
+    pub(crate) fn command_active(&self) -> bool {
+        self.batch_active() || self.confirmation_waiting()
+    }
+
     pub fn current_drive(&self) -> char {
         self.drive
     }
 
     pub(crate) fn reset(&mut self) -> Result<(), dosa_dos::DosError> {
         self.batch = None;
+        self.deletion = None;
         self.errorlevel = 0;
         self.machine.reset();
         self.finish_quick_launch()?;
@@ -106,7 +121,7 @@ impl Shell {
     }
 
     pub(crate) fn quick_launch(&mut self, path: &Path) -> Result<Command, Box<dyn Error>> {
-        if self.batch_active() || self.quick_launch.is_some() {
+        if self.command_active() || self.quick_launch.is_some() {
             return Err(dosa_dos::DosError::Busy.into());
         }
         let drive = ('A'..='Z')
@@ -166,6 +181,9 @@ impl Shell {
     }
 
     pub fn execute(&mut self, line: &str) -> Result<Command, Box<dyn Error>> {
+        if self.confirmation_waiting() {
+            return Err(dosa_dos::DosError::Busy.into());
+        }
         let (word, args) = split_word(line.trim_start())?;
         if word.eq_ignore_ascii_case("SET") {
             return self.set_variable(args);
@@ -214,6 +232,9 @@ impl Shell {
             "HELP" if args.eq_ignore_ascii_case("RD") || args.eq_ignore_ascii_case("RMDIR") => {
                 RMDIR_HELP.as_bytes().to_vec()
             }
+            "HELP" if args.eq_ignore_ascii_case("DEL") || args.eq_ignore_ascii_case("ERASE") => {
+                delete::HELP.as_bytes().to_vec()
+            }
             "HELP" if args.eq_ignore_ascii_case("REN") || args.eq_ignore_ascii_case("RENAME") => {
                 rename::HELP.as_bytes().to_vec()
             }
@@ -222,6 +243,7 @@ impl Shell {
                 MD path                    Make a directory (MKDIR)\r\n\
                 RD path                    Remove an empty directory (RMDIR)\r\n\
                 REN source name            Rename files (RENAME)\r\n\
+                DEL path [/P]              Delete files (ERASE)\r\n\
                 TYPE file                  Print a file\r\n\
                 SET [variable=[value]]     Display or change environment variables\r\n\
                 PATH [directories]         Set the executable search path\r\n\
@@ -255,6 +277,7 @@ impl Shell {
             "RD" | "RMDIR" => return self.change_directory_entry(args, false),
             "PATH" => return self.path_command(args),
             "REN" | "RENAME" => return self.rename(args),
+            "DEL" | "ERASE" => return self.delete(args),
             "MOUNT" => self.mount_command(args, false)?,
             "IMGMOUNT" => self.mount_command(args, true)?,
             "BOOT" => {

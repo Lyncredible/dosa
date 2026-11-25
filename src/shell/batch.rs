@@ -277,6 +277,7 @@ impl Shell {
 
     /// Stop an active batch and attach its current source line to an error.
     pub fn guest_failed(&mut self, error: Box<dyn Error>) -> Box<dyn Error> {
+        self.deletion = None;
         self.errorlevel = 1;
         match self.batch.take() {
             Some(batch) => batch.contextualize(error),
@@ -286,7 +287,7 @@ impl Shell {
 
     /// Execute one batch line when no guest program is running or waiting for input.
     pub fn step_batch(&mut self) -> Result<Option<BatchStep>, Box<dyn Error>> {
-        if self.batch_waiting() {
+        if self.batch_waiting() || self.confirmation_waiting() {
             return Ok(None);
         }
         let result = self.step_batch_line();

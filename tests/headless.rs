@@ -150,6 +150,64 @@ fn rename_handles_dos_wildcards_without_overwriting_files() {
 }
 
 #[test]
+fn delete_dos_files_with_and_without_confirmation() {
+    use std::process::Stdio;
+
+    let fixture = Fixture::new();
+    let mount = format!("C={}", fixture.0.display());
+    let run = |access: &str, command: &str, answers: &[u8]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([access, &mount, "--headless", "--exec", command])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(answers).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let folder = fixture.0.join("FILES");
+    fs::create_dir(&folder).unwrap();
+    fs::create_dir(folder.join("KEEP.TXT")).unwrap();
+    fs::write(folder.join("A.TXT"), b"a").unwrap();
+    fs::write(folder.join("B.TXT"), b"b").unwrap();
+    fs::write(folder.join("C"), b"c").unwrap();
+    fs::write(
+        fixture.0.join("DELETE.BAT"),
+        b"@echo off\r\ndel FILES\\?.TXT /P\r\necho finished\r\n",
+    )
+    .unwrap();
+
+    let result = run("--mount", "DEL FILES\\A.TXT", b"");
+    assert!(!result.status.success(), "{result:?}");
+    assert!(folder.join("A.TXT").is_file());
+
+    let result = run("--mount-rw", "DELETE.BAT", b"n\r\ny");
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        result.stdout,
+        b"Delete C:\\FILES\\A.TXT (Y/N)? N\r\nDelete C:\\FILES\\B.TXT (Y/N)? Y\r\nfinished\r\n"
+    );
+    assert!(folder.join("A.TXT").is_file());
+    assert!(!folder.join("B.TXT").exists());
+
+    let result = run("--mount-rw", "DEL FILES\\*.*", b"");
+    assert!(!result.status.success(), "{result:?}");
+    assert!(folder.join("A.TXT").is_file());
+    let result = run("--mount-rw", "ERASE FILES", b"n");
+    assert!(result.status.success(), "{result:?}");
+    assert!(folder.join("C").is_file());
+
+    let result = run("--mount-rw", "ERASE FILES\\*.TXT", b"");
+    assert!(result.status.success(), "{result:?}");
+    assert!(!folder.join("A.TXT").exists());
+    let result = run("--mount-rw", "DEL FILES\\*", b"y");
+    assert!(result.status.success(), "{result:?}");
+    assert!(!folder.join("C").exists());
+    assert!(folder.join("KEEP.TXT").is_dir());
+}
+
+#[test]
 fn batch_environment_expands_and_reaches_a_guest_through_the_psp() {
     let fixture = Fixture::new();
     fs::write(

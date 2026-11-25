@@ -208,7 +208,7 @@ impl Desktop {
         let chars = paste_characters(text).take(MAX_PASTE_CHARS);
         if self.running {
             self.paste = chars.map(encode_cp437).collect();
-        } else if !self.shell.batch_active() {
+        } else if !self.shell.command_active() {
             for character in chars {
                 let character = if matches!(character, '\r' | '\t') {
                     ' '
@@ -225,7 +225,7 @@ impl Desktop {
         self.shell.machine.write_console(b"\r\n");
         let result = self.shell.execute(line);
         self.apply_command(result);
-        if !self.running && !self.exit && !self.shell.batch_active() {
+        if !self.running && !self.exit && !self.shell.command_active() {
             self.write_prompt();
         }
     }
@@ -240,6 +240,7 @@ impl Desktop {
             }
             Ok(Command::Clear) => self.shell.machine.clear_console(),
             Ok(Command::Pause) => self.shell.machine.write_console(PAUSE_MESSAGE),
+            Ok(Command::Confirm(prompt)) => self.shell.machine.write_console(&prompt),
             Ok(Command::Prompt) => {}
             Ok(Command::Exit) => {
                 self.exit = true;
@@ -274,7 +275,11 @@ impl Desktop {
                     break;
                 }
             }
-            if self.running || self.exit || self.shell.batch_waiting() {
+            if self.running
+                || self.exit
+                || self.shell.batch_waiting()
+                || self.shell.confirmation_waiting()
+            {
                 break;
             }
         }
@@ -386,7 +391,7 @@ impl Desktop {
             .drive(drive)
             .ok_or(dosa_dos::DosError::UnmountedDrive(drive))?
             .writable_zip_copy()?;
-        if self.running || self.shell.batch_active() {
+        if self.running || self.shell.command_active() {
             // The menu explicitly stops the current command. Prepare the copy first
             // so an extraction failure leaves the guest and original mount intact.
             self.shell.machine.stop();
@@ -409,7 +414,7 @@ impl Desktop {
                 self.set_paused(false);
                 self.paste.clear();
                 self.shell.machine.write_console(b"\r\n");
-                if !self.shell.batch_active() {
+                if !self.shell.command_active() {
                     self.finish_command();
                 }
             }
@@ -535,6 +540,7 @@ impl App for Desktop {
             && !self.exit
             && self.shell.batch_active()
             && !self.shell.batch_waiting()
+            && !self.shell.confirmation_waiting()
         {
             if self.recording.is_some() {
                 // Capture the last samples before the next guest resets the audio devices.
@@ -583,7 +589,7 @@ impl App for Desktop {
             text_mode: self.settings.text_mode,
             scaling: self.scaling,
             running: self.running,
-            batch_active: self.shell.batch_active(),
+            batch_active: self.shell.command_active(),
             text_visible: matches!(self.shell.machine.video(), Video::Text(_)),
             paste_pending: !self.paste.is_empty(),
             paused: self.paused,
@@ -600,7 +606,7 @@ impl App for Desktop {
     fn menu_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::CopyText => self.copy_screen_text(),
-            MenuAction::PasteText if self.running || !self.shell.batch_active() => {
+            MenuAction::PasteText if self.running || !self.shell.command_active() => {
                 match self.clipboard().and_then(arboard::Clipboard::get_text) {
                     Ok(text) => self.paste_text(&text),
                     Err(error) => self.status = format!("Paste failed: {error}"),
@@ -613,7 +619,7 @@ impl App for Desktop {
                     Err(error) => format!("ZIP copy failed: {error}"),
                 };
             }
-            MenuAction::QuickLaunch(path) if !self.running && !self.shell.batch_active() => {
+            MenuAction::QuickLaunch(path) if !self.running && !self.shell.command_active() => {
                 match self.shell.quick_launch(&path) {
                     Ok(command) => {
                         self.shell.machine.write_console(b"\r\n");
@@ -633,7 +639,7 @@ impl App for Desktop {
                 drive,
                 source,
                 kind,
-            } if !self.running && !self.shell.batch_active() => {
+            } if !self.running && !self.shell.command_active() => {
                 let previous = self.shell.prompt();
                 let result = match kind {
                     dosa_desktop::MountKind::SessionZip => Mount::open_session_zip(source),
@@ -652,7 +658,7 @@ impl App for Desktop {
                     Err(error) => format!("Mount failed: {error}"),
                 };
             }
-            MenuAction::Unmount(drive) if !self.running && !self.shell.batch_active() => {
+            MenuAction::Unmount(drive) if !self.running && !self.shell.command_active() => {
                 let previous = self.shell.prompt();
                 self.status = match self.shell.unmount(drive) {
                     Ok(()) => {
@@ -759,16 +765,30 @@ impl App for Desktop {
             self.shell.machine.key(ascii, event.scan_code);
             return;
         }
-        if self.shell.batch_active() {
-            if self.shell.batch_waiting() && event.key != Key::Other && !event.modifiers.logo {
+        if self.shell.command_active() {
+            if event.key != Key::Other && !event.modifiers.logo {
                 let key = match event.key {
                     Key::Character('c' | 'C') if event.modifiers.ctrl => 3,
                     Key::Character(character) if !event.modifiers.ctrl => encode_cp437(character),
+                    Key::Escape => 27,
                     _ => 0,
                 };
-                if let Some(response) = self.shell.resume_batch(key) {
+                if self.shell.confirmation_waiting() {
+                    let result = self.shell.resume_confirmation(key);
+                    match result {
+                        Ok(None) => return,
+                        Ok(Some(command)) => self.apply_command(Ok(command)),
+                        Err(error) => {
+                            self.shell.machine.write_console(b"\r\n");
+                            self.apply_command(Err(error));
+                        }
+                    }
+                    if !self.shell.command_active() {
+                        self.finish_command();
+                    }
+                } else if let Some(response) = self.shell.resume_batch(key) {
                     self.shell.machine.write_console(response);
-                    if !self.shell.batch_active() {
+                    if !self.shell.command_active() {
                         self.finish_command();
                     }
                 }
@@ -1369,6 +1389,36 @@ mod tests {
         cursor.cursor_mask[1] = 0x4000;
         draw_mouse_cursor(&mut pixels, 2, 1, &cursor);
         assert_eq!(pixels, [245, 235, 225, 255, 40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn desktop_delete_confirmation_waits_for_input_and_returns_to_the_prompt() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("TEST.TXT");
+        std::fs::write(&file, b"test").unwrap();
+        let mut shell = Shell::new();
+        shell
+            .mount('C', Mount::open_writable_directory(scratch.path()).unwrap())
+            .unwrap();
+        let mut desktop = Desktop::new(shell, Some("del TEST.TXT /p"));
+        desktop.tick();
+        assert!(desktop.shell.confirmation_waiting());
+        assert!(file.exists());
+        desktop.input(Input {
+            key: Key::Character('y'),
+            pressed: true,
+            text: Some("y".into()),
+            modifiers: Default::default(),
+            scan_code: 0x15,
+        });
+        assert!(!desktop.shell.confirmation_waiting());
+        assert!(!file.exists());
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected the text console");
+        };
+        let text = screen_text(frame);
+        assert!(text.contains("Delete C:\\TEST.TXT (Y/N)? Y"));
+        assert!(text.trim_end().ends_with("C:\\>"));
     }
 
     #[test]
