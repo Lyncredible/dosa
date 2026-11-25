@@ -10,6 +10,7 @@ use serde::Deserialize;
 pub struct LaunchProfile {
     pub mounts: Vec<StartupMount>,
     pub command: Option<String>,
+    pub midi_soundfont: Option<PathBuf>,
     pub settings: Settings,
 }
 
@@ -66,6 +67,7 @@ impl SettingsOverrides {
 #[serde(deny_unknown_fields)]
 struct ProfileFile {
     exec: Option<String>,
+    midi_soundfont: Option<PathBuf>,
     cpu: Option<CpuValue>,
     speed: Option<String>,
     text_rows: Option<u8>,
@@ -205,6 +207,7 @@ impl LaunchProfile {
         Ok(Self {
             mounts,
             command: profile.exec,
+            midi_soundfont: profile.midi_soundfont.map(|path| base.join(path)),
             settings,
         })
     }
@@ -267,6 +270,19 @@ pub fn parse_text_rows(value: &str) -> Result<TextMode, String> {
 #[cfg(test)]
 mod wide_tests {
     use super::*;
+
+    #[test]
+    fn midi_soundfont_paths_resolve_relative_to_the_profile() {
+        let profile = LaunchProfile::parse(
+            "midi_soundfont = \"music.sf2\"",
+            Path::new("profiles/demo.toml"),
+        )
+        .unwrap();
+        assert_eq!(
+            profile.midi_soundfont,
+            Some(Path::new("profiles").join("music.sf2"))
+        );
+    }
 
     #[test]
     fn ansi_text_requires_opt_in_and_can_be_overridden() {

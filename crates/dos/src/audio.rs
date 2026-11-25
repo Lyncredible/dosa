@@ -4,7 +4,9 @@ use std::{collections::VecDeque, time::Duration};
 
 use dosa_cpu::Cpu;
 
-use crate::{adlib::Adlib, dma::Dma, pit, sound_blaster::SoundBlaster, speaker::Speaker};
+use crate::{
+    adlib::Adlib, dma::Dma, mpu401::Mpu401, pit, sound_blaster::SoundBlaster, speaker::Speaker,
+};
 
 pub(super) const SAMPLE_RATE: u64 = crate::AUDIO_SAMPLE_RATE as u64;
 const MAX_SAMPLES: usize = SAMPLE_RATE as usize / 5;
@@ -14,6 +16,7 @@ pub(super) struct Audio {
     adlib: Adlib,
     dma: Dma,
     sound_blaster: SoundBlaster,
+    pub(super) mpu: Mpu401,
     sample: u64,
     samples: VecDeque<f32>,
 }
@@ -25,9 +28,19 @@ impl Audio {
             adlib: Adlib::new(),
             dma: Dma::default(),
             sound_blaster: SoundBlaster::default(),
+            mpu: Mpu401::default(),
             sample: sample_at(elapsed),
             samples: VecDeque::new(),
         }
+    }
+
+    pub fn restart(&mut self, elapsed: Duration) {
+        let mut mpu = std::mem::take(&mut self.mpu);
+        mpu.reset();
+        *self = Self {
+            mpu,
+            ..Self::new(elapsed)
+        };
     }
 
     pub fn advance(&mut self, elapsed: Duration, cpu: &Cpu) {
@@ -38,20 +51,28 @@ impl Audio {
                 .advance(start - self.sample, &mut self.dma, cpu);
             self.sample = start;
         }
+        let mut left = [0.0; 64];
+        let mut right = [0.0; 64];
         while self.sample < end {
-            // Sample at the end of each PCM interval. The prior advance may
-            // have committed a PIT reload partway through this interval.
-            let tick =
-                (u128::from(self.sample + 1) * pit::FREQUENCY / u128::from(SAMPLE_RATE)) as u64;
-            self.sound_blaster.advance(1, &mut self.dma, cpu);
-            let value =
-                (self.speaker.sample(tick) + self.adlib.sample() + self.sound_blaster.sample())
+            let count = (end - self.sample).min(left.len() as u64) as usize;
+            self.mpu.render(&mut left[..count], &mut right[..count]);
+            for (&left, &right) in left[..count].iter().zip(&right[..count]) {
+                // Sample at the end of each PCM interval. The prior advance may
+                // have committed a PIT reload partway through this interval.
+                let tick =
+                    (u128::from(self.sample + 1) * pit::FREQUENCY / u128::from(SAMPLE_RATE)) as u64;
+                self.sound_blaster.advance(1, &mut self.dma, cpu);
+                let value = (self.speaker.sample(tick)
+                    + self.adlib.sample()
+                    + self.sound_blaster.sample()
+                    + (left + right) * 0.5)
                     .clamp(-1.0, 1.0);
-            if self.samples.len() == MAX_SAMPLES {
-                self.samples.pop_front();
+                if self.samples.len() == MAX_SAMPLES {
+                    self.samples.pop_front();
+                }
+                self.samples.push_back(value);
+                self.sample += 1;
             }
-            self.samples.push_back(value);
-            self.sample += 1;
         }
         self.speaker.advance(pit::ticks(elapsed));
     }
@@ -73,6 +94,7 @@ impl Audio {
             .read_port(port)
             .or_else(|| self.dma.read_port(port))
             .or_else(|| self.sound_blaster.read_port(port))
+            .or_else(|| self.mpu.read_port(port))
             .or_else(|| {
                 self.adlib
                     .read_port(adlib_port(port), elapsed.as_micros() as u64)
@@ -89,7 +111,8 @@ impl Audio {
                 .transfer_identification(&mut self.dma, cpu);
             return true;
         }
-        self.speaker.write_port(port, value)
+        self.mpu.write_port(port, value)
+            || self.speaker.write_port(port, value)
             || self
                 .adlib
                 .write_port(adlib_port(port), value, elapsed.as_micros() as u64)
