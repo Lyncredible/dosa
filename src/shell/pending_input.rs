@@ -42,6 +42,23 @@ impl Shell {
     }
 
     pub fn resume_input(&mut self, key: u8) -> Result<Option<Command>, Box<dyn Error>> {
+        let result = self.resume_input_unredirected(key)?;
+        match (result, self.pending_redirects.take()) {
+            (Some(command), Some(io)) => self
+                .apply_redirection(io, command)
+                .map(Some)
+                .map_err(|error| self.guest_failed(error)),
+            (result, io) => {
+                self.pending_redirects = io;
+                Ok(result)
+            }
+        }
+    }
+
+    pub(super) fn resume_input_unredirected(
+        &mut self,
+        key: u8,
+    ) -> Result<Option<Command>, Box<dyn Error>> {
         let Some(pending) = self.pending_input.take() else {
             return Ok(None);
         };

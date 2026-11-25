@@ -150,6 +150,103 @@ fn rename_handles_dos_wildcards_without_overwriting_files() {
 }
 
 #[test]
+fn shell_redirects_files_devices_and_batch_commands() {
+    use std::process::Stdio;
+
+    let fixture = Fixture::new();
+    let readonly = fixture.0.join("readonly");
+    fs::create_dir(&readonly).unwrap();
+    fs::write(readonly.join("INPUT.DAT"), b"A\x00\x1aZ").unwrap();
+    fs::write(readonly.join("KEYS.TXT"), b"one\r\ntwo\r\n\x1a\r\n").unwrap();
+    let filter = [
+        0x31, 0xdb, 0xb9, 8, 0, 0xba, 0, 2, 0xb4, 0x3f, 0xcd, 0x21, // read stdin
+        0x73, 5, 0xb8, 1, 0x4c, 0xcd, 0x21, 0x89, 0xc1, 0xbb, 1, 0, 0xb4, 0x40, 0xcd,
+        0x21, // copy bytes to stdout
+        0x73, 5, 0xb8, 2, 0x4c, 0xcd, 0x21, 0xb8, 0, 0x4c, 0xcd, 0x21,
+    ];
+    fs::write(fixture.0.join("FILTER.COM"), filter).unwrap();
+    fs::write(
+        fixture.0.join("RUN.BAT"),
+        b"@echo off\r\necho first>LOG.TXT\r\nif exist LOG.TXT echo second>>LOG.TXT\r\nfilter <D:INPUT.DAT >COPY.DAT\r\ncopy con NOTE.TXT <D:KEYS.TXT >NUL\r\necho done\r\n",
+    )
+    .unwrap();
+    let c = format!("C={}", fixture.0.display());
+    let d = format!("D={}", readonly.display());
+    let run = |command: &str, stdin: &[u8]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([
+                "--headless",
+                "--mount-rw",
+                &c,
+                "--mount",
+                &d,
+                "--exec",
+                command,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin).unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    let batch = run("RUN", b"");
+    assert!(batch.status.success(), "{batch:?}");
+    assert_eq!(batch.stdout, b"done\r\n");
+    assert_eq!(
+        fs::read(fixture.0.join("LOG.TXT")).unwrap(),
+        b"first\r\nsecond\r\n"
+    );
+    assert_eq!(fs::read(fixture.0.join("COPY.DAT")).unwrap(), b"A\x00\x1aZ");
+    assert_eq!(
+        fs::read(fixture.0.join("NOTE.TXT")).unwrap(),
+        b"one\r\ntwo\r\n"
+    );
+
+    let discard = run("ECHO quiet>NUL", b"");
+    assert!(
+        discard.status.success() && discard.stdout.is_empty(),
+        "{discard:?}"
+    );
+    let literal = run("ECHO \"a>b\"", b"");
+    assert_eq!(literal.stdout, b"\"a>b\"\r\n");
+    let append = run("<D:INPUT.DAT FILTER>>COPY.DAT", b"");
+    assert!(
+        append.status.success() && append.stdout.is_empty(),
+        "{append:?}"
+    );
+    assert_eq!(
+        fs::read(fixture.0.join("COPY.DAT")).unwrap(),
+        b"A\x00\x1aZA\x00\x1aZ"
+    );
+    let confirmation = run("COPY /-Y D:INPUT.DAT COPY.DAT >PROMPT.TXT", b"n");
+    assert!(
+        confirmation.status.success() && confirmation.stdout.is_empty(),
+        "{confirmation:?}"
+    );
+    assert_eq!(
+        fs::read(fixture.0.join("PROMPT.TXT")).unwrap(),
+        b"Overwrite C:\\COPY.DAT (Y/N)? N\r\n0 file(s) copied.\r\n"
+    );
+
+    for command in [
+        "ECHO hello >",
+        "ECHO hello >X.TXT >Y.TXT",
+        "ECHO no >D:BAD.TXT",
+        "FILTER <D:MISSING >SAFE.TXT",
+    ] {
+        let result = run(command, b"");
+        assert!(!result.status.success(), "{command}: {result:?}");
+    }
+    for name in ["X.TXT", "Y.TXT", "SAFE.TXT"] {
+        assert!(!fixture.0.join(name).exists(), "{name}");
+    }
+    assert!(!readonly.join("BAD.TXT").exists());
+}
+
+#[test]
 fn legacy_character_input_follows_redirected_stdin_until_eof() {
     let fixture = Fixture::new();
     fs::write(fixture.0.join("INPUT.DAT"), b"A\x00\x03BFirst\r\nPartial").unwrap();
@@ -1810,7 +1907,7 @@ fn batch_errors_keep_line_context_and_bound_calls_and_loops() {
         (
             "@echo off\necho hello | second\n",
             "case",
-            "pipes, redirection",
+            "batch pipes and command chaining",
         ),
         ("@echo off\ncrash\n", "case", "instruction"),
     ] {

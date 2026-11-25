@@ -40,7 +40,7 @@ pub use clock::DosClock;
 pub use code_page::CodePage;
 use dosa_cpu::{Cpu, CpuError, Step};
 pub use dosa_cpu::{CpuProfile, Registers};
-use dosa_mount::{Mount, MountError};
+use dosa_mount::{FileWriteOptions, Mount, MountError};
 pub use environment::Environment;
 use files::DosFiles;
 use keyboard::{KEYBOARD_VECTOR, Keyboard, MAX_KEYS};
@@ -62,6 +62,7 @@ pub enum DosError {
     InvalidDrive(char),
     UnmountedDrive(char),
     InvalidCommandTail,
+    Redirection { path: String, code: u16 },
     InvalidEnvironment(&'static str),
     InvalidProgram(&'static str),
     Busy,
@@ -82,6 +83,9 @@ impl fmt::Display for DosError {
                 f,
                 "command tail must be at most 126 ASCII bytes including its leading space"
             ),
+            Self::Redirection { path, code } => {
+                write!(f, "cannot redirect {path}: DOS error {code}")
+            }
             Self::InvalidProgram(message) | Self::InvalidEnvironment(message) => {
                 f.write_str(message)
             }
@@ -165,6 +169,17 @@ impl PendingCall {
     fn returned(self, cpu: &Cpu) -> bool {
         self.address == (cpu.regs.cs, cpu.regs.ip) && self.stack == (cpu.regs.ss, cpu.regs.sp)
     }
+}
+
+/// Standard handles prepared for one command.
+pub struct ShellIo {
+    files: DosFiles,
+}
+
+pub enum ShellInput {
+    Console,
+    Eof,
+    Byte(u8),
 }
 
 pub struct Machine {
@@ -388,6 +403,103 @@ impl Machine {
         self.launch_with_files(normalize_drive(drive)?, path, args, files)
     }
 
+    /// Open shell stream redirections using the DOS working directories and mounted drives.
+    pub fn prepare_shell_io(
+        &self,
+        current_drive: char,
+        directories: &BTreeMap<char, String>,
+        input: Option<&str>,
+        output: Option<(&str, bool)>,
+    ) -> Result<ShellIo, DosError> {
+        let mut files =
+            DosFiles::with_directories(normalize_drive(current_drive)?, directories.clone());
+        if let Some(path) = input {
+            let redirect = (|| {
+                let handle = files.open(&self.mounts, path, 0)?;
+                files.duplicate_to(handle, 0)?;
+                files.close(handle)
+            })();
+            redirect.map_err(|code| DosError::Redirection {
+                path: path.to_owned(),
+                code,
+            })?;
+        }
+        if let Some((path, append)) = output {
+            let redirect = (|| {
+                let handle = if append {
+                    match files.open(&self.mounts, path, 1) {
+                        Ok(handle) => {
+                            files.seek(handle, 2, 0)?;
+                            handle
+                        }
+                        Err(2) => files.create(&self.mounts, path, self.adjusted_file_time())?,
+                        Err(code) => return Err(code),
+                    }
+                } else {
+                    files.create(&self.mounts, path, self.adjusted_file_time())?
+                };
+                files.duplicate_to(handle, 1)?;
+                files.close(handle)
+            })();
+            redirect.map_err(|code| DosError::Redirection {
+                path: path.to_owned(),
+                code,
+            })?;
+        }
+        Ok(ShellIo { files })
+    }
+
+    /// Write builtin output to the redirected handle. Return false for display output.
+    pub fn write_shell_stdout(&self, io: &mut ShellIo, bytes: &[u8]) -> Result<bool, DosError> {
+        let write = || FileWriteOptions {
+            modified: self.adjusted_file_time(),
+            verify: self.verify_writes(),
+        };
+        let result = match io.files.output_target(1) {
+            Ok(files::HandleTarget::Console) => return Ok(false),
+            Ok(files::HandleTarget::Null) => Ok(()),
+            Ok(files::HandleTarget::File(handle)) if !bytes.is_empty() => {
+                io.files.write(handle, bytes, write())
+            }
+            Ok(files::HandleTarget::File(_)) => Ok(()),
+            Err(code) => Err(code),
+        };
+        result.map(|()| true).map_err(|code| DosError::Redirection {
+            path: "stdout".into(),
+            code,
+        })
+    }
+
+    /// Read one byte of redirected builtin input without consuming host keyboard events.
+    pub fn read_shell_stdin(&self, io: &mut ShellIo) -> Result<ShellInput, DosError> {
+        let result = match io.files.input_target(0) {
+            Ok(files::HandleTarget::Console) => Ok(ShellInput::Console),
+            Ok(files::HandleTarget::Null) => Ok(ShellInput::Eof),
+            Ok(files::HandleTarget::File(handle)) => io.files.read(handle, 1).map(|bytes| {
+                bytes
+                    .first()
+                    .copied()
+                    .map_or(ShellInput::Eof, ShellInput::Byte)
+            }),
+            Err(code) => Err(code),
+        };
+        result.map_err(|code| DosError::Redirection {
+            path: "stdin".into(),
+            code,
+        })
+    }
+
+    /// Start a shell program with its prepared standard handles.
+    pub fn launch_with_shell_io(
+        &mut self,
+        drive: char,
+        path: &str,
+        args: &str,
+        io: ShellIo,
+    ) -> Result<(), DosError> {
+        self.launch_with_files(normalize_drive(drive)?, path, args, io.files)
+    }
+
     fn launch_with_files(
         &mut self,
         drive: char,
@@ -407,7 +519,8 @@ impl Machine {
         } else {
             format!("{drive}:\\{parent}\\{}", entry.name)
         };
-        let cpu = loader::load(&bytes, &name, args, self.cpu_profile, &self.environment)?;
+        let mut cpu = loader::load(&bytes, &name, args, self.cpu_profile, &self.environment)?;
+        cpu.load(PSP, 0x18, &files.psp_handles());
         self.start(cpu, files);
         Ok(())
     }

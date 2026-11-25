@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
 
-use dosa_dos::{BootDrive, CodePage, DOS_VERSION, Machine};
+use dosa_dos::{BootDrive, CodePage, DOS_VERSION, Machine, ShellIo};
 use dosa_mount::Mount;
 
 mod batch;
@@ -14,6 +14,7 @@ mod directory;
 mod for_loop;
 mod pending_input;
 mod prompt;
+mod redirection;
 mod rename;
 mod search_path;
 mod volume;
@@ -55,6 +56,7 @@ pub struct Shell {
     directories: BTreeMap<char, String>,
     batch: Option<Batch>,
     pending_input: Option<PendingInput>,
+    pending_redirects: Option<ShellIo>,
     errorlevel: u8,
     quick_launch: Option<QuickLaunch>,
 }
@@ -79,6 +81,7 @@ impl Shell {
             directories: BTreeMap::new(),
             batch: None,
             pending_input: None,
+            pending_redirects: None,
             errorlevel: 0,
             quick_launch: None,
         }
@@ -122,6 +125,7 @@ impl Shell {
     pub(crate) fn reset(&mut self) -> Result<(), dosa_dos::DosError> {
         self.batch = None;
         self.pending_input = None;
+        self.pending_redirects = None;
         self.errorlevel = 0;
         self.machine.reset();
         self.finish_quick_launch()?;
@@ -195,6 +199,20 @@ impl Shell {
         if self.input_waiting() {
             return Err(dosa_dos::DosError::Busy.into());
         }
+        let (word, _) = split_word(line.trim_start())?;
+        if !word.eq_ignore_ascii_case("FOR")
+            && let Some(request) = redirection::parse(line)?
+        {
+            return self.execute_redirected(request, false);
+        }
+        self.execute_command(line, &mut None)
+    }
+
+    fn execute_command(
+        &mut self,
+        line: &str,
+        io: &mut Option<ShellIo>,
+    ) -> Result<Command, Box<dyn Error>> {
         let (word, args) = split_word(line.trim_start())?;
         if word.eq_ignore_ascii_case("SET") {
             return self.set_variable(args);
@@ -279,6 +297,7 @@ impl Shell {
                 C:                         Switch drives\r\n\
                 CLS                        Clear the screen\r\n\
                 EXIT                       Close Dosa\r\n\
+                Use < file, > file, or >> file to redirect command input and output.\r\n\
                 Enter a COM, EXE, or BAT name and arguments to run it.\r\n"
                 .to_vec(),
             "DIR" => return self.directory(args),
@@ -393,16 +412,24 @@ impl Shell {
                 }
                 let (drive, executable) = self.find_program(word, &["COM", "EXE", "BAT"])?;
                 if batch::is_batch(&executable) {
+                    if io.is_some() {
+                        return Err("redirect individual commands inside the batch file".into());
+                    }
                     self.launch_batch(drive, &executable, word, args, false)?;
                     return Ok(Command::Prompt);
                 }
-                self.machine.launch_from_shell(
-                    drive,
-                    &executable,
-                    args,
-                    self.drive,
-                    &self.directories,
-                )?;
+                if let Some(io) = io.take() {
+                    self.machine
+                        .launch_with_shell_io(drive, &executable, args, io)?;
+                } else {
+                    self.machine.launch_from_shell(
+                        drive,
+                        &executable,
+                        args,
+                        self.drive,
+                        &self.directories,
+                    )?;
+                }
                 return Ok(Command::Launched);
             }
         };

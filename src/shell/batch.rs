@@ -284,6 +284,7 @@ impl Shell {
     /// Stop an active batch and attach its current source line to an error.
     pub fn guest_failed(&mut self, error: Box<dyn Error>) -> Box<dyn Error> {
         self.pending_input = None;
+        self.pending_redirects = None;
         self.errorlevel = 1;
         match self.batch.take() {
             Some(batch) => batch.contextualize(error),
@@ -356,16 +357,20 @@ impl Shell {
         for character in line.chars() {
             match character {
                 '"' => quoted = !quoted,
-                '|' | '<' | '>' | '&' if !quoted => {
-                    return Err(
-                        "batch pipes, redirection, and command chaining are unsupported".into(),
-                    );
+                '|' | '&' if !quoted => {
+                    return Err("batch pipes and command chaining are unsupported".into());
                 }
                 _ => {}
             }
         }
         loop {
             let (word, args) = split_word(line.trim())?;
+            if !word.eq_ignore_ascii_case("IF")
+                && !word.eq_ignore_ascii_case("FOR")
+                && let Some(request) = super::redirection::parse(line)?
+            {
+                return self.execute_redirected(request, true);
+            }
             match word.to_ascii_uppercase().as_str() {
                 "IF" | "PAUSE" | "FOR" if args == "/?" => return self.execute(line),
                 "IF" => {
@@ -422,7 +427,7 @@ impl Shell {
         }
     }
 
-    fn echo_batch(&mut self, args: &str) -> Command {
+    pub(super) fn echo_batch(&mut self, args: &str) -> Command {
         let batch = self.batch.as_mut().expect("executing a batch command");
         if args.eq_ignore_ascii_case("OFF") || args.eq_ignore_ascii_case("ON") {
             batch.echo = args.eq_ignore_ascii_case("ON");
