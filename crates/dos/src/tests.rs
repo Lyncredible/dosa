@@ -52,6 +52,33 @@ fn guest_display_detection_agrees_with_bios_equipment_word() {
 }
 
 #[test]
+fn redirected_break_and_null_input_do_not_wait_for_the_keyboard() {
+    let directory = Directory::new("redirect-input");
+    directory.write("INPUT.COM", &[0xeb, 0xfe]);
+    directory.write("CTRL.DAT", &[3]);
+    let mut machine = directory.machine();
+    machine.launch('C', "INPUT.COM", "").unwrap();
+
+    let null = machine.files.open(&machine.mounts, "NUL", 0).unwrap();
+    machine.files.duplicate_to(null, 0).unwrap();
+    machine.key(b'Q', 0x10);
+    machine.cpu.regs.ax = 0x0800;
+    machine.interrupt(0x21).unwrap();
+    assert_eq!(machine.cpu.regs.ax as u8, 0);
+    assert_eq!(machine.state, RunState::Running);
+    machine.cpu.regs.ax = 0x0c07;
+    machine.interrupt(0x21).unwrap();
+    assert_eq!(machine.keys.front().copied(), Some((b'Q', 0x10)));
+
+    let input = machine.files.open(&machine.mounts, "CTRL.DAT", 0).unwrap();
+    machine.files.duplicate_to(input, 0).unwrap();
+    machine.set_extended_break(true);
+    machine.cpu.regs.ax = 0x0800;
+    machine.interrupt(0x21).unwrap();
+    assert_eq!(machine.state, RunState::Exited(3));
+}
+
+#[test]
 fn dos_keyboard_echo_obeys_redirected_stdout() {
     let directory = Directory::new("redirect-echo");
     directory.write("ECHO.COM", &[0xeb, 0xfe]);

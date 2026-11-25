@@ -150,6 +150,59 @@ fn rename_handles_dos_wildcards_without_overwriting_files() {
 }
 
 #[test]
+fn legacy_character_input_follows_redirected_stdin_until_eof() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("INPUT.DAT"), b"A\x00\x03BFirst\r\nPartial").unwrap();
+    let mut code = Vec::new();
+    for (index, (setup, check, branch)) in [
+        (&[0xba, 0, 3, 0xb8, 0, 0x3d][..], &[][..], 0x73), // open input
+        (&[0x89, 0xc3, 0x31, 0xc9, 0xb4, 0x46][..], &[][..], 0x73), // replace stdin
+        (&[0xb4, 0x0b][..], &[0x3c, 0xff][..], 0x74),      // input exists
+        (&[0xb4, 1][..], &[0x3c, b'A'][..], 0x74),         // read and echo A
+        (&[0xb2, 0xff, 0xb4, 6][..], &[][..], 0x75),       // zero byte is data
+        (&[0xb4, 8][..], &[0x3c, 3][..], 0x74),            // Ctrl+C is data with BREAK OFF
+        (&[0xb8, 7, 0x0c][..], &[0x3c, b'B'][..], 0x74),   // flush then read B
+        (
+            &[0xc6, 6, 0x20, 3, 16, 0xba, 0x20, 3, 0xb4, 0x0a][..],
+            &[0x81, 0x3e, 0x21, 3, 5, b'F'][..],
+            0x74,
+        ), // read the first line
+        (
+            &[0xba, 0x20, 3, 0xb4, 0x0a][..],
+            &[0x81, 0x3e, 0x21, 3, 7, b'P'][..],
+            0x74,
+        ), // finish the partial line at EOF
+        (
+            &[0xba, 0x20, 3, 0xb4, 0x0a][..],
+            &[0x81, 0x3e, 0x21, 3, 0, 13][..],
+            0x74,
+        ), // empty line on repeat
+        (&[0xb4, 0x0b][..], &[0x3c, 0][..], 0x74),         // no data remains
+        (&[0xb2, 0xff, 0xb4, 6][..], &[][..], 0x74),       // polling at EOF sets ZF
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        code.extend_from_slice(setup);
+        code.extend([0xcd, 0x21]);
+        code.extend_from_slice(check);
+        code.extend([branch, 5, 0xb8, index as u8 + 1, 0x4c, 0xcd, 0x21]);
+    }
+    code.extend([0xb8, 0, 0x4c, 0xcd, 0x21]);
+    code.resize(0x200, 0);
+    code.extend_from_slice(b"INPUT.DAT\0");
+    fs::write(fixture.0.join("READIN.COM"), code).unwrap();
+
+    let mount = format!("C={}", fixture.0.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args(["--headless", "--mount", &mount, "--exec", "READIN"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"AFirst\r\nPartial");
+}
+
+#[test]
 fn legacy_character_output_follows_redirected_stdout() {
     let fixture = Fixture::new();
     let mut program = vec![

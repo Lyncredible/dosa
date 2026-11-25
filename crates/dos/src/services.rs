@@ -1,7 +1,7 @@
 use crate::{CONVENTIONAL_END, DosError, Machine, PSP, Pending, PendingCall, RunState, ZERO};
 use crate::{
     CodePage, DOS_VERSION,
-    files::{DosDevice, OutputTarget},
+    files::{DosDevice, HandleTarget},
 };
 use dosa_mount::{Allocation, Entry};
 
@@ -77,6 +77,21 @@ impl Machine {
         match pending {
             Pending::Dos { ah, al } => return self.dos(ah, al),
             Pending::Line => return self.read_line(),
+            Pending::Console { echo, check_break } if !self.console_stdin() => {
+                if let Some(value) = self.read_redirected_byte() {
+                    if value == 3 && check_break && self.extended_break() {
+                        self.raise_break(pending);
+                        return;
+                    }
+                    self.set_al(value);
+                    if echo {
+                        self.write_stdout(&[value]);
+                    }
+                } else {
+                    self.set_al(0);
+                }
+                return;
+            }
             _ => {}
         }
         if matches!(
@@ -117,6 +132,11 @@ impl Machine {
             return false;
         }
         self.keys.pop_front();
+        self.raise_break(resume);
+        true
+    }
+
+    fn raise_break(&mut self, resume: Pending) {
         self.emit(b"^C\r\n");
         if self.has_interrupt_handler(0x23) {
             // DOS resumes the interrupted service when the guest handler returns by IRET.
@@ -125,7 +145,25 @@ impl Machine {
         } else {
             self.exit(3);
         }
-        true
+    }
+
+    fn console_stdin(&self) -> bool {
+        matches!(self.files.input_target(0), Ok(HandleTarget::Console))
+    }
+
+    fn read_redirected_byte(&mut self) -> Option<u8> {
+        if let Ok(HandleTarget::File(handle)) = self.files.input_target(0) {
+            return self.files.read(handle, 1).ok()?.first().copied();
+        }
+        None
+    }
+
+    fn input_status(&self, handle: u16) -> bool {
+        match self.files.input_target(handle) {
+            Ok(HandleTarget::Console) => !self.keys.is_empty(),
+            Ok(HandleTarget::File(file)) => self.files.available(file),
+            _ => false,
+        }
     }
 
     fn console_key(&mut self, ascii: u8, scan: u8) -> u8 {
@@ -143,38 +181,74 @@ impl Machine {
     fn read_line(&mut self) {
         let (segment, offset) = (self.cpu.regs.ds, self.cpu.regs.dx);
         let limit = self.cpu.read_u8(segment, offset).saturating_sub(1) as usize;
-        while let Some(&(ascii, _)) = self.keys.front() {
-            if self.check_break(Pending::Line) {
-                return;
-            }
-            self.keys.pop_front();
-            match ascii {
-                b'\r' => {
-                    self.cpu
-                        .write_u8(segment, offset.wrapping_add(1), self.line.len() as u8);
-                    self.cpu.load(segment, offset.wrapping_add(2), &self.line);
-                    self.cpu.write_u8(
-                        segment,
-                        offset.wrapping_add(2 + self.line.len() as u16),
-                        b'\r',
-                    );
-                    self.line.clear();
-                    self.write_stdout(b"\r\n");
-                    return;
-                }
-                8 => {
-                    if self.line.pop().is_some() {
-                        self.write_stdout(b"\x08 \x08");
+        match self.files.input_target(0) {
+            Ok(HandleTarget::Console) => {
+                while let Some(&(ascii, _)) = self.keys.front() {
+                    if self.check_break(Pending::Line) {
+                        return;
+                    }
+                    self.keys.pop_front();
+                    if self.line_byte(ascii, segment, offset, limit) {
+                        return;
                     }
                 }
-                32..=255 if self.line.len() < limit => {
-                    self.line.push(ascii);
-                    self.write_stdout(&[ascii]);
-                }
-                _ => {}
+                self.wait(Pending::Line);
+                return;
             }
+            Ok(HandleTarget::File(handle)) => {
+                let extended_break = self.extended_break();
+                let stop = Some(|byte| byte == b'\r' || extended_break && byte == 3);
+                while let Ok(bytes) = self.files.read_through(handle, 256, stop) {
+                    if bytes.is_empty() {
+                        break;
+                    }
+                    for byte in bytes.into_owned() {
+                        if byte == 3 && extended_break {
+                            self.raise_break(Pending::Line);
+                            return;
+                        }
+                        if self.line_byte(byte, segment, offset, limit) {
+                            return;
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
-        self.wait(Pending::Line);
+        self.finish_line(segment, offset);
+    }
+
+    fn line_byte(&mut self, ascii: u8, segment: u16, offset: u16, limit: usize) -> bool {
+        match ascii {
+            b'\r' => {
+                self.finish_line(segment, offset);
+                self.write_stdout(b"\r\n");
+                return true;
+            }
+            8 => {
+                if self.line.pop().is_some() {
+                    self.write_stdout(b"\x08 \x08");
+                }
+            }
+            b'\t' | 32..=255 if self.line.len() < limit => {
+                self.line.push(ascii);
+                self.write_stdout(&[ascii]);
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn finish_line(&mut self, segment: u16, offset: u16) {
+        self.cpu
+            .write_u8(segment, offset.wrapping_add(1), self.line.len() as u8);
+        self.cpu.load(segment, offset.wrapping_add(2), &self.line);
+        self.cpu.write_u8(
+            segment,
+            offset.wrapping_add(2 + self.line.len() as u16),
+            b'\r',
+        );
+        self.line.clear();
     }
 
     fn dos(&mut self, ah: u8, al: u8) {
@@ -186,7 +260,8 @@ impl Machine {
             self.cpu.regs.es,
         );
         let [dl, _] = dx.to_le_bytes();
-        let console_check = matches!(ah, 2 | 5 | 9 | 0x0b | 0x0c)
+        let console_check = matches!(ah, 2 | 5 | 9)
+            || matches!(ah, 0x0b | 0x0c) && self.console_stdin()
             || (ah == 0x40
                 && self.files.device(bx).is_some_and(|channel| {
                     channel.writable && channel.device == DosDevice::Console
@@ -205,17 +280,21 @@ impl Machine {
                 self.write_stdout(&[dl]);
                 self.set_al(dl);
             }
-            0x06 if dl == 0xff => match self.keys.pop_front() {
-                Some((ascii, scan)) => {
+            0x06 if dl == 0xff => {
+                let value = if self.console_stdin() {
+                    self.keys
+                        .pop_front()
+                        .map(|(ascii, scan)| self.console_key(ascii, scan))
+                } else {
+                    self.read_redirected_byte()
+                };
+                if value.is_some() {
                     self.cpu.regs.flags &= !ZERO;
-                    let value = self.console_key(ascii, scan);
-                    self.set_al(value);
-                }
-                None => {
+                } else {
                     self.cpu.regs.flags |= ZERO;
-                    self.set_al(0);
                 }
-            },
+                self.set_al(value.unwrap_or_default());
+            }
             0x06 => {
                 self.write_stdout(&[dl]);
                 self.set_al(dl);
@@ -234,9 +313,11 @@ impl Machine {
                     self.read_line();
                 }
             }
-            0x0b => self.set_al(if self.keys.is_empty() { 0 } else { 0xff }),
+            0x0b => self.set_al(if self.input_status(0) { 0xff } else { 0 }),
             0x0c => {
-                self.keys.clear();
+                if self.console_stdin() {
+                    self.keys.clear();
+                }
                 if matches!(al, 1 | 6 | 7 | 8 | 0x0a) {
                     self.dos(al, al);
                 } else {
@@ -400,17 +481,14 @@ impl Machine {
                 }
                 None => self.failure(6),
             },
-            0x44 if matches!(al, 6 | 7)
+            0x44 if al == 6 && self.files.is_open(bx) => {
+                self.set_al(if self.input_status(bx) { 0xff } else { 0 });
+                self.success();
+            }
+            0x44 if al == 7
                 && let Some(channel) = self.files.device(bx) =>
             {
-                let ready = if al == 6 {
-                    channel.readable
-                        && channel.device == DosDevice::Console
-                        && !self.keys.is_empty()
-                } else {
-                    channel.writable
-                };
-                self.set_al(if ready { 0xff } else { 0 });
+                self.set_al(if channel.writable { 0xff } else { 0 });
                 self.success();
             }
             0x44 if al == 8 => {
@@ -512,30 +590,27 @@ impl Machine {
     }
 
     fn read_handle(&mut self, handle: u16, count: u16, segment: u16, offset: u16) {
-        if let Some(channel) = self.files.device(handle) {
-            if !channel.readable {
-                self.failure(5);
-            } else if count != 0 && channel.device == DosDevice::Console {
-                self.resume(Pending::HandleRead);
-            } else {
+        match self.files.input_target(handle) {
+            Ok(HandleTarget::Console) if count != 0 => self.resume(Pending::HandleRead),
+            Ok(HandleTarget::Console | HandleTarget::Null) => {
                 self.cpu.regs.ax = 0;
                 self.success();
             }
-            return;
-        }
-        match self.files.read(handle, usize::from(count)) {
-            Ok(bytes) => {
-                self.cpu.load(segment, offset, &bytes);
-                self.cpu.regs.ax = bytes.len() as u16;
-                self.success();
-            }
+            Ok(HandleTarget::File(file)) => match self.files.read(file, usize::from(count)) {
+                Ok(bytes) => {
+                    self.cpu.load(segment, offset, &bytes);
+                    self.cpu.regs.ax = bytes.len() as u16;
+                    self.success();
+                }
+                Err(code) => self.failure(code),
+            },
             Err(code) => self.failure(code),
         }
     }
 
     fn write_handle(&mut self, handle: u16, count: u16, segment: u16, offset: u16) {
         let result = match self.files.output_target(handle) {
-            Ok(OutputTarget::Null) => Ok(()),
+            Ok(HandleTarget::Null) => Ok(()),
             Ok(target) => {
                 let bytes: Vec<_> = (0..count)
                     .map(|i| self.cpu.read_u8(segment, offset.wrapping_add(i)))
@@ -559,11 +634,11 @@ impl Machine {
         }
     }
 
-    fn write_output(&mut self, target: OutputTarget, bytes: &[u8]) -> Result<(), u16> {
+    fn write_output(&mut self, target: HandleTarget, bytes: &[u8]) -> Result<(), u16> {
         match target {
-            OutputTarget::Console => self.emit(bytes),
-            OutputTarget::Null => {}
-            OutputTarget::File(handle) => {
+            HandleTarget::Console => self.emit(bytes),
+            HandleTarget::Null => {}
+            HandleTarget::File(handle) => {
                 let write = dosa_mount::FileWriteOptions {
                     modified: self.adjusted_file_time(),
                     verify: self.verify_writes(),
