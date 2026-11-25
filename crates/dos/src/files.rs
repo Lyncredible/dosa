@@ -88,7 +88,7 @@ impl DosFiles {
 
     pub(crate) fn chdir(&mut self, mounts: &BTreeMap<char, Mount>, name: &str) -> Result<(), u16> {
         let (drive, mount, path) = self.resolve_mount(mounts, name)?;
-        let canonical = canonical_directory(mount, &path)?;
+        let canonical = mount.canonical_directory(&path).map_err(|_| 3u16)?;
         self.directories.insert(drive, canonical);
         Ok(())
     }
@@ -100,7 +100,7 @@ impl DosFiles {
 
     pub(crate) fn rmdir(&self, mounts: &BTreeMap<char, Mount>, name: &str) -> Result<(), u16> {
         let (drive, mount, path) = self.resolve_mount(mounts, name)?;
-        let canonical = canonical_directory(mount, &path)?;
+        let canonical = mount.canonical_directory(&path).map_err(|_| 3u16)?;
         if canonical.eq_ignore_ascii_case(self.directory(drive)) {
             return Err(16);
         }
@@ -376,26 +376,6 @@ fn attributes(entry: &Entry, read_only: bool) -> u8 {
     } else {
         0x20 | u8::from(read_only)
     }
-}
-
-fn canonical_directory(mount: &Mount, path: &str) -> Result<String, u16> {
-    let mut canonical = String::new();
-    for part in path.split('\\').filter(|part| !part.is_empty()) {
-        let candidate = if canonical.is_empty() {
-            part.to_owned()
-        } else {
-            format!("{canonical}\\{part}")
-        };
-        let entry = mount.metadata(&candidate).map_err(|_| 3u16)?;
-        if !entry.is_dir {
-            return Err(3);
-        }
-        if !canonical.is_empty() {
-            canonical.push('\\');
-        }
-        canonical.push_str(&entry.name);
-    }
-    Ok(canonical)
 }
 
 fn read_slice(bytes: &[u8], position: usize, length: usize) -> &[u8] {

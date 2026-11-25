@@ -250,6 +250,25 @@ impl Mount {
         }
     }
 
+    /// Resolve a directory to its DOS short names, from the drive root.
+    pub fn canonical_directory(&self, path: &str) -> Result<String> {
+        let mut canonical = String::new();
+        for component in guest_components(path)? {
+            if !canonical.is_empty() {
+                canonical.push('\\');
+            }
+            let parent_len = canonical.len();
+            canonical.push_str(component);
+            let entry = self.metadata(&canonical)?;
+            if !entry.is_dir {
+                return Err(MountError::NotDirectory(path.to_owned()));
+            }
+            canonical.truncate(parent_len);
+            canonical.push_str(&entry.name);
+        }
+        Ok(canonical)
+    }
+
     /// Read a file up to the mount read limit.
     pub fn read(&self, path: &str) -> Result<Vec<u8>> {
         let components = guest_components(path)?;
