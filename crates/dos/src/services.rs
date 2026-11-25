@@ -284,7 +284,11 @@ impl Machine {
             0x3c | 0x3d => {
                 let result = self.path(ds, dx).and_then(|path| {
                     if ah == 0x3c {
-                        self.files.create(&self.mounts, &path)
+                        self.files.create(
+                            &self.mounts,
+                            &path,
+                            self.session_clock.adjusted_file_time(),
+                        )
                     } else {
                         self.files.open(&self.mounts, &path, al)
                     }
@@ -327,7 +331,8 @@ impl Machine {
                     self.emit(&bytes);
                     Ok(())
                 } else {
-                    self.files.write(bx, &bytes)
+                    self.files
+                        .write(bx, &bytes, self.session_clock.adjusted_file_time())
                 };
                 if result.is_ok() {
                     self.cpu.regs.ax = cx;

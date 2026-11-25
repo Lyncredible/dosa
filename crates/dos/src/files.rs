@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use dosa_mount::{
     DosTimestamp, Entry, Mount, MountError, WritableFile, WriteDisposition, attributes,
 };
@@ -160,12 +162,13 @@ impl DosFiles {
         &mut self,
         mounts: &BTreeMap<char, Mount>,
         name: &str,
+        modified: Option<SystemTime>,
     ) -> Result<u16, u16> {
         let (drive, mount, path) = self.resolve_mount(mounts, name)?;
         let handle = self.next_handle()?;
         self.check_file_not_open_for_writing(mount, &path)?;
         let file = mount
-            .open_writable_file(&path, WriteDisposition::CreateOrTruncate)
+            .create_file(&path, modified)
             .map_err(|error| self.write_open_error(drive, error))?;
         let source = FileSource::Writable {
             file,
@@ -311,7 +314,12 @@ impl DosFiles {
         Ok(data)
     }
 
-    pub(crate) fn write(&mut self, handle: u16, data: &[u8]) -> Result<(), u16> {
+    pub(crate) fn write(
+        &mut self,
+        handle: u16,
+        data: &[u8],
+        modified: Option<SystemTime>,
+    ) -> Result<(), u16> {
         let file = self.handles.get_mut(&handle).ok_or(6u16)?;
         let FileSource::Writable {
             file: destination,
@@ -335,7 +343,9 @@ impl DosFiles {
             }
             bytes[file.position..end].copy_from_slice(data);
         }
-        destination.replace(&bytes).map_err(mount_code)?;
+        destination
+            .replace_at(&bytes, modified)
+            .map_err(mount_code)?;
         file.position = end;
         Ok(())
     }

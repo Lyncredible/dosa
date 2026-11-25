@@ -14,6 +14,10 @@ impl SessionClock {
         }
     }
 
+    pub(crate) fn adjusted_file_time(self) -> Option<SystemTime> {
+        self.0.map(|_| UNIX_EPOCH + self.now().0)
+    }
+
     pub(crate) fn set_date(&mut self, year: u16, month: u8, day: u8) -> bool {
         if !(1980..=2099).contains(&year)
             || !(1..=12).contains(&month)
