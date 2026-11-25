@@ -164,7 +164,7 @@ impl MenuState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Tab {
+pub(crate) enum Tab {
     Drives,
     Cpu,
     Speed,
@@ -174,7 +174,7 @@ enum Tab {
     Debug,
 }
 
-const CATEGORIES: [(Tab, &str); 7] = [
+pub(crate) const CATEGORIES: [(Tab, &str); 7] = [
     (Tab::Drives, "Drives"),
     (Tab::Cpu, "CPU"),
     (Tab::Speed, "Speed"),
@@ -338,6 +338,7 @@ impl Menu {
         input: &Input,
         state: &MenuState,
         fullscreen: bool,
+        compact: bool,
     ) -> (bool, Option<Command>) {
         if !input.pressed {
             return (false, None);
@@ -354,7 +355,7 @@ impl Menu {
             if !state.inspection.is_empty() && input.key == Key::Function(10) {
                 return (true, Some(Command::App(MenuAction::StepInstruction)));
             }
-            if !state.running && input.key == Key::Function(10) {
+            if compact && !state.running && input.key == Key::Function(10) {
                 self.open_root();
                 return (true, None);
             }
@@ -436,16 +437,18 @@ impl Menu {
         scale: f64,
         state: &MenuState,
         fullscreen: bool,
+        header: bool,
     ) -> Frame<'_> {
         let width = logical_width(size, scale);
         let drive = self.drive(state);
-        let panel = self.active;
+        let header_height = if header { BAR_HEIGHT } else { 0 };
+        let panel = if header { self.active } else { None };
         let items = match panel {
             Some(Panel::Category(tab)) => options(tab, state, drive, fullscreen),
             _ => Vec::new(),
         };
         let menu_height = match panel {
-            None => BAR_HEIGHT,
+            None => header_height,
             Some(panel) => {
                 panel.rows_top()
                     + ROW_HEIGHT
@@ -461,10 +464,10 @@ impl Menu {
                     }
             }
         };
-        let inspection_height = BAR_HEIGHT + 12 + state.inspection.len() as u32 * 18;
+        let inspection_height = header_height + 12 + state.inspection.len() as u32 * 18;
         let height = menu_height
             .max(if state.inspection.is_empty() {
-                BAR_HEIGHT
+                header_height
             } else {
                 inspection_height
             })
@@ -477,65 +480,67 @@ impl Menu {
             height,
             pixels: &mut self.pixels,
         };
-        canvas.fill(
-            Rect {
-                x: 0,
-                y: 0,
-                w: width,
-                h: BAR_HEIGHT,
-            },
-            NAVY,
-        );
-        canvas.fill(
-            Rect {
-                x: 0,
-                y: BAR_HEIGHT - 1,
-                w: width,
-                h: 1,
-            },
-            RULE,
-        );
-        if panel.is_some() || self.point.is_some_and(|point| MENU_BUTTON.contains(point)) {
-            canvas.fill(MENU_BUTTON, ACTIVE);
-        }
-        for y in [11, 17, 23] {
+        if header {
             canvas.fill(
                 Rect {
-                    x: 17,
-                    y,
-                    w: 16,
-                    h: 2,
+                    x: 0,
+                    y: 0,
+                    w: width,
+                    h: BAR_HEIGHT,
                 },
-                TEXT,
+                NAVY,
             );
+            canvas.fill(
+                Rect {
+                    x: 0,
+                    y: BAR_HEIGHT - 1,
+                    w: width,
+                    h: 1,
+                },
+                RULE,
+            );
+            if panel.is_some() || self.point.is_some_and(|point| MENU_BUTTON.contains(point)) {
+                canvas.fill(MENU_BUTTON, ACTIVE);
+            }
+            for y in [11, 17, 23] {
+                canvas.fill(
+                    Rect {
+                        x: 17,
+                        y,
+                        w: 16,
+                        h: 2,
+                    },
+                    TEXT,
+                );
+            }
+            let settings = format!(
+                "{}: | {} | {}{}{}{}",
+                state.active_drive,
+                cpu_label(state.cpu),
+                speed_label(state.speed),
+                if state.paused { " | Paused" } else { "" },
+                if state.muted { " | Muted" } else { "" },
+                if state.recording { " | REC" } else { "" },
+            );
+            let (title, color) = if state.status.is_empty() {
+                (&settings, MUTED)
+            } else {
+                (&state.status, ACCENT)
+            };
+            canvas.text(55, 12, title, color);
         }
-        let settings = format!(
-            "{}: | {} | {}{}{}{}",
-            state.active_drive,
-            cpu_label(state.cpu),
-            speed_label(state.speed),
-            if state.paused { " | Paused" } else { "" },
-            if state.muted { " | Muted" } else { "" },
-            if state.recording { " | REC" } else { "" },
-        );
-        let (title, color) = if state.status.is_empty() {
-            (&settings, MUTED)
-        } else {
-            (&state.status, ACCENT)
-        };
-        canvas.text(55, 12, title, color);
         if !state.inspection.is_empty() {
             canvas.fill(
                 Rect {
                     x: 0,
-                    y: BAR_HEIGHT,
+                    y: header_height,
                     w: width.min(410),
-                    h: inspection_height - BAR_HEIGHT,
+                    h: inspection_height - header_height,
                 },
                 PANEL,
             );
             for (row, line) in state.inspection.iter().enumerate() {
-                canvas.text(12, BAR_HEIGHT + 8 + row as u32 * 18, line, TEXT);
+                canvas.text(12, header_height + 8 + row as u32 * 18, line, TEXT);
             }
         }
         if let Some(panel) = panel {
@@ -669,14 +674,15 @@ fn drive_rect(index: u32) -> Rect {
     }
 }
 
-struct Item {
-    label: &'static str,
-    command: Command,
-    enabled: bool,
-    chosen: bool,
+#[derive(PartialEq, Eq)]
+pub(crate) struct Item {
+    pub label: &'static str,
+    pub command: Command,
+    pub enabled: bool,
+    pub chosen: bool,
 }
 
-fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<Item> {
+pub(crate) fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<Item> {
     let can_change_mounts = !state.running && !state.batch_active;
     let item = |label, command, enabled, chosen| Item {
         label,
@@ -876,7 +882,7 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
     }
 }
 
-fn cpu_label(mode: CpuMode) -> &'static str {
+pub(crate) fn cpu_label(mode: CpuMode) -> &'static str {
     match mode {
         CpuMode::I8086 => "8086",
         CpuMode::I286 => "286",
@@ -884,7 +890,7 @@ fn cpu_label(mode: CpuMode) -> &'static str {
     }
 }
 
-fn speed_label(speed: Speed) -> &'static str {
+pub(crate) fn speed_label(speed: Speed) -> &'static str {
     match speed {
         Speed::Slow => "Slow",
         Speed::Normal => "Normal",
@@ -996,14 +1002,14 @@ mod tests {
         };
         for key in ['d', 'c', 's', 'v', 'a', 'e', 'g', 'x', 'y', 'z'] {
             assert_eq!(
-                menu.key(&input(Key::Character(key), true), &state, false),
+                menu.key(&input(Key::Character(key), true), &state, false, true),
                 (false, None)
             );
         }
         menu.open_root();
-        menu.key(&input(Key::Up, false), &state, false);
+        menu.key(&input(Key::Up, false), &state, false, true);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), &state, false),
+            menu.key(&input(Key::Enter, false), &state, false, true),
             (true, Some(Command::App(MenuAction::ResetGuest)))
         );
         assert!(!menu.blocks_pointer());
@@ -1014,15 +1020,15 @@ mod tests {
         let mut menu = Menu::default();
         let state = MenuState::default();
         assert_eq!(
-            menu.key(&input(Key::Function(10), false), &state, false),
+            menu.key(&input(Key::Function(10), false), &state, false, true),
             (true, None)
         );
-        menu.key(&input(Key::Enter, false), &state, false);
-        menu.key(&input(Key::Character('z'), false), &state, false);
-        menu.key(&input(Key::Down, false), &state, false);
-        menu.key(&input(Key::Down, false), &state, false);
+        menu.key(&input(Key::Enter, false), &state, false, true);
+        menu.key(&input(Key::Character('z'), false), &state, false, true);
+        menu.key(&input(Key::Down, false), &state, false, true);
+        menu.key(&input(Key::Down, false), &state, false, true);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), &state, false),
+            menu.key(&input(Key::Enter, false), &state, false, true),
             (true, Some(Command::Mount(MountKind::SessionZip, 'Z')))
         );
         assert!(!menu.blocks_pointer());
@@ -1037,12 +1043,12 @@ mod tests {
         };
         menu.open(Tab::Drives, &state);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), &state, false),
+            menu.key(&input(Key::Enter, false), &state, false, true),
             (true, None)
         );
         menu.open(Tab::Speed, &state);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), &state, false),
+            menu.key(&input(Key::Enter, false), &state, false, true),
             (true, Some(Command::App(MenuAction::SetSpeed(Speed::Slow))))
         );
     }
@@ -1053,10 +1059,10 @@ mod tests {
         let mut state = MenuState::default();
         state.drives.insert('D', "Folder (read-only)");
         menu.open(Tab::Drives, &state);
-        menu.key(&input(Key::Character('d'), false), &state, false);
-        menu.key(&input(Key::Up, false), &state, false);
+        menu.key(&input(Key::Character('d'), false), &state, false, true);
+        menu.key(&input(Key::Up, false), &state, false, true);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), &state, false),
+            menu.key(&input(Key::Enter, false), &state, false, true),
             (true, Some(Command::App(MenuAction::Unmount('D'))))
         );
         state.batch_active = true;
@@ -1077,16 +1083,16 @@ mod tests {
         };
         menu.open(Tab::Audio, &state);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), &state, false),
+            menu.key(&input(Key::Enter, false), &state, false, true),
             (true, Some(Command::App(MenuAction::SetMuted(true))))
         );
         assert_eq!(state.audio_gain(), 0.5);
         state.muted = true;
         assert_eq!(state.audio_gain(), 0.0);
         menu.open(Tab::Audio, &state);
-        menu.key(&input(Key::Down, false), &state, false);
+        menu.key(&input(Key::Down, false), &state, false, true);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), &state, false),
+            menu.key(&input(Key::Enter, false), &state, false, true),
             (
                 true,
                 Some(Command::App(MenuAction::SetVolume(Volume::Quiet)))
@@ -1103,9 +1109,9 @@ mod tests {
             Command::App(MenuAction::StopRecording),
         ] {
             menu.open(Tab::Audio, &state);
-            menu.key(&input(Key::Up, false), &state, false);
+            menu.key(&input(Key::Up, false), &state, false, true);
             assert_eq!(
-                menu.key(&input(Key::Enter, false), &state, false),
+                menu.key(&input(Key::Enter, false), &state, false, true),
                 (true, Some(expected))
             );
             state.recording = true;
@@ -1120,23 +1126,26 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            menu.key(&input(Key::Function(10), false), &state, false),
+            menu.key(&input(Key::Function(10), false), &state, false, true),
             (false, None)
         );
         menu.open(Tab::Debug, &state);
         assert_eq!(
-            menu.key(&input(Key::Enter, false), &state, false),
+            menu.key(&input(Key::Enter, false), &state, false, true),
             (true, Some(Command::App(MenuAction::SetInspection(true))))
         );
         state.paused = true;
         state.inspection.push("AX 0000".into());
         assert_eq!(
-            menu.key(&input(Key::Function(10), false), &state, false),
+            menu.key(&input(Key::Function(10), false), &state, false, true),
             (true, Some(Command::App(MenuAction::StepInstruction)))
         );
-        let frame = menu.paint(PhysicalSize::new(800, 500), 1.0, &state, false);
+        let frame = menu.paint(PhysicalSize::new(800, 500), 1.0, &state, false, true);
         assert!(frame.height > BAR_HEIGHT);
         assert_eq!(&frame.rgba[(800 * BAR_HEIGHT as usize) * 4..][..4], &PANEL);
+        let frame = menu.paint(PhysicalSize::new(800, 500), 1.0, &state, false, false);
+        assert_eq!(frame.height, 30);
+        assert_eq!(&frame.rgba[..4], &PANEL);
     }
 
     #[test]
@@ -1147,7 +1156,7 @@ mod tests {
         assert_eq!(menu.mouse(true, true, &state, false), (true, None));
         assert_eq!(menu.mouse(false, true, &state, false), (true, None));
         assert!(menu.blocks_pointer());
-        let frame = menu.paint(PhysicalSize::new(800, 500), 2.0, &state, false);
+        let frame = menu.paint(PhysicalSize::new(800, 500), 2.0, &state, false, true);
         assert_eq!(frame.width, 400);
         let row = (Panel::Root.rows_top() * frame.width) as usize;
         assert_eq!(frame.rgba[4 * (row + 16) + 3], 255);

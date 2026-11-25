@@ -103,7 +103,7 @@ Choose **Audio → Record audio to WAV** to capture guest audio as 48 kHz, 16-bi
 
 **Menu → Reset guest** stops the current guest and any active batch, resets the emulated CPU and devices, and returns to the DOS prompt. Mounted media and desktop settings remain available.
 
-Open the menu from the button at the upper left. F10 opens it from the DOS prompt. Use the arrow keys and Enter to navigate and Esc to close. Audio offers master volume and mute while a guest runs.
+On Windows, open **Menu** in the window frame. The title bar shows the active CPU, speed, and DOS drive. In fullscreen and on other platforms, use the menu button in the upper left of the app. F10 opens that menu from the DOS prompt. Use the arrow keys and Enter to navigate and Esc to close. Audio offers master volume and mute while a guest runs.
 
 **Edit** copies the visible DOS text screen or pastes up to 4,096 characters. At the shell prompt, pasted line breaks become spaces and Enter submits the edited command. In a running program, paste feeds the DOS BIOS keyboard queue one character at a time, including Enter for line breaks. Choose **Stop pasting** to discard the remaining paste.
 

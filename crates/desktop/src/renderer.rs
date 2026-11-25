@@ -96,6 +96,7 @@ impl Renderer {
         aspect: Option<f32>,
         scaling: Scaling,
         overlay: Option<Frame<'_>>,
+        reserve_header: bool,
     ) -> Result<(), Box<dyn Error>> {
         if self.size.width == 0 || self.size.height == 0 {
             return Ok(());
@@ -133,7 +134,7 @@ impl Renderer {
             aspect,
             scaling,
             window.scale_factor(),
-            overlay.is_some(),
+            reserve_header,
         );
         let overlay_height = if let Some(frame) = overlay {
             upload(

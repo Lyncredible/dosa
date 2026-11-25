@@ -12,3 +12,6 @@ pollster = "1.0"
 rfd = "0.18.0"
 wgpu = "30.0.2"
 winit = "0.30.13"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
