@@ -1,5 +1,5 @@
 use crate::{CONVENTIONAL_END, DosError, Machine, PSP, Pending, PendingCall, RunState, ZERO};
-use crate::{CodePage, DOS_VERSION};
+use crate::{CodePage, DOS_VERSION, files::DosDevice};
 use dosa_mount::{Allocation, Entry};
 
 impl Machine {
@@ -183,8 +183,11 @@ impl Machine {
             self.cpu.regs.es,
         );
         let [dl, _] = dx.to_le_bytes();
-        let console_check =
-            matches!(ah, 2 | 5 | 9 | 0x0b | 0x0c) || (ah == 0x40 && matches!(bx, 1 | 2));
+        let console_check = matches!(ah, 2 | 5 | 9 | 0x0b | 0x0c)
+            || (ah == 0x40
+                && self.files.device(bx).is_some_and(|channel| {
+                    channel.writable && channel.device == DosDevice::Console
+                }));
         let extended_check = self.extended_break() && ah >= 0x0d && ah != 0x33;
         if (console_check || extended_check) && self.check_break(Pending::Dos { ah, al }) {
             return;
@@ -351,43 +354,8 @@ impl Machine {
                 let result = self.files.close(bx);
                 self.result(result);
             }
-            0x3f if bx == 0 && cx != 0 => self.resume(Pending::HandleRead),
-            0x3f if bx == 0 => {
-                self.cpu.regs.ax = 0;
-                self.success();
-            }
-            0x3f => match self.files.read(bx, usize::from(cx)) {
-                Ok(bytes) => {
-                    self.cpu.load(ds, dx, &bytes);
-                    self.cpu.regs.ax = bytes.len() as u16;
-                    self.success();
-                }
-                Err(code) => self.failure(code),
-            },
-            0x40 => {
-                let console = matches!(bx, 1 | 2);
-                if !console && let Err(code) = self.files.check_write_handle(bx) {
-                    self.failure(code);
-                    return;
-                }
-                let bytes: Vec<_> = (0..cx)
-                    .map(|i| self.cpu.read_u8(ds, dx.wrapping_add(i)))
-                    .collect();
-                let result = if console {
-                    self.emit(&bytes);
-                    Ok(())
-                } else {
-                    let write = dosa_mount::FileWriteOptions {
-                        modified: self.adjusted_file_time(),
-                        verify: self.verify_writes(),
-                    };
-                    self.files.write(bx, &bytes, write)
-                };
-                if result.is_ok() {
-                    self.cpu.regs.ax = cx;
-                }
-                self.result(result);
-            }
+            0x3f => self.read_handle(bx, cx, ds, dx),
+            0x40 => self.write_handle(bx, cx, ds, dx),
             0x41 => {
                 let result = self
                     .path(ds, dx)
@@ -426,8 +394,28 @@ impl Machine {
                 };
                 self.success();
             }
+            0x44 if al == 0
+                && let Some(channel) = self.files.device(bx) =>
+            {
+                self.cpu.regs.dx = channel.device.ioctl_info();
+                self.success();
+            }
             0x44 if al == 0 && self.files.is_open(bx) => {
                 self.cpu.regs.dx = u16::from(self.files.drive as u8 - b'A');
+                self.success();
+            }
+            0x44 if al == 0 => self.failure(6),
+            0x44 if matches!(al, 6 | 7)
+                && let Some(channel) = self.files.device(bx) =>
+            {
+                let ready = if al == 6 {
+                    channel.readable
+                        && channel.device == DosDevice::Console
+                        && !self.keys.is_empty()
+                } else {
+                    channel.writable
+                };
+                self.set_al(if ready { 0xff } else { 0 });
                 self.success();
             }
             0x44 if al == 8 => {
@@ -507,6 +495,61 @@ impl Machine {
             0x68 => self.failure(6),
             _ => self.failure(1),
         }
+    }
+
+    fn read_handle(&mut self, handle: u16, count: u16, segment: u16, offset: u16) {
+        if let Some(channel) = self.files.device(handle) {
+            if !channel.readable {
+                self.failure(5);
+            } else if count != 0 && channel.device == DosDevice::Console {
+                self.resume(Pending::HandleRead);
+            } else {
+                self.cpu.regs.ax = 0;
+                self.success();
+            }
+            return;
+        }
+        match self.files.read(handle, usize::from(count)) {
+            Ok(bytes) => {
+                self.cpu.load(segment, offset, &bytes);
+                self.cpu.regs.ax = bytes.len() as u16;
+                self.success();
+            }
+            Err(code) => self.failure(code),
+        }
+    }
+
+    fn write_handle(&mut self, handle: u16, count: u16, segment: u16, offset: u16) {
+        let channel = self.files.device(handle);
+        let result = match channel {
+            Some(channel) if !channel.writable => Err(5),
+            Some(channel) if channel.device == DosDevice::Null => Ok(()),
+            _ => {
+                if channel.is_none()
+                    && let Err(code) = self.files.check_write_handle(handle)
+                {
+                    self.failure(code);
+                    return;
+                }
+                let bytes: Vec<_> = (0..count)
+                    .map(|i| self.cpu.read_u8(segment, offset.wrapping_add(i)))
+                    .collect();
+                if channel.is_some() {
+                    self.emit(&bytes);
+                    Ok(())
+                } else {
+                    let write = dosa_mount::FileWriteOptions {
+                        modified: self.adjusted_file_time(),
+                        verify: self.verify_writes(),
+                    };
+                    self.files.write(handle, &bytes, write)
+                }
+            }
+        };
+        if result.is_ok() {
+            self.cpu.regs.ax = count;
+        }
+        self.result(result);
     }
 
     fn result(&mut self, result: Result<(), u16>) {

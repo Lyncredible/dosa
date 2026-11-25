@@ -22,7 +22,42 @@ struct File {
     position: usize,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DosDevice {
+    Console,
+    Null,
+}
+
+impl DosDevice {
+    pub(crate) fn named(path: &str) -> Option<Self> {
+        let name = path.rsplit(['\\', '/', ':']).next()?;
+        let stem = name.split('.').next()?;
+        if stem.eq_ignore_ascii_case("CON") {
+            Some(Self::Console)
+        } else if stem.eq_ignore_ascii_case("NUL") {
+            Some(Self::Null)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn ioctl_info(self) -> u16 {
+        match self {
+            Self::Console => 0x83,
+            Self::Null => 0x84,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct DeviceHandle {
+    pub(crate) device: DosDevice,
+    pub(crate) readable: bool,
+    pub(crate) writable: bool,
+}
+
 enum FileSource {
+    Device(DeviceHandle),
     ReadOnly {
         contents: Vec<u8>,
         modified: Option<DosTimestamp>,
@@ -119,15 +154,49 @@ impl DosFiles {
         mount.remove_dir(&path).map_err(directory_code)
     }
 
+    fn named_device(
+        &self,
+        mounts: &BTreeMap<char, Mount>,
+        name: &str,
+    ) -> Result<Option<DosDevice>, u16> {
+        let Some(device) = DosDevice::named(name) else {
+            return Ok(None);
+        };
+        let (drive, path) = self.resolve(name)?;
+        let mount = mounts.get(&drive);
+        if name.contains(':') && mount.is_none() {
+            return Err(15);
+        }
+        if let Some((parent, _)) = path.rsplit_once('\\') {
+            mount
+                .ok_or(15u16)?
+                .canonical_directory(parent)
+                .map_err(directory_code)?;
+        }
+        Ok(Some(device))
+    }
+
     pub(crate) fn open(
         &mut self,
         mounts: &BTreeMap<char, Mount>,
         name: &str,
         mode: u8,
     ) -> Result<u16, u16> {
-        let (drive, mount, path) = self.resolve_mount(mounts, name)?;
         let handle = self.next_handle()?;
-        let source = match mode & 3 {
+        let access = mode & 3;
+        if access == 3 {
+            return Err(12);
+        }
+        if let Some(device) = self.named_device(mounts, name)? {
+            let source = FileSource::Device(DeviceHandle {
+                device,
+                readable: access != 1,
+                writable: access != 0,
+            });
+            return Ok(self.insert_handle(handle, source));
+        }
+        let (drive, mount, path) = self.resolve_mount(mounts, name)?;
+        let source = match access {
             0 if mount.is_writable() => FileSource::Writable {
                 file: mount.open_readable_file(&path).map_err(mount_code)?,
                 readable: true,
@@ -144,19 +213,12 @@ impl DosFiles {
                 file: mount
                     .open_writable_file(&path, WriteDisposition::OpenExisting)
                     .map_err(|error| self.write_open_error(drive, error))?,
-                readable: mode & 3 == 2,
+                readable: access == 2,
                 writable: true,
             },
             _ => return Err(12),
         };
-        self.handles.insert(
-            handle,
-            File {
-                source,
-                position: 0,
-            },
-        );
-        Ok(handle)
+        Ok(self.insert_handle(handle, source))
     }
 
     pub(crate) fn create(
@@ -165,8 +227,16 @@ impl DosFiles {
         name: &str,
         modified: Option<SystemTime>,
     ) -> Result<u16, u16> {
-        let (drive, mount, path) = self.resolve_mount(mounts, name)?;
         let handle = self.next_handle()?;
+        if let Some(device) = self.named_device(mounts, name)? {
+            let source = FileSource::Device(DeviceHandle {
+                device,
+                readable: true,
+                writable: true,
+            });
+            return Ok(self.insert_handle(handle, source));
+        }
+        let (drive, mount, path) = self.resolve_mount(mounts, name)?;
         self.check_file_not_open_for_writing(mount, &path)?;
         let file = mount
             .create_file(&path, modified)
@@ -176,6 +246,10 @@ impl DosFiles {
             readable: true,
             writable: true,
         };
+        Ok(self.insert_handle(handle, source))
+    }
+
+    fn insert_handle(&mut self, handle: u16, source: FileSource) -> u16 {
         self.handles.insert(
             handle,
             File {
@@ -183,7 +257,7 @@ impl DosFiles {
                 position: 0,
             },
         );
-        Ok(handle)
+        handle
     }
 
     fn write_open_error(&mut self, drive: char, error: MountError) -> u16 {
@@ -241,7 +315,7 @@ impl DosFiles {
                     FileSource::ReadOnly {
                         contents: bytes, ..
                     } => bytes.len() as u64,
-                    FileSource::Writable { .. } => 0,
+                    FileSource::Device(_) | FileSource::Writable { .. } => 0,
                 })
                 .sum::<u64>();
         if size > remaining {
@@ -271,10 +345,25 @@ impl DosFiles {
     pub(crate) fn modified(&self, handle: u16) -> Result<DosTimestamp, u16> {
         let file = self.handles.get(&handle).ok_or(6u16)?;
         let modified = match &file.source {
+            FileSource::Device(_) => return Err(1),
             FileSource::ReadOnly { modified, .. } => *modified,
             FileSource::Writable { file, .. } => file.modified().map_err(mount_code)?,
         };
         Ok(modified.unwrap_or(DosTimestamp::EPOCH))
+    }
+
+    pub(crate) fn device(&self, handle: u16) -> Option<DeviceHandle> {
+        match handle {
+            0..=2 => Some(DeviceHandle {
+                device: DosDevice::Console,
+                readable: handle == 0,
+                writable: handle != 0,
+            }),
+            _ => match &self.handles.get(&handle)?.source {
+                FileSource::Device(channel) => Some(*channel),
+                _ => None,
+            },
+        }
     }
 
     pub(crate) fn is_open(&self, handle: u16) -> bool {
@@ -287,7 +376,7 @@ impl DosFiles {
             Some(FileSource::Writable {
                 writable: false, ..
             }) => Err(5),
-            Some(FileSource::ReadOnly { .. }) => Err(5),
+            Some(FileSource::ReadOnly { .. } | FileSource::Device(_)) => Err(5),
             None => Err(6),
         }
     }
@@ -307,7 +396,8 @@ impl DosFiles {
                     .read_at(file.position as u64, length)
                     .map_err(mount_code)?,
             ),
-            FileSource::Writable {
+            FileSource::Device(_)
+            | FileSource::Writable {
                 readable: false, ..
             } => return Err(5),
         };
@@ -352,11 +442,15 @@ impl DosFiles {
     }
 
     pub(crate) fn seek(&mut self, handle: u16, origin: u8, offset: i32) -> Result<u32, u16> {
+        if self.device(handle).is_some() {
+            return if origin <= 2 { Ok(0) } else { Err(1) };
+        }
         let file = self.handles.get_mut(&handle).ok_or(6u16)?;
         let base = match origin {
             0 => 0,
             1 => file.position,
             2 => match &file.source {
+                FileSource::Device(_) => unreachable!("device handles cannot seek"),
                 FileSource::ReadOnly {
                     contents: bytes, ..
                 } => bytes.len(),
