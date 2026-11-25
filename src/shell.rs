@@ -81,6 +81,17 @@ impl Shell {
         self.drive
     }
 
+    pub(crate) fn reset(&mut self) -> Result<(), dosa_dos::DosError> {
+        self.batch = None;
+        self.errorlevel = 0;
+        self.machine.reset();
+        self.finish_quick_launch()?;
+        for directory in self.directories.values_mut() {
+            directory.clear();
+        }
+        Ok(())
+    }
+
     pub(crate) fn quick_launch(&mut self, path: &Path) -> Result<Command, Box<dyn Error>> {
         if self.batch_active() || self.quick_launch.is_some() {
             return Err(dosa_dos::DosError::Busy.into());

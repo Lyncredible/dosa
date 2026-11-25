@@ -219,6 +219,15 @@ impl Machine {
         Ok(())
     }
 
+    /// Reset the guest CPU and devices while retaining mounted media and the CPU profile.
+    pub fn reset(&mut self) {
+        *self = Self {
+            mounts: std::mem::take(&mut self.mounts),
+            cpu_profile: self.cpu_profile,
+            ..Self::new()
+        };
+    }
+
     pub fn drive(&self, drive: char) -> Option<&Mount> {
         self.mounts.get(&drive.to_ascii_uppercase())
     }

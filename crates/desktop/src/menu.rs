@@ -100,6 +100,7 @@ pub enum MenuAction {
     SetPaused(bool),
     SetInspection(bool),
     StepInstruction,
+    ResetGuest,
     Exit,
 }
 
@@ -759,6 +760,12 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
                 false,
             ));
             items.push(item("Save screenshot...", Command::Screenshot, true, false));
+            items.push(item(
+                "Reset guest",
+                Command::App(MenuAction::ResetGuest),
+                true,
+                false,
+            ));
             items.push(item("Exit", Command::App(MenuAction::Exit), true, false));
             items
         }
