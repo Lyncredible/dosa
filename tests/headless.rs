@@ -732,6 +732,24 @@ fn dos_file_dates_match_directory_sorting_and_guest_services() {
     }
     assert!(run("ZIPTIME").is_empty());
     assert!(run("HOSTTIME").is_empty());
+
+    fs::write(
+        fixture.0.join("COPYTIME.BAT"),
+        b"@echo off\r\ndate 06-15-2004\r\ntime 09:30\r\ncopy D:\\OLD.DAT SAME.TMP\r\ncopy /y D:\\NEW.DAT SAME.TMP\r\ncopy D:\\OLD.DAT SINGLE.TMP\r\ncopy D:\\OLD.DAT+D:\\NEW.DAT BOTH.TMP\r\ndir *.tmp\r\n",
+    )
+    .unwrap();
+    let listing = String::from_utf8(run("COPYTIME")).unwrap();
+    for (name, timestamp) in [
+        ("SAME.TMP", "01-01-01  12:00a"),
+        ("SINGLE.TMP", "02-29-00   3:04p"),
+        ("BOTH.TMP", "06-15-04   9:30a"),
+    ] {
+        let row = listing
+            .lines()
+            .find(|line| line.starts_with(name) && line.contains(timestamp));
+        assert!(row.is_some(), "{name} at {timestamp}: {listing}");
+    }
+    assert_eq!(fs::read(fixture.0.join("BOTH.TMP")).unwrap(), b"xx");
 }
 
 #[test]
