@@ -42,6 +42,8 @@ Create the host directory before mounting it. The guest can create, write, trunc
 
 At the Dosa prompt, `MOUNT C "host path"` opens files, directories, and ZIPs read-only. Put `/RW` before the path for a writable directory, `/SESSION` for a temporary writable ZIP copy, or `/FAT` or `/ISO` for a disk image. `HELP MOUNT` lists the options.
 
+Use `BOOT A "floppy.img"` or `BOOT C "hard-disk.img"` to run a boot sector from a read-only raw image. The boot loader can read 512-byte sectors through BIOS INT 13h. This initial support is verified with two-stage boot loaders. Booting a full operating system remains a compatibility goal.
+
 **Drives → Mount ZIP** and `--mount-session C=programs.zip` put the archive's DOS 8.3 files in a temporary writable directory. Changes last until the mount is replaced or Dosa exits, and the source ZIP stays unchanged. Choose **Mount read-only ZIP** or `--mount C=programs.zip` for a read-only view.
 
 If a guest requests write access to a read-only ZIP, Dosa names the drive in the toolbar. Choose **Drives → Stop and use ZIP copy**, then run the guest again from the writable copy.

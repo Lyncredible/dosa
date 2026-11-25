@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
 
-use dosa_dos::Machine;
+use dosa_dos::{BootDrive, Machine};
 use dosa_mount::Mount;
 
 mod batch;
@@ -181,6 +181,7 @@ impl Shell {
                 TYPE file    Print a file\r\n\
                 MOUNT drive path   Mount a file, directory, ZIP or disk image\r\n\
                 HELP MOUNT   Show mount options\r\n\
+                BOOT A path  Boot a raw floppy image; use C for a hard disk\r\n\
                 C:           Switch drives\r\n\
                 CLS          Clear the screen\r\n\
                 EXIT         Close dosa\r\n\
@@ -207,6 +208,21 @@ impl Shell {
             }
             "MOUNT" => self.mount_command(args, false)?,
             "IMGMOUNT" => self.mount_command(args, true)?,
+            "BOOT" => {
+                const USAGE: &str = "usage: BOOT A|C host-disk-image";
+                let (drive, host) = split_word(args)?;
+                let drive = match drive.trim_end_matches(':').to_ascii_uppercase().as_str() {
+                    "A" => BootDrive::Floppy,
+                    "C" => BootDrive::HardDisk,
+                    _ => return Err(USAGE.into()),
+                };
+                let host = unquote(host);
+                if host.is_empty() {
+                    return Err(USAGE.into());
+                }
+                self.machine.boot(std::fs::File::open(host)?, drive)?;
+                return Ok(Command::Launched);
+            }
             _ => {
                 if args.is_empty() && word.len() == 2 && word.ends_with(':') {
                     let (drive, _) = self.resolve(word)?;

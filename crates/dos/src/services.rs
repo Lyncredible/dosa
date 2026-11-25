@@ -15,9 +15,19 @@ impl Machine {
             return Ok(());
         }
         match vector {
-            0x10 if self.video.bios(&mut self.cpu) => {}
-            0x11 => self.cpu.regs.ax = 0x0020,
+            0x10 if self.video.bios(&mut self.cpu) => {
+                if ah == 0x0e && self.boot_disk.is_some() {
+                    self.output.push(al);
+                }
+            }
+            0x11 => {
+                self.cpu.regs.ax = self
+                    .boot_disk
+                    .as_ref()
+                    .map_or(0x0020, |disk| disk.equipment())
+            }
             0x12 => self.cpu.regs.ax = 640,
+            0x13 if let Some(disk) = &mut self.boot_disk => disk.interrupt(&mut self.cpu),
             0x16 => match ah {
                 0 | 0x10 => self.resume(Pending::Bios),
                 1 | 0x11 => {
@@ -44,6 +54,10 @@ impl Machine {
                 self.success();
             }
             0x1c => {}
+            0x18 if self.boot_disk.is_some() => self.exit(1),
+            0x20..=0xff if self.boot_disk.is_some() => {
+                return Err(DosError::Interrupt { vector, ax });
+            }
             0x20 => self.exit(0),
             0x21 => self.dos(ah, al),
             0x23 => self.exit(3),

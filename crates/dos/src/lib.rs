@@ -3,6 +3,7 @@
 mod adlib;
 mod audio;
 mod bios;
+mod boot_disk;
 mod dma;
 mod files;
 pub use files::matches_dos_pattern;
@@ -28,6 +29,7 @@ pub use mouse::MouseCursor;
 pub use video::{TextFrame, Video};
 
 use bios::{Hook, TIMER_VECTOR};
+pub use boot_disk::BootDrive;
 use dosa_cpu::{Cpu, CpuError, Step};
 pub use dosa_cpu::{CpuProfile, Registers};
 use dosa_mount::{Mount, MountError};
@@ -54,6 +56,7 @@ pub enum DosError {
     InvalidProgram(&'static str),
     Busy,
     GuestNotPaused,
+    BootMedia(std::io::Error),
     Mount(MountError),
     Cpu(CpuError),
     CpuAfterDeniedWrite { error: CpuError, drive: char },
@@ -72,6 +75,7 @@ impl fmt::Display for DosError {
             Self::InvalidProgram(message) => f.write_str(message),
             Self::Busy => f.write_str("a DOS program is already running"),
             Self::GuestNotPaused => f.write_str("pause a DOS program before stepping"),
+            Self::BootMedia(error) => write!(f, "cannot boot disk image: {error}"),
             Self::Mount(error) => write!(f, "{error}"),
             Self::Cpu(error) => write!(f, "{error}"),
             Self::CpuAfterDeniedWrite { error, drive } => write!(
@@ -155,6 +159,7 @@ pub struct Machine {
     cpu_profile: CpuProfile,
     video: Adapter,
     mounts: BTreeMap<char, Mount>,
+    boot_disk: Option<boot_disk::BootDisk>,
     files: DosFiles,
     state: RunState,
     pending: Vec<PendingCall>,
@@ -192,6 +197,7 @@ impl Machine {
             cpu_profile: CpuProfile::default(),
             video,
             mounts: BTreeMap::new(),
+            boot_disk: None,
             files: DosFiles::new('C', String::new()),
             state: RunState::Idle,
             pending: Vec::new(),
@@ -304,7 +310,30 @@ impl Machine {
         } else {
             format!("{drive}:\\{cwd}\\{}", entry.name)
         };
-        let mut cpu = loader::load(&bytes, &name, args, self.cpu_profile)?;
+        let cpu = loader::load(&bytes, &name, args, self.cpu_profile)?;
+        self.start(cpu, drive, cwd);
+        Ok(())
+    }
+
+    /// Load and execute the first sector of a read-only raw disk image.
+    pub fn boot(&mut self, file: std::fs::File, drive: BootDrive) -> Result<(), DosError> {
+        if self.state.is_active() {
+            return Err(DosError::Busy);
+        }
+        let (disk, sector) = boot_disk::BootDisk::open(file, drive).map_err(DosError::BootMedia)?;
+        let mut cpu = Cpu::with_profile(self.cpu_profile);
+        cpu.regs.ip = 0x7c00;
+        cpu.regs.sp = 0x7c00;
+        cpu.regs.dx = u16::from(drive.number());
+        cpu.regs.flags |= 0x0200;
+        cpu.load(0, 0x7c00, &sector);
+        self.start(cpu, 'C', "");
+        disk.install_data(&mut self.cpu);
+        self.boot_disk = Some(disk);
+        Ok(())
+    }
+
+    fn start(&mut self, mut cpu: Cpu, drive: char, cwd: &str) {
         let mut video = Adapter::new();
         video::initialize(&mut cpu, &mut video);
         let elapsed = self.clock.elapsed();
@@ -314,6 +343,7 @@ impl Machine {
         video.copy_console(&self.video, &self.cpu, &mut cpu);
         self.cpu = cpu;
         self.video = video;
+        self.boot_disk = None;
         self.files = DosFiles::new(drive, cwd.to_owned());
         self.pending.clear();
         self.keys.clear();
@@ -329,7 +359,6 @@ impl Machine {
         self.blocks = BTreeMap::from([(PSP, CONVENTIONAL_END - PSP)]);
         self.line.clear();
         self.state = RunState::Running;
-        Ok(())
     }
 
     pub fn key(&mut self, ascii: u8, scan: u8) {
@@ -646,6 +675,7 @@ impl Machine {
     fn exit(&mut self, code: u8) {
         self.set_paused(false);
         self.state = RunState::Exited(code);
+        self.boot_disk = None;
         self.pending.clear();
         self.files.close_all();
         self.video.restore_text(&mut self.cpu);
