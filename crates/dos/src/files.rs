@@ -71,6 +71,10 @@ pub(crate) enum HandleTarget {
 enum FileSource {
     Device(DeviceHandle),
     UnavailableDevice,
+    Spool {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        writable: bool,
+    },
     ReadOnly {
         contents: Vec<u8>,
         modified: Option<DosTimestamp>,
@@ -298,6 +302,12 @@ impl DosFiles {
             .map(Arc::as_ref)
     }
 
+    pub(crate) fn attach_pipe(&mut self, bytes: Arc<Mutex<Vec<u8>>>, writable: bool) {
+        let handle = u16::from(writable);
+        let _ = self.close(handle);
+        self.insert_handle(handle, FileSource::Spool { bytes, writable }, 0);
+    }
+
     /// Inherit the parent console and file streams without sharing handle assignments.
     pub(crate) fn inherit_standard_handles(&mut self, parent: &Self) {
         let mut inherited = BTreeMap::new();
@@ -374,7 +384,8 @@ impl DosFiles {
                     } => bytes.len() as u64,
                     FileSource::Device(_)
                     | FileSource::Writable { .. }
-                    | FileSource::UnavailableDevice => 0,
+                    | FileSource::UnavailableDevice
+                    | FileSource::Spool { .. } => 0,
                 })
                 .sum::<u64>();
         if size > remaining {
@@ -439,7 +450,7 @@ impl DosFiles {
     pub(crate) fn modified(&self, handle: u16) -> Result<DosTimestamp, u16> {
         let file = self.file(handle).ok_or(6u16)?;
         let modified = match &file.source {
-            FileSource::Device(_) => return Err(1),
+            FileSource::Device(_) | FileSource::Spool { .. } => return Err(1),
             FileSource::UnavailableDevice => return Err(6),
             FileSource::ReadOnly { modified, .. } => *modified,
             FileSource::Writable { file, .. } => file.modified().map_err(mount_code)?,
@@ -464,9 +475,13 @@ impl DosFiles {
                 DosDevice::Console => HandleTarget::Console,
                 DosDevice::Null => HandleTarget::Null,
             }),
-            Some(FileSource::ReadOnly { .. } | FileSource::Writable { readable: true, .. }) => {
-                Ok(HandleTarget::File(handle))
-            }
+            Some(
+                FileSource::ReadOnly { .. }
+                | FileSource::Writable { readable: true, .. }
+                | FileSource::Spool {
+                    writable: false, ..
+                },
+            ) => Ok(HandleTarget::File(handle)),
             Some(FileSource::UnavailableDevice) | None => Err(6),
             _ => Err(5),
         }
@@ -481,6 +496,10 @@ impl DosFiles {
         };
         let length = match &file.source {
             FileSource::ReadOnly { contents, .. } => contents.len() as u64,
+            FileSource::Spool {
+                bytes,
+                writable: false,
+            } => bytes.lock().map_or(0, |b| b.len() as u64),
             FileSource::Writable {
                 file,
                 readable: true,
@@ -497,7 +516,10 @@ impl DosFiles {
                 DosDevice::Console => HandleTarget::Console,
                 DosDevice::Null => HandleTarget::Null,
             }),
-            Some(FileSource::Writable { writable: true, .. }) => Ok(HandleTarget::File(handle)),
+            Some(
+                FileSource::Writable { writable: true, .. }
+                | FileSource::Spool { writable: true, .. },
+            ) => Ok(HandleTarget::File(handle)),
             Some(FileSource::UnavailableDevice) | None => Err(6),
             _ => Err(5),
         }
@@ -518,6 +540,14 @@ impl DosFiles {
         let mut position = file.position.lock().map_err(|_| 5u16)?;
         let data = match &file.source {
             FileSource::UnavailableDevice => return Err(6),
+            FileSource::Spool {
+                bytes,
+                writable: false,
+            } => {
+                let bytes = bytes.lock().map_err(|_| 5u16)?;
+                Cow::Owned(read_slice(&bytes, *position, length).to_vec())
+            }
+            FileSource::Spool { .. } => return Err(5),
             FileSource::ReadOnly {
                 contents: bytes, ..
             } => Cow::Borrowed(read_slice(bytes, *position, length)),
@@ -555,31 +585,32 @@ impl DosFiles {
         write: FileWriteOptions,
     ) -> Result<(), u16> {
         let file = self.file(handle).ok_or(6u16)?;
-        let FileSource::Writable {
-            file: destination,
-            writable: true,
-            ..
-        } = &file.source
-        else {
-            return Err(5);
-        };
         let mut position = file.position.lock().map_err(|_| 5u16)?;
         let end = position
             .checked_add(data.len())
             .filter(|&end| end as u64 <= MAX_OPEN_BYTES)
             .ok_or(112u16)?;
-        let mut bytes = destination.read().map_err(mount_code)?;
-        if data.is_empty() {
-            bytes.resize(end, 0);
-        } else {
-            if end > bytes.len() {
-                bytes.resize(end, 0);
+        match &file.source {
+            FileSource::Writable {
+                file: destination,
+                writable: true,
+                ..
+            } => {
+                let mut bytes = destination.read().map_err(mount_code)?;
+                update_bytes(&mut bytes, *position, end, data);
+                destination
+                    .replace_with(&bytes, write)
+                    .map_err(mount_code)?;
             }
-            bytes[*position..end].copy_from_slice(data);
+            FileSource::Spool {
+                bytes,
+                writable: true,
+            } => {
+                let mut bytes = bytes.lock().map_err(|_| 5u16)?;
+                update_bytes(&mut bytes, *position, end, data);
+            }
+            _ => return Err(5),
         }
-        destination
-            .replace_with(&bytes, write)
-            .map_err(mount_code)?;
         *position = end;
         Ok(())
     }
@@ -603,6 +634,7 @@ impl DosFiles {
                 FileSource::ReadOnly {
                     contents: bytes, ..
                 } => bytes.len(),
+                FileSource::Spool { bytes, .. } => bytes.lock().map_err(|_| 5u16)?.len(),
                 FileSource::Writable { file: source, .. } => {
                     source.length().map_err(mount_code)? as usize
                 }
@@ -641,6 +673,15 @@ impl DosFiles {
 
     pub(crate) fn next(&mut self) -> Result<(Entry, u8), u16> {
         self.search.pop_front().ok_or(18)
+    }
+}
+
+fn update_bytes(bytes: &mut Vec<u8>, position: usize, end: usize, data: &[u8]) {
+    if data.is_empty() || end > bytes.len() {
+        bytes.resize(end, 0);
+    }
+    if !data.is_empty() {
+        bytes[position..end].copy_from_slice(data);
     }
 }
 

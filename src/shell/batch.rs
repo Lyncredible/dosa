@@ -202,8 +202,10 @@ impl Batch {
         &mut self,
         errorlevel: u8,
         environment: &dosa_dos::Environment,
+        depth_floor: usize,
     ) -> Result<Option<Line>, String> {
-        while let Some(frame) = self.frames.last_mut() {
+        while self.frames.len() > depth_floor {
+            let frame = self.frames.last_mut().expect("a batch frame is available");
             if let Some((for_loop, echo)) = &mut frame.for_loop {
                 self.location =
                     (frame.next_line != 0).then(|| (Arc::clone(&frame.script), frame.next_line));
@@ -274,6 +276,10 @@ impl Shell {
             .is_some_and(|batch| !batch.prompt_loop || batch.frames.len() > 1)
     }
 
+    pub(super) fn batch_depth(&self) -> usize {
+        self.batch.as_ref().map_or(0, |batch| batch.frames.len())
+    }
+
     pub(super) fn batch_io(&self) -> Option<&ShellIo> {
         self.batch.as_ref()?.frames.last()?.io.as_ref()
     }
@@ -294,6 +300,7 @@ impl Shell {
     pub fn guest_failed(&mut self, error: Box<dyn Error>) -> Box<dyn Error> {
         self.pending_input = None;
         self.pending_redirects = None;
+        self.pipelines.clear();
         self.errorlevel = 1;
         match self.batch.take() {
             Some(batch) => batch.contextualize(error),
@@ -306,8 +313,31 @@ impl Shell {
         if self.batch_waiting() || self.input_waiting() {
             return Ok(None);
         }
-        let result = self.step_batch_line();
+        let result = self.step_script_or_pipeline();
         result.map_err(|error| self.guest_failed(error))
+    }
+
+    fn step_script_or_pipeline(&mut self) -> Result<Option<BatchStep>, Box<dyn Error>> {
+        loop {
+            if self.batch_depth() == 0 {
+                self.batch = None;
+            }
+            let floor = self.pipelines.last().map_or(0, |pipe| pipe.batch_depth);
+            if self.batch_depth() > floor
+                && let Some(step) = self.step_batch_line(floor)?
+            {
+                return Ok(Some(step));
+            }
+            if self.pipelines.is_empty() {
+                return Ok(None);
+            }
+            if let Some(command) = self.advance_pipeline()? {
+                return Ok(Some(BatchStep {
+                    echo: None,
+                    command,
+                }));
+            }
+        }
     }
 
     pub fn batch_waiting(&self) -> bool {
@@ -330,6 +360,7 @@ impl Shell {
             }
             (Pause::ConfirmAbort, b'Y') => {
                 self.batch = None;
+                self.pipelines.clear();
                 self.errorlevel = 3;
                 Some(b"Y\r\n")
             }
@@ -341,12 +372,14 @@ impl Shell {
         }
     }
 
-    fn step_batch_line(&mut self) -> Result<Option<BatchStep>, Box<dyn Error>> {
+    fn step_batch_line(&mut self, floor: usize) -> Result<Option<BatchStep>, Box<dyn Error>> {
         let Some(batch) = self.batch.as_mut() else {
             return Ok(None);
         };
-        let Some(line) = batch.next(self.errorlevel, self.machine.environment())? else {
-            self.batch = None;
+        let Some(line) = batch.next(self.errorlevel, self.machine.environment(), floor)? else {
+            if batch.frames.is_empty() {
+                self.batch = None;
+            }
             return Ok(None);
         };
         let mut echo = line
@@ -377,7 +410,7 @@ impl Shell {
         Ok(Some(BatchStep { echo, command }))
     }
 
-    fn execute_batch_command(
+    pub(super) fn execute_batch_command(
         &mut self,
         mut line: &str,
         echo: bool,
@@ -388,20 +421,22 @@ impl Shell {
         for character in line.chars() {
             match character {
                 '"' => quoted = !quoted,
-                '|' | '&' if !quoted => {
-                    return Err("batch pipes and command chaining are unsupported".into());
+                '&' if !quoted => {
+                    return Err("batch command chaining is unsupported".into());
                 }
                 _ => {}
             }
         }
         loop {
             let (word, args) = split_word(line.trim())?;
-            if !word.eq_ignore_ascii_case("IF")
-                && !word.eq_ignore_ascii_case("FOR")
-                && let Some(request) = super::redirection::parse(line)?
-            {
-                io.take(); // This line prepares its own overlay and routes its output.
-                return self.execute_redirected(request, true);
+            if !word.eq_ignore_ascii_case("IF") && !word.eq_ignore_ascii_case("FOR") {
+                if let Some(stages) = super::pipeline::parse(line)? {
+                    io.take(); // Each stage routes its own output.
+                    return self.start_pipeline(stages, true);
+                }
+                if let Some(request) = super::redirection::parse(line)? {
+                    return self.execute_redirected(request, true, io.take());
+                }
             }
             match word.to_ascii_uppercase().as_str() {
                 "IF" | "PAUSE" | "FOR" if args == "/?" => return self.execute_command(line, io),
@@ -429,6 +464,7 @@ impl Shell {
                 "EXIT" if !args.is_empty() => return self.exit_batch(args),
                 "EXIT" => {
                     self.batch = None;
+                    self.pipelines.clear();
                     return Ok(Command::Exit);
                 }
                 "ECHO." if args.is_empty() => return Ok(Command::Print(b"\r\n".to_vec())),
@@ -558,8 +594,12 @@ impl Shell {
             Err(_) => std::borrow::Cow::Owned(self.machine.code_page().decode_text(bytes)),
         };
         let frame = Frame::new(Arc::new(Script::new(name, &source)?), 0, word, args, io)?;
+        let pipe_stage = self
+            .pipelines
+            .last()
+            .is_some_and(|pipe| pipe.batch_depth == self.batch_depth());
         match self.batch.as_mut() {
-            Some(batch) if call || batch.prompt_loop && batch.frames.len() == 1 => {
+            Some(batch) if call || pipe_stage || batch.prompt_loop && batch.frames.len() == 1 => {
                 batch.push(frame)?
             }
             Some(batch) => {

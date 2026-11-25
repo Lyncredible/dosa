@@ -304,6 +304,39 @@ fn shell_redirects_files_devices_and_batch_commands() {
     );
     let literal = run("ECHO \"a>b\"", b"");
     assert_eq!(literal.stdout, b"\"a>b\"\r\n");
+    let quoted_pipe = run("ECHO \"a|b\" | FILTER | FILTER", b"");
+    assert!(quoted_pipe.status.success(), "{quoted_pipe:?}");
+    assert_eq!(quoted_pipe.stdout, b"\"a|b\"\r\n");
+
+    let binary_pipe = run("TYPE D:INPUT.DAT | FILTER | FILTER >PIPE.DAT", b"");
+    assert!(binary_pipe.status.success(), "{binary_pipe:?}");
+    assert!(binary_pipe.stdout.is_empty());
+    assert_eq!(fs::read(fixture.0.join("PIPE.DAT")).unwrap(), b"A\x00\x1aZ");
+
+    let override_input = run("ECHO ignored | FILTER <D:INPUT.DAT", b"");
+    assert!(override_input.status.success(), "{override_input:?}");
+    assert_eq!(override_input.stdout, b"A\x00\x1aZ");
+
+    let override_output = run("ECHO saved >SAVE.LOG | FILTER", b"");
+    assert!(override_output.status.success(), "{override_output:?}");
+    assert!(override_output.stdout.is_empty());
+    assert_eq!(fs::read(fixture.0.join("SAVE.LOG")).unwrap(), b"saved\r\n");
+
+    fs::write(
+        fixture.0.join("NESTED.BAT"),
+        b"@echo inner | FILTER\r\n@exit /b\r\n@echo skipped\r\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("PIPES.BAT"),
+        b"@echo off\r\necho first | FILTER\r\nNESTED.BAT | FILTER\r\necho last\r\n",
+    )
+    .unwrap();
+    let batch_pipe = run("PIPES.BAT", b"");
+    assert!(batch_pipe.status.success(), "{batch_pipe:?}");
+    assert_eq!(batch_pipe.stdout, b"first\r\ninner\r\nlast\r\n");
+    assert_eq!(run("NESTED.BAT | FILTER", b"").stdout, b"inner\r\n");
+
     let append = run("<D:INPUT.DAT FILTER>>COPY.DAT", b"");
     assert!(
         append.status.success() && append.stdout.is_empty(),
@@ -324,6 +357,8 @@ fn shell_redirects_files_devices_and_batch_commands() {
     );
 
     for command in [
+        "ECHO hello |",
+        "| ECHO hello",
         "ECHO hello >",
         "ECHO hello >X.TXT >Y.TXT",
         "ECHO no >D:BAD.TXT",
@@ -1997,9 +2032,9 @@ fn batch_errors_keep_line_context_and_bound_calls_and_loops() {
         ),
         ("@echo off\ncall case\n", "case", "batch CALL depth limit"),
         (
-            "@echo off\necho hello | second\n",
+            "@echo off\necho hello & second\n",
             "case",
-            "batch pipes and command chaining",
+            "batch command chaining",
         ),
         ("@echo off\ncrash\n", "case", "instruction"),
     ] {

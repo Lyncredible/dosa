@@ -13,6 +13,7 @@ mod delete;
 mod directory;
 mod for_loop;
 mod pending_input;
+mod pipeline;
 mod prompt;
 mod redirection;
 mod rename;
@@ -57,6 +58,7 @@ pub struct Shell {
     batch: Option<Batch>,
     pending_input: Option<PendingInput>,
     pending_redirects: Option<ShellIo>,
+    pipelines: Vec<pipeline::Pipeline>,
     errorlevel: u8,
     quick_launch: Option<QuickLaunch>,
 }
@@ -82,6 +84,7 @@ impl Shell {
             batch: None,
             pending_input: None,
             pending_redirects: None,
+            pipelines: Vec::new(),
             errorlevel: 0,
             quick_launch: None,
         }
@@ -115,7 +118,7 @@ impl Shell {
     }
 
     pub(crate) fn command_active(&self) -> bool {
-        self.batch_active() || self.input_waiting()
+        self.batch_active() || self.input_waiting() || !self.pipelines.is_empty()
     }
 
     pub fn current_drive(&self) -> char {
@@ -126,6 +129,7 @@ impl Shell {
         self.batch = None;
         self.pending_input = None;
         self.pending_redirects = None;
+        self.pipelines.clear();
         self.errorlevel = 0;
         self.machine.reset();
         self.finish_quick_launch()?;
@@ -200,10 +204,15 @@ impl Shell {
             return Err(dosa_dos::DosError::Busy.into());
         }
         let (word, _) = split_word(line.trim_start())?;
-        if !word.eq_ignore_ascii_case("FOR")
-            && let Some(request) = redirection::parse(line)?
-        {
-            return self.execute_redirected(request, false);
+        if !word.eq_ignore_ascii_case("FOR") {
+            if let Some(stages) = pipeline::parse(line)? {
+                return self
+                    .start_pipeline(stages, false)
+                    .map_err(|error| self.guest_failed(error));
+            }
+            if let Some(request) = redirection::parse(line)? {
+                return self.execute_redirected(request, false, None);
+            }
         }
         self.execute_command(line, &mut None)
     }
@@ -237,7 +246,10 @@ impl Shell {
         let output = match word.to_ascii_uppercase().as_str() {
             "" => return Ok(Command::Prompt),
             "CLS" => return Ok(Command::Clear),
-            "EXIT" => return Ok(Command::Exit),
+            "EXIT" => {
+                self.pipelines.clear();
+                return Ok(Command::Exit);
+            }
             "ECHO" => self.machine.code_page().encode_text(&format!("{args}\r\n")),
             "REM" => return Ok(Command::Prompt),
             "IF" if args == "/?" => condition::HELP.as_bytes().to_vec(),
@@ -297,7 +309,7 @@ impl Shell {
                 C:                         Switch drives\r\n\
                 CLS                        Clear the screen\r\n\
                 EXIT                       Close Dosa\r\n\
-                Use < file, > file, or >> file to redirect command input and output.\r\n\
+                Use < file, > file, or >> file to redirect input and output. Join commands with |.\r\n\
                 Enter a COM, EXE, or BAT name and arguments to run it.\r\n"
                 .to_vec(),
             "DIR" => return self.directory(args),

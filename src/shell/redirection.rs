@@ -88,6 +88,7 @@ impl Shell {
         &mut self,
         request: Redirection<'_>,
         batch: bool,
+        base: Option<ShellIo>,
     ) -> Result<Command, Box<dyn Error>> {
         let line = request.line.trim();
         let (word, args) = split_word(line)?;
@@ -97,13 +98,19 @@ impl Shell {
         {
             return Err("redirection is unavailable for this command".into());
         }
-        let mut io = Some(self.machine.prepare_shell_io(
-            self.drive,
-            &self.directories,
-            self.batch_io(),
-            request.input,
-            request.output,
-        )?);
+        let mut io = Some(if let Some(mut base) = base {
+            self.machine
+                .redirect_shell_io(&mut base, request.input, request.output)?;
+            base
+        } else {
+            self.machine.prepare_shell_io(
+                self.drive,
+                &self.directories,
+                self.batch_io(),
+                request.input,
+                request.output,
+            )?
+        });
         let command = match word.as_str() {
             "ECHO" if batch => self.echo_batch(args.trim_end()),
             "CALL" if batch => self.call_batch(args.trim_end(), io.take())?,
@@ -143,8 +150,12 @@ impl Shell {
                     command = Command::WaitForInput(PAUSE_MESSAGE.to_vec());
                 }
                 Command::Print(bytes) => {
-                    if !self.machine.write_shell_stdout(&mut io, &bytes)? {
+                    let redirected = self.machine.write_shell_stdout(&mut io, &bytes)?;
+                    if !redirected {
                         display.extend(bytes);
+                    }
+                    if redirected && display.is_empty() {
+                        return Ok(Command::Prompt);
                     }
                     return Ok(Command::Print(display));
                 }
