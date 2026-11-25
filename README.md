@@ -68,6 +68,7 @@ exec = "C:\\DEMO.COM"
 cpu = 386
 speed = "normal"
 text_rows = 25
+ansi_text = false
 text_columns = 80
 
 [[mounts]]
@@ -85,7 +86,9 @@ dosa --profile profiles/demo.toml --headless
 dosa --profile profiles/demo.toml --cpu 286 --speed fast --text-rows 43
 ~~~
 
-Relative TOML mount paths resolve from the profile's directory. Relative CLI mount paths resolve from the working directory. Set `writable = true` for a writable host directory or `session_zip = true` for a writable ZIP copy. A CLI mount flag replaces a profile mount on the same drive, including its access mode. Explicit `--exec`, `--cpu`, `--speed`, `--text-rows`, and `--text-columns` override the corresponding saved values.
+Relative TOML mount paths resolve from the profile's directory. Relative CLI mount paths resolve from the working directory. Set `writable = true` for a writable host directory or `session_zip = true` for a writable ZIP copy. A CLI mount flag replaces a profile mount on the same drive, including its access mode. Explicit `--exec`, `--cpu`, `--speed`, `--text-rows`, `--text-columns`, and `--ansi-text` or `--no-ansi-text` override the corresponding saved values.
+
+Use `--ansi-text` or set `ansi_text = true` in a launch profile to display DOS text colors, cursor positioning, screen clearing, and line wrapping from ANSI escape sequences. This also works with DOS `PROMPT $E` sequences and `TYPE` on ANSI text files. ANSI processing is off by default. Redirected files and headless output retain the original bytes.
 
 CPU profiles are `8086`, `286`, and `386`. Text modes have 80 or 132 columns and 25, 43, or 50 rows. Desktop execution speeds are `slow`, `normal`, `fast`, and `maximum` (`max` also works). Headless mode uses the same mounts, CPU, text rows, and command with its fixed instruction limit. Its command can come from `--exec` or the profile's `exec` field.
 

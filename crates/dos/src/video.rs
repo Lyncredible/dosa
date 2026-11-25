@@ -1,4 +1,8 @@
-use crate::{CodePage, vga::Vga};
+use crate::{
+    CodePage,
+    ansi::{Ansi, Byte},
+    vga::Vga,
+};
 use dosa_cpu::Cpu;
 
 #[cfg(test)]
@@ -86,6 +90,7 @@ impl TextGeometry {
 
 pub(crate) struct Adapter {
     pub(crate) code_page: CodePage,
+    pub(crate) ansi: Option<Ansi>,
     mode: u8,
     col: usize,
     row: usize,
@@ -108,6 +113,7 @@ impl Adapter {
     pub(crate) fn new() -> Self {
         Self {
             code_page: CodePage::default(),
+            ansi: None,
             mode: 3,
             col: 0,
             row: 0,
@@ -196,6 +202,7 @@ impl Adapter {
         to.memory[TEXT..TEXT + MAX_TEXT_BYTES]
             .copy_from_slice(&from.memory[TEXT..TEXT + MAX_TEXT_BYTES]);
         self.code_page = previous.code_page;
+        self.ansi = previous.ansi;
         self.console = previous.console;
         self.next_scan_lines = self.console.scan_lines;
         self.col = previous.col;
@@ -354,43 +361,138 @@ impl Adapter {
         self.update_cursor(cpu);
     }
 
+    pub(crate) fn write_dos(&mut self, cpu: &mut Cpu, bytes: &[u8]) {
+        let Some(mut ansi) = self.ansi.take() else {
+            return self.write(cpu, bytes);
+        };
+        if self.mode == 3 {
+            for &byte in bytes {
+                match ansi.consume(byte) {
+                    Byte::Text(byte) => {
+                        self.write_byte(cpu, byte, Some(ansi.attribute()), ansi.wrap)
+                    }
+                    Byte::LiteralEscape(byte) => {
+                        self.write_byte(cpu, 27, Some(ansi.attribute()), ansi.wrap);
+                        self.write_byte(cpu, byte, Some(ansi.attribute()), ansi.wrap);
+                    }
+                    Byte::Pending => {}
+                    Byte::Command(command) => self.apply_ansi(cpu, &mut ansi, command),
+                }
+            }
+            self.update_cursor(cpu);
+        } else {
+            self.write(cpu, bytes);
+        }
+        self.ansi = Some(ansi);
+    }
+
+    fn apply_ansi(&mut self, cpu: &mut Cpu, ansi: &mut Ansi, command: u8) {
+        let value = ansi.parameter(0);
+        if ansi.mode_command() {
+            if value == 7 && matches!(command, b'h' | b'l') {
+                ansi.wrap = command == b'h';
+            }
+            return;
+        }
+        let bottom = self.text.rows() - 1;
+        let right = self.text.columns - 1;
+        let distance = usize::from(value.max(1));
+        match command {
+            b'A' => self.row = self.row.saturating_sub(distance),
+            b'B' => self.row = (self.row + distance).min(bottom),
+            b'C' => self.col = (self.col + distance).min(right),
+            b'D' => self.col = self.col.saturating_sub(distance),
+            b'H' | b'f' => {
+                self.row = (distance - 1).min(bottom);
+                self.col = usize::from(ansi.parameter(1).saturating_sub(1)).min(right);
+            }
+            b'J' if value == 2 => {
+                self.blank_ansi(
+                    cpu,
+                    0,
+                    self.text.rows() * self.text.columns,
+                    ansi.attribute(),
+                );
+                self.row = 0;
+                self.col = 0;
+            }
+            b'K' if value == 0 => {
+                let row_start = self.row * self.text.columns;
+                self.blank_ansi(
+                    cpu,
+                    row_start + self.col,
+                    row_start + self.text.columns,
+                    ansi.attribute(),
+                );
+            }
+            b'm' => ansi.set_graphics_rendition(),
+            b's' => ansi.saved_cursor = Some((self.col, self.row)),
+            b'u' => {
+                if let Some((col, row)) = ansi.saved_cursor {
+                    self.col = col.min(right);
+                    self.row = row.min(bottom);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn blank_ansi(&self, cpu: &mut Cpu, start: usize, end: usize, attr: u8) {
+        for cell in cpu.memory[TEXT + start * 2..TEXT + end * 2]
+            .as_chunks_mut::<2>()
+            .0
+        {
+            *cell = [b' ', attr];
+        }
+    }
+
     pub(crate) fn write(&mut self, cpu: &mut Cpu, bytes: &[u8]) {
         if self.mode == 6 {
             return;
         }
         for &byte in bytes {
-            match byte {
-                b'\r' => self.col = 0,
-                b'\n' => self.row += 1,
-                8 => self.col = self.col.saturating_sub(1),
-                7 => {}
-                b'\t' => {
-                    let spaces = 8 - self.col % 8;
-                    self.write(cpu, &b"        "[..spaces]);
-                }
-                _ => {
-                    let cell = TEXT + self.row * self.text.columns * 2 + self.col * 2;
-                    cpu.memory[cell] = byte;
-                    self.col += 1;
-                    if self.col == self.text.columns {
-                        self.col = 0;
-                        self.row += 1;
-                    }
-                }
-            }
-            if self.row == self.text.rows() {
-                let bottom = self.text.rows() - 1;
-                self.scroll(
-                    cpu,
-                    [0, 0, bottom as u8, (self.text.columns - 1) as u8],
-                    1,
-                    0x07,
-                    false,
-                );
-                self.row = bottom;
-            }
+            self.write_byte(cpu, byte, None, true);
         }
         self.update_cursor(cpu);
+    }
+
+    fn write_byte(&mut self, cpu: &mut Cpu, byte: u8, attr: Option<u8>, wrap: bool) {
+        match byte {
+            b'\r' => self.col = 0,
+            b'\n' => self.row += 1,
+            8 => self.col = self.col.saturating_sub(1),
+            7 => {}
+            b'\t' => {
+                let spaces = 8 - self.col % 8;
+                for _ in 0..spaces {
+                    self.write_byte(cpu, b' ', attr, wrap);
+                }
+            }
+            _ => {
+                let cell = TEXT + self.row * self.text.columns * 2 + self.col * 2;
+                cpu.memory[cell] = byte;
+                if let Some(attr) = attr {
+                    cpu.memory[cell + 1] = attr;
+                }
+                if self.col + 1 < self.text.columns {
+                    self.col += 1;
+                } else if wrap {
+                    self.col = 0;
+                    self.row += 1;
+                }
+            }
+        }
+        if self.row == self.text.rows() {
+            let bottom = self.text.rows() - 1;
+            self.scroll(
+                cpu,
+                [0, 0, bottom as u8, (self.text.columns - 1) as u8],
+                1,
+                attr.unwrap_or(0x07),
+                false,
+            );
+            self.row = bottom;
+        }
     }
 
     fn graphics_character(&self, x: usize, y: usize, character: u8, color: u8) {

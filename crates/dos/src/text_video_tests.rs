@@ -240,3 +240,28 @@ fn mode_twelve_reports_graphics_and_bios_geometry() {
     assert!(video.bios(&mut cpu));
     assert_eq!(cpu.read_u8(0x40, 0x84), 24);
 }
+
+#[test]
+fn ansi_text_erase_and_wrap_use_current_geometry_and_attributes() {
+    let (mut cpu, mut video) = setup();
+    video.ansi = Some(crate::ansi::Ansi::default());
+    assert!(video.set_console_geometry(&mut cpu, 132, 43));
+
+    video.write_dos(&mut cpu, b"\x1b[37;44m\x1b[2J\x1b[43;132H\x1b[=7lAB");
+    let Video::Text(frame) = video.frame(&cpu) else {
+        panic!("expected text mode");
+    };
+    assert_eq!(frame.cursor, Some((131, 42)));
+    assert_eq!(&frame.cells[..2], b" \x17");
+    assert_eq!(&frame.cells[frame.cells.len() - 2..], b"B\x17");
+
+    video.write_dos(&mut cpu, b"\x1b[2D\x1b[K\x1b[=7h\x1b[43;132HZ");
+    let Video::Text(frame) = video.frame(&cpu) else {
+        panic!("expected text mode");
+    };
+    let cells = frame.cells.as_chunks::<2>().0;
+    assert_eq!(frame.cursor, Some((0, 42)));
+    assert_eq!(cells[132 * 42 - 2], [b' ', 0x17]);
+    assert_eq!(cells[132 * 42 - 1], [b'Z', 0x17]);
+    assert_eq!(cells[132 * 43 - 1], [b' ', 0x17]);
+}

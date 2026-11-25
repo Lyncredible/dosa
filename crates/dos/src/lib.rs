@@ -1,6 +1,7 @@
 //! A headless DOS process runtime with a BIOS text and VGA display.
 
 mod adlib;
+mod ansi;
 mod audio;
 mod bios;
 mod boot_disk;
@@ -275,6 +276,7 @@ impl Machine {
 
     /// Reset the guest CPU and devices while retaining media, the profile, and the shell environment.
     pub fn reset(&mut self) {
+        let ansi = self.video.ansi.is_some();
         *self = Self {
             mounts: std::mem::take(&mut self.mounts),
             environment: std::mem::take(&mut self.environment),
@@ -282,6 +284,14 @@ impl Machine {
             session_clock: self.session_clock,
             ..Self::new()
         };
+        self.set_ansi_text(ansi);
+    }
+
+    /// Enable DOS console processing of ANSI text escape sequences.
+    pub fn set_ansi_text(&mut self, enabled: bool) {
+        if enabled != self.video.ansi.is_some() {
+            self.video.ansi = enabled.then(ansi::Ansi::default);
+        }
     }
 
     /// Read the current session date and time without changing the host clock.
@@ -711,7 +721,7 @@ impl Machine {
     }
 
     pub fn write_console(&mut self, bytes: &[u8]) {
-        self.video.write(&mut self.cpu, bytes);
+        self.video.write_dos(&mut self.cpu, bytes);
     }
 
     /// Erase the character before the shell cursor, including across a wrapped row.

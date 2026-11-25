@@ -58,6 +58,7 @@ pub struct Settings {
     pub cpu: CpuMode,
     pub speed: Speed,
     pub text_mode: TextMode,
+    pub ansi_text: bool,
 }
 
 impl Default for Settings {
@@ -66,6 +67,7 @@ impl Default for Settings {
             cpu: CpuMode::I386,
             speed: Speed::Normal,
             text_mode: TextMode::Rows25,
+            ansi_text: false,
         }
     }
 }
@@ -73,6 +75,7 @@ impl Default for Settings {
 impl Settings {
     pub fn apply(self, shell: &mut Shell) -> Result<(), dosa_dos::DosError> {
         shell.machine.set_cpu_profile(cpu_profile(self.cpu))?;
+        shell.machine.set_ansi_text(self.ansi_text);
         shell
             .machine
             .set_text_geometry(text_columns(self.text_mode), text_rows(self.text_mode));
@@ -1036,6 +1039,53 @@ mod tests {
         desktop.running = true;
         desktop.paste_text("\u{f8}");
         assert_eq!(desktop.paste.pop_front(), Some(0x9b));
+    }
+
+    #[test]
+    fn ansi_sequences_reach_the_desktop_from_shell_and_guest_output() {
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(
+            folder.path().join("COLOR.TXT"),
+            b"\x1b[2J\x1b[2;4H\x1b[1;31;44mX\x1b[s\x1b[8;1H\x1b[0mY\x1b[u",
+        )
+        .unwrap();
+        let mut guest = vec![
+            0xba, 0x20, 1, 0xb4, 9, 0xcd, 0x21, // Write ESC [ in one DOS call.
+            0xba, 0x23, 1, 0xb4, 9, 0xcd, 0x21, // Complete the sequence in the next call.
+            0xb8, 0, 0x4c, 0xcd, 0x21,
+        ];
+        guest.resize(0x20, 0);
+        guest.extend_from_slice(b"\x1b[$3;7H\x1b[32mZ\x1b[0m$");
+        std::fs::write(folder.path().join("GUEST.COM"), guest).unwrap();
+        let mut shell = Shell::new();
+        shell
+            .mount('C', Mount::open_writable_directory(folder.path()).unwrap())
+            .unwrap();
+        let mut desktop = Desktop::with_settings(
+            shell,
+            None,
+            Settings {
+                ansi_text: true,
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+        desktop.submit("TYPE COLOR.TXT");
+        desktop.submit("TYPE COLOR.TXT > COPY.TXT");
+        desktop.submit("GUEST");
+        desktop.tick();
+
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected text mode");
+        };
+        let cells = frame.cells.as_chunks::<2>().0;
+        assert_eq!(cells[80 + 3], [b'X', 0x1c]);
+        assert_eq!(cells[160 + 6], [b'Z', 0x02]);
+        assert_eq!(cells[560], [b'Y', 0x07]);
+        assert_eq!(
+            std::fs::read(folder.path().join("COPY.TXT")).unwrap(),
+            std::fs::read(folder.path().join("COLOR.TXT")).unwrap()
+        );
     }
 
     #[test]
