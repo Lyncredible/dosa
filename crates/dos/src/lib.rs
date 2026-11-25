@@ -5,6 +5,7 @@ mod audio;
 mod bios;
 mod boot_disk;
 mod dma;
+mod environment;
 mod files;
 pub use files::matches_dos_pattern;
 mod keyboard;
@@ -33,6 +34,7 @@ pub use boot_disk::BootDrive;
 use dosa_cpu::{Cpu, CpuError, Step};
 pub use dosa_cpu::{CpuProfile, Registers};
 use dosa_mount::{Mount, MountError};
+pub use environment::Environment;
 use files::DosFiles;
 use keyboard::{KEYBOARD_VECTOR, Keyboard, MAX_KEYS};
 use loader::{CONVENTIONAL_END, PSP};
@@ -53,6 +55,7 @@ pub enum DosError {
     InvalidDrive(char),
     UnmountedDrive(char),
     InvalidCommandTail,
+    InvalidEnvironment(&'static str),
     InvalidProgram(&'static str),
     Busy,
     GuestNotPaused,
@@ -72,7 +75,9 @@ impl fmt::Display for DosError {
                 f,
                 "command tail must be at most 126 ASCII bytes including its leading space"
             ),
-            Self::InvalidProgram(message) => f.write_str(message),
+            Self::InvalidProgram(message) | Self::InvalidEnvironment(message) => {
+                f.write_str(message)
+            }
             Self::Busy => f.write_str("a DOS program is already running"),
             Self::GuestNotPaused => f.write_str("pause a DOS program before stepping"),
             Self::BootMedia(error) => write!(f, "cannot boot disk image: {error}"),
@@ -160,6 +165,7 @@ pub struct Machine {
     video: Adapter,
     mounts: BTreeMap<char, Mount>,
     boot_disk: Option<boot_disk::BootDisk>,
+    environment: Environment,
     files: DosFiles,
     state: RunState,
     pending: Vec<PendingCall>,
@@ -198,6 +204,7 @@ impl Machine {
             video,
             mounts: BTreeMap::new(),
             boot_disk: None,
+            environment: Environment::default(),
             files: DosFiles::new('C', String::new()),
             state: RunState::Idle,
             pending: Vec::new(),
@@ -226,13 +233,22 @@ impl Machine {
         Ok(())
     }
 
-    /// Reset the guest CPU and devices while retaining mounted media and the CPU profile.
+    /// Reset the guest CPU and devices while retaining media, the profile, and the shell environment.
     pub fn reset(&mut self) {
         *self = Self {
             mounts: std::mem::take(&mut self.mounts),
+            environment: std::mem::take(&mut self.environment),
             cpu_profile: self.cpu_profile,
             ..Self::new()
         };
+    }
+
+    pub fn environment(&self) -> &Environment {
+        &self.environment
+    }
+
+    pub fn environment_mut(&mut self) -> &mut Environment {
+        &mut self.environment
     }
 
     pub fn drive(&self, drive: char) -> Option<&Mount> {
@@ -310,7 +326,7 @@ impl Machine {
         } else {
             format!("{drive}:\\{cwd}\\{}", entry.name)
         };
-        let cpu = loader::load(&bytes, &name, args, self.cpu_profile)?;
+        let cpu = loader::load(&bytes, &name, args, self.cpu_profile, &self.environment)?;
         self.start(cpu, drive, cwd);
         Ok(())
     }
