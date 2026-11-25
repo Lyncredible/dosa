@@ -10,6 +10,7 @@ mod code_page;
 mod dma;
 mod environment;
 mod files;
+mod gameport;
 pub use files::{DosDevice, matches_dos_pattern};
 mod keyboard;
 mod loader;
@@ -32,6 +33,7 @@ pub const DOS_VERSION: [u8; 2] = [5, 0];
 #[cfg(test)]
 mod tests;
 
+pub use gameport::JoystickState;
 pub use mouse::MouseCursor;
 pub use video::{TextFrame, Video};
 
@@ -206,6 +208,7 @@ pub struct Machine {
     pending: Vec<PendingCall>,
     keys: VecDeque<(u8, u8)>,
     keyboard: Keyboard,
+    gameport: gameport::GamePort,
     mouse: Mouse,
     pic: Pic,
     pit: Pit,
@@ -248,6 +251,7 @@ impl Machine {
             pending: Vec::new(),
             keys: VecDeque::new(),
             keyboard: Keyboard::default(),
+            gameport: gameport::GamePort::default(),
             mouse: Mouse::default(),
             pic: Pic::default(),
             pit: Pit::new(0),
@@ -277,11 +281,14 @@ impl Machine {
     /// Reset the guest CPU and devices while retaining media, the profile, and the shell environment.
     pub fn reset(&mut self) {
         let ansi = self.video.ansi.is_some();
+        let mut gameport = std::mem::take(&mut self.gameport);
+        gameport.reset_timers();
         *self = Self {
             mounts: std::mem::take(&mut self.mounts),
             environment: std::mem::take(&mut self.environment),
             cpu_profile: self.cpu_profile,
             session_clock: self.session_clock,
+            gameport,
             ..Self::new()
         };
         self.set_ansi_text(ansi);
@@ -595,6 +602,7 @@ impl Machine {
         self.pending.clear();
         self.keys.clear();
         self.keyboard = Keyboard::default();
+        self.gameport.reset_timers();
         self.mouse = Mouse::default();
         self.pic = Pic::default();
         self.pit = Pit::new(now);
@@ -606,6 +614,11 @@ impl Machine {
         self.blocks = BTreeMap::from([(PSP, CONVENTIONAL_END - PSP)]);
         self.line.clear();
         self.state = RunState::Running;
+    }
+
+    /// Update connector A (0) or B (1). Pass `None` when the controller disconnects.
+    pub fn set_joystick(&mut self, connector: usize, state: Option<JoystickState>) {
+        self.gameport.set(connector, state);
     }
 
     pub fn key(&mut self, ascii: u8, scan: u8) {
@@ -859,6 +872,7 @@ impl Machine {
                         .or_else(|| self.audio.read_port(port, elapsed))
                         .or_else(|| self.pit.port_read(port))
                         .or_else(|| self.keyboard.port_read(port))
+                        .or_else(|| (port == gameport::PORT).then(|| self.gameport.read(elapsed)))
                         .or_else(|| self.video.port_read(port))
                         .unwrap_or(0xff);
                     if port == 0x61 {
@@ -874,6 +888,10 @@ impl Machine {
                     let value = (value >> (byte * 8)) as u8;
                     let elapsed = self.elapsed();
                     self.audio.advance(elapsed, &self.cpu);
+                    if port == gameport::PORT {
+                        self.gameport.strobe(elapsed);
+                        continue;
+                    }
                     if !self.audio.write_port(port, value, elapsed, &mut self.cpu)
                         && !self.pic.port_write(port, value)
                         && !self.pit.port_write(port, value)

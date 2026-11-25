@@ -5,7 +5,7 @@ use dosa_desktop::{
     App, CpuMode, Frame, Input, Key, MenuAction, MenuState, PointerEvent, PointerMode, Scaling,
     Speed, TextMode, Volume,
 };
-use dosa_dos::{CpuProfile, MouseCursor, RunState, TextFrame, Video};
+use dosa_dos::{CpuProfile, JoystickState, MouseCursor, RunState, TextFrame, Video};
 use dosa_mount::Mount;
 
 use crate::shell::{Command, PAUSE_MESSAGE, Shell};
@@ -44,6 +44,7 @@ pub struct Desktop {
     scaling: Scaling,
     clipboard: Option<arboard::Clipboard>,
     paste: VecDeque<u8>,
+    joystick_keys: [bool; 6],
     settings: Settings,
     status: String,
     exit: bool,
@@ -59,6 +60,7 @@ pub struct Settings {
     pub speed: Speed,
     pub text_mode: TextMode,
     pub ansi_text: bool,
+    pub virtual_joystick: bool,
 }
 
 impl Default for Settings {
@@ -68,6 +70,7 @@ impl Default for Settings {
             speed: Speed::Normal,
             text_mode: TextMode::Rows25,
             ansi_text: false,
+            virtual_joystick: false,
         }
     }
 }
@@ -76,6 +79,9 @@ impl Settings {
     pub fn apply(self, shell: &mut Shell) -> Result<(), dosa_dos::DosError> {
         shell.machine.set_cpu_profile(cpu_profile(self.cpu))?;
         shell.machine.set_ansi_text(self.ansi_text);
+        shell
+            .machine
+            .set_joystick(0, self.virtual_joystick.then(JoystickState::default));
         shell
             .machine
             .set_text_geometry(text_columns(self.text_mode), text_rows(self.text_mode));
@@ -110,6 +116,7 @@ impl Desktop {
             scaling: Scaling::default(),
             clipboard: None,
             paste: VecDeque::new(),
+            joystick_keys: [false; 6],
             settings,
             status: String::new(),
             exit: false,
@@ -329,9 +336,54 @@ impl Desktop {
         }
     }
 
+    fn joystick_input(&mut self, scan: u8, pressed: bool) -> bool {
+        if !self.settings.virtual_joystick {
+            return false;
+        }
+        let key = match scan {
+            0x4b => 0, // Left
+            0x4d => 1, // Right
+            0x48 => 2, // Up
+            0x50 => 3, // Down
+            0x2c => 4, // Z
+            0x2d => 5, // X
+            _ => return false,
+        };
+        if !self.paused || !pressed {
+            self.joystick_keys[key] = pressed;
+            let [left, right, up, down, first, second] = self.joystick_keys;
+            let axis = |negative, positive| match (negative, positive) {
+                (true, false) => 0,
+                (false, true) => 255,
+                _ => 128,
+            };
+            self.shell.machine.set_joystick(
+                0,
+                Some(JoystickState {
+                    x: axis(left, right),
+                    y: axis(up, down),
+                    buttons: [first, second],
+                }),
+            );
+        }
+        true
+    }
+
+    fn center_keyboard_joystick(&mut self) {
+        if self.settings.virtual_joystick {
+            self.joystick_keys.fill(false);
+            self.shell
+                .machine
+                .set_joystick(0, Some(JoystickState::default()));
+        }
+    }
+
     fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
         self.shell.machine.set_paused(paused);
+        if paused || !self.running {
+            self.center_keyboard_joystick();
+        }
         if paused {
             self.shell.machine.mouse_buttons(0);
         } else {
@@ -344,6 +396,7 @@ impl Desktop {
         self.paused = false;
         self.inspecting = false;
         self.paste.clear();
+        self.joystick_keys.fill(false);
         self.line.clear();
         self.status = match self
             .shell
@@ -718,6 +771,9 @@ impl App for Desktop {
     }
 
     fn input(&mut self, event: Input) {
+        if self.running && self.joystick_input(event.scan_code, event.pressed) {
+            return;
+        }
         if !event.pressed {
             if self.running {
                 self.shell.machine.key_up(event.scan_code);
@@ -1039,6 +1095,60 @@ mod tests {
         desktop.running = true;
         desktop.paste_text("\u{f8}");
         assert_eq!(desktop.paste.pop_front(), Some(0x9b));
+    }
+
+    #[test]
+    fn virtual_joystick_keyboard_input_reaches_the_guest_and_centers_on_pause() {
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(
+            folder.path().join("JOY.COM"),
+            [
+                0xba, 1, 2, 0xec, 0x88, 0xc3, // BL = gameport byte
+                0xb4, 1, 0xcd, 0x16, 0x74, 2, // No keyboard input should leak through
+                0xb3, 1, 0x88, 0xd8, 0xb4, 0x4c, 0xcd, 0x21, // Exit with BL
+            ],
+        )
+        .unwrap();
+        let mut shell = Shell::new();
+        shell
+            .mount('C', Mount::open(folder.path()).unwrap())
+            .unwrap();
+        let mut desktop = Desktop::with_settings(
+            shell,
+            None,
+            Settings {
+                virtual_joystick: true,
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+        let input = |scan_code, pressed| Input {
+            key: Key::Other,
+            scan_code,
+            pressed,
+            text: None,
+            modifiers: Default::default(),
+        };
+        desktop.submit("JOY");
+        desktop.input(input(0x4b, true));
+        desktop.input(input(0x2c, true));
+        desktop.input(input(0x2d, true));
+        desktop.input(input(0x2d, false));
+        assert_eq!(
+            desktop.joystick_keys,
+            [true, false, false, false, true, false]
+        );
+        desktop.tick();
+        assert_eq!(desktop.shell.errorlevel(), 0xec);
+        assert_eq!(desktop.joystick_keys, [false; 6]);
+
+        desktop.submit("JOY");
+        desktop.input(input(0x2c, true));
+        desktop.menu_action(MenuAction::SetPaused(true));
+        desktop.input(input(0x2d, true));
+        desktop.menu_action(MenuAction::SetPaused(false));
+        desktop.tick();
+        assert_eq!(desktop.shell.errorlevel(), 0xfc);
     }
 
     #[test]

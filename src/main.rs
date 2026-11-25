@@ -33,6 +33,8 @@ Usage: dosa [OPTIONS]
   --text-columns COLS  Select 80 or 132 text columns
   --ansi-text          Interpret DOS ANSI text escape sequences on the display
   --no-ansi-text       Disable ANSI text processing from a launch profile
+  --virtual-joystick   Map arrow keys and Z/X to the DOS gameport
+  --no-virtual-joystick Disable the virtual joystick from a launch profile
   --headless           Run without a window (requires a startup command)
   -h, --help           Show usage
   --version            Show the version
@@ -120,6 +122,8 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             }
             Some("--ansi-text") => overrides.ansi_text = Some(true),
             Some("--no-ansi-text") => overrides.ansi_text = Some(false),
+            Some("--virtual-joystick") => overrides.virtual_joystick = Some(true),
+            Some("--no-virtual-joystick") => overrides.virtual_joystick = Some(false),
             Some("--headless") => headless = true,
             _ => return Err(format!("unknown option {:?}", arg).into()),
         }

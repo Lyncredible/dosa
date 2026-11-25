@@ -34,6 +34,7 @@ pub struct SettingsOverrides {
     pub text_mode: Option<TextMode>,
     pub text_columns: Option<u16>,
     pub ansi_text: Option<bool>,
+    pub virtual_joystick: Option<bool>,
 }
 
 impl SettingsOverrides {
@@ -47,6 +48,7 @@ impl SettingsOverrides {
             cpu: self.cpu.unwrap_or(base.cpu),
             speed: self.speed.unwrap_or(base.speed),
             ansi_text: self.ansi_text.unwrap_or(base.ansi_text),
+            virtual_joystick: self.virtual_joystick.unwrap_or(base.virtual_joystick),
             text_mode: match (columns, rows) {
                 (132, TextMode::Rows25 | TextMode::WideRows25) => TextMode::WideRows25,
                 (132, TextMode::Rows43 | TextMode::WideRows43) => TextMode::WideRows43,
@@ -69,6 +71,7 @@ struct ProfileFile {
     text_rows: Option<u8>,
     text_columns: Option<u16>,
     ansi_text: Option<bool>,
+    virtual_joystick: Option<bool>,
     #[serde(default)]
     mounts: Vec<MountEntry>,
 }
@@ -123,6 +126,7 @@ impl LaunchProfile {
             speed,
             text_mode,
             ansi_text: profile.ansi_text,
+            virtual_joystick: profile.virtual_joystick,
             text_columns: profile
                 .text_columns
                 .map(|columns| parse_text_columns(&columns.to_string()))

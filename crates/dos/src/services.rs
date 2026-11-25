@@ -26,6 +26,7 @@ impl Machine {
             0x11 => self.cpu.regs.ax = crate::bios::equipment(&self.cpu),
             0x12 => self.cpu.regs.ax = 640,
             0x13 if let Some(disk) = &mut self.boot_disk => disk.interrupt(&mut self.cpu),
+            0x15 if ah == 0x84 => self.joystick_interrupt(),
             0x16 => match ah {
                 0 | 0x10 => self.resume(Pending::Bios),
                 1 | 0x11 => {
@@ -71,6 +72,35 @@ impl Machine {
             _ => return Err(DosError::Interrupt { vector, ax }),
         }
         Ok(())
+    }
+
+    fn joystick_interrupt(&mut self) {
+        match self.cpu.regs.dx {
+            0 => {
+                self.set_al(self.gameport.buttons());
+                if !self.gameport.connected() {
+                    self.cpu.regs.ax = 0x00f0;
+                    self.cpu.regs.dx = crate::gameport::PORT;
+                }
+            }
+            1 => {
+                [
+                    self.cpu.regs.ax,
+                    self.cpu.regs.bx,
+                    self.cpu.regs.cx,
+                    self.cpu.regs.dx,
+                ] = self.gameport.positions();
+            }
+            _ => {
+                self.failure(0x8600);
+                return;
+            }
+        }
+        if self.gameport.connected() {
+            self.success();
+        } else {
+            self.cpu.regs.flags |= crate::CARRY;
+        }
     }
 
     pub(crate) fn resume(&mut self, pending: Pending) {
