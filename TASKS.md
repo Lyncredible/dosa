@@ -29,7 +29,7 @@ The first milestone is a GPU-rendered DOS prompt that can mount host content and
 | [23 · DOSBox-X feature comparison](docs/tasks/23-dosbox-x-comparison.md) | 10, 15, 16 | Prioritized |
 | [24 · Desktop controls and appearance](docs/tasks/24-desktop-polish.md) | 03, 10, 23 | Reset, native Windows menu and caption, and icon implemented |
 | [25 · MS-DOS 6.22 built-in command parity](docs/tasks/25-dos-command-parity.md) | 02, 04, 17 | Directory switches implemented. Command parity in progress |
-| [26 · Protected mode and DOS extenders](docs/tasks/26-protected-mode.md) | 01, 05, 16, 19 | 16-bit ring 0 transitions and interrupt gates implemented |
+| [26 · Protected mode and DOS extenders](docs/tasks/26-protected-mode.md) | 01, 05, 16, 19 | 16-bit and 32-bit ring 0 transitions and interrupt gates implemented |
 
 See [architecture](docs/architecture.md) for the library boundaries and execution model.
 

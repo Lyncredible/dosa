@@ -851,3 +851,102 @@ fn dos_guest_enters_protected_mode_dispatches_an_interrupt_and_returns() {
     assert!(!machine.cpu.protected_mode());
     assert_eq!(machine.cpu.read_u8(crate::PSP, 0x202), 0x6b);
 }
+
+#[test]
+fn dos_guest_uses_32_bit_code_stack_and_interrupt_gate_above_64_kib() {
+    let folder = Directory::new("protected-mode-32");
+    let mut com = vec![0; 0x808 - 0x100];
+    fn place(com: &mut [u8], offset: usize, bytes: &[u8]) {
+        let start = offset - 0x100;
+        com[start..start + bytes.len()].copy_from_slice(bytes);
+    }
+
+    let mut code = vec![
+        0x66, 0xb8, 0x10, 0, 0x8e, 0xd8, 0x8e, 0xc0, 0x8e, 0xd0, // DS=ES=SS=0010h.
+        0xbc, 0x0c, 0, 2, 0, // ESP=0002000Ch.
+        0xc7, 0x05, 0, 0x70, 1, 0, 0x78, 0x56, 0x34, 0x12, // Write DS:00017000h.
+        0xbe, 0, 0x70, 1, 0, 0xbf, 0, 0x80, 1, 0, // ESI and EDI reach above 64 KiB.
+        0xb9, 4, 0, 0, 0, 0xf3, 0xa4, // REP MOVSB.
+    ];
+    let call = code.len();
+    code.extend([0xe8, 0, 0, 0, 0]); // Near CALL to offset 102A0h.
+    code.extend([
+        0xcd, 0x60, // 32-bit IDT gate to offset 102C0h.
+        0xa3, 4, 0x80, 1, 0, // Store the handler's EAX.
+        0x89, 0x25, 8, 0x80, 1, 0, // Store ESP after IRETD.
+        0x0f, 0x20, 0xc3, 0x83, 0xe3, 0xfe, 0x0f, 0x22, 0xc3, // Turn off PE.
+        0x66, 0xea, 0x70, 1, 0, 0x10, // Real-mode JMP to 1000:0170.
+    ]);
+    let subroutine = 0xa0;
+    let displacement = (subroutine - (call + 5)) as u32;
+    code[call + 1..call + 5].copy_from_slice(&displacement.to_le_bytes());
+    code.resize(subroutine, 0x90);
+    code.extend([
+        0xc8, 0x10, 0, 0, // ENTER 16,0 uses the wide stack.
+        0xc7, 0x45, 0xf8, 0x04, 0x03, 0x02, 0x01, // Store through SS:[EBP-8].
+        0xc9, 0xc3, // LEAVE; RET
+    ]);
+    code.resize(0xc0, 0x90);
+    code.extend([0xb8, 0x2a, 0xb4, 0x37, 0x92, 0xcf]); // MOV EAX,9237B42Ah; IRETD.
+
+    let length = (code.len() as u16).to_le_bytes();
+    place(
+        &mut com,
+        0x100,
+        &[
+            0xfa, 0xfc, // CLI; CLD
+            0xb8, 0, 0x30, 0x8e, 0xc0, // ES=3000h.
+            0xbe, 0, 5, 0xbf, 0, 2, 0xb9, length[0], length[1], 0xf3, 0xa4, // Copy payload.
+            0x0f, 1, 0x16, 0x80, 1, 0x0f, 1, 0x1e, 0x86, 1, // LGDT and LIDT.
+            0x0f, 0x20, 0xc3, 0x66, 0x83, 0xcb, 1, 0x0f, 0x22, 0xc3, // Turn on PE.
+            0x66, 0xea, 0, 2, 1, 0, 8, 0, // JMP 0008:00010200h.
+        ],
+    );
+    place(
+        &mut com,
+        0x170,
+        &[
+            0x8c, 0xcb, 0x8e, 0xdb, 0x8e, 0xd3, 0xbc, 0xfe, 0xff, // Restore DOS segments.
+            0xb4, 0x4c, 0xcd, 0x21,
+        ],
+    );
+    place(
+        &mut com,
+        0x180,
+        &[
+            0x17, 0, 0x90, 1, 1, 0, // GDTR at 10190h.
+            0x07, 3, 0, 5, 1, 0, // IDTR at 10500h.
+        ],
+    );
+    place(
+        &mut com,
+        0x190,
+        &[
+            0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0, 2, 0x9a, 0x42,
+            0, // Wide code at physical 20000h.
+            0xff, 0xff, 0, 0, 1, 0x92, 0x42, 0, // Wide stack and data at physical 10000h.
+        ],
+    );
+    place(&mut com, 0x500, &code);
+    place(&mut com, 0x800, &[0xc0, 2, 8, 0, 0, 0x8e, 1, 0]);
+    folder.write("PM32.COM", &com);
+
+    let mut machine = folder.machine();
+    machine.launch('C', "PM32.COM", "").unwrap();
+    assert_eq!(machine.run(code.len() + 13).unwrap(), RunState::Running);
+    machine.set_paused(true);
+    let guest = machine.paused_guest().unwrap();
+    assert_eq!(guest.instruction_pointer(), 0x10200);
+    assert_eq!(guest.peek_code(0), Some(0x66));
+    assert_eq!(guest.peek_code(1), Some(0xb8));
+    machine.set_paused(false);
+    assert_eq!(machine.run(512).unwrap(), RunState::Exited(0x2a));
+    assert!(!machine.cpu.protected_mode());
+    assert_eq!(
+        &machine.cpu.memory[0x28000..0x2800c],
+        &[
+            0x78, 0x56, 0x34, 0x12, 0x2a, 0xb4, 0x37, 0x92, 0x0c, 0, 2, 0
+        ]
+    );
+    assert_eq!(&machine.cpu.memory[0x2fffc..0x30000], &[4, 3, 2, 1]);
+}

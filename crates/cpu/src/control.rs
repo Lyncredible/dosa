@@ -23,6 +23,7 @@ pub(super) struct Segment {
     readable: bool,
     writable: bool,
     usable: bool,
+    pub(super) wide: bool,
 }
 
 impl Segment {
@@ -32,6 +33,7 @@ impl Segment {
         readable: false,
         writable: false,
         usable: false,
+        wide: false,
     };
 
     pub(super) fn address(
@@ -52,6 +54,14 @@ impl Segment {
         let address = self.base.checked_add(offset)? as usize;
         (address.checked_add(width)? <= MEMORY_SIZE).then_some(address)
     }
+}
+
+pub(super) struct InterruptGate {
+    pub(super) offset: u32,
+    pub(super) selector: u16,
+    pub(super) code: Segment,
+    pub(super) width: u8,
+    pub(super) disable_irq: bool,
 }
 
 pub(super) struct Control {
@@ -94,10 +104,12 @@ impl Cpu {
         let low = self.read_mem(address, 4);
         let high = self.read_mem(address + 4, 4);
         let access = (high >> 8) as u8;
+        let is_386 = self.profile == CpuProfile::I386;
+        let wide = high & 0x0040_0000 != 0;
         let code = access & 0x08 != 0;
         let readable_code_or_writable_data = access & 0x02 != 0;
         if access & 0xf0 != 0x90 // Present, ring 0, ordinary code or data.
-            || high & 0x0040_0000 != 0 // 32-bit defaults require full EIP/ESP support.
+            || wide && !is_386
             || access & 0x04 != 0 // Conforming code and expand-down data need their own rules.
             || register == Register::CS && !code
             || register == Register::SS && (code || !readable_code_or_writable_data)
@@ -105,7 +117,6 @@ impl Cpu {
         {
             return None;
         }
-        let is_386 = self.profile == CpuProfile::I386;
         let mut base = (low >> 16) | ((high & 0xff) << 16);
         let mut limit = low & 0xffff;
         if is_386 {
@@ -121,22 +132,31 @@ impl Cpu {
             readable: !code || readable_code_or_writable_data,
             writable: !code && readable_code_or_writable_data,
             usable: true,
+            wide,
         }))
     }
 
-    pub(super) fn interrupt_gate(&self, vector: u8) -> Option<(u16, u16, Segment, bool)> {
+    pub(super) fn interrupt_gate(&self, vector: u8) -> Option<InterruptGate> {
         let address = self.control.idtr.at(u32::from(vector) * 8, 8)?;
         let low = self.read_mem(address, 4);
         let high = self.read_mem(address + 4, 4);
-        let gate = (high >> 8) as u8;
-        if !matches!(gate & !0x60, 0x86 | 0x87) {
-            return None;
-        }
+        let gate = ((high >> 8) as u8) & !0x60;
+        let width = match gate {
+            0x86 | 0x87 => 2,
+            0x8e | 0x8f if self.profile == CpuProfile::I386 => 4,
+            _ => return None,
+        };
         let selector = (low >> 16) as u16;
-        let offset = low as u16;
+        let offset = (low & 0xffff) | if width == 4 { high & 0xffff_0000 } else { 0 };
         let code = self.descriptor(Register::CS, selector)??;
-        code.address(true, offset.into(), 1, false)?;
-        Some((offset, selector, code, gate & 1 == 0))
+        code.address(true, offset, 1, false)?;
+        Some(InterruptGate {
+            offset,
+            selector,
+            code,
+            width,
+            disable_irq: gate & 1 == 0,
+        })
     }
 
     pub(super) fn table_instruction(&mut self, ins: &Instruction) -> Option<()> {

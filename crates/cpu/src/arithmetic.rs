@@ -164,7 +164,7 @@ impl Cpu {
         }
     }
 
-    pub(super) fn divide(&mut self, ins: &Instruction, ip: u16) -> Option<Step> {
+    pub(super) fn divide(&mut self, ins: &Instruction, ip: u32) -> Option<Step> {
         let width = Self::width(ins, 0)?;
         let accumulator = Self::accumulator(width)?;
         let data = Self::data_register(width)?;
@@ -187,7 +187,7 @@ impl Cpu {
                 .map(|q| (q as u32, (dividend % b) as u32))
         };
         let Some((quotient, remainder)) = result else {
-            self.regs.ip = ip;
+            self.set_ip(ip);
             return Some(Step::Interrupt(0));
         };
         self.set_reg(accumulator, quotient)?;

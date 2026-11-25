@@ -2,7 +2,7 @@ use super::*;
 use iced_x86::{Code, ConditionCode, FlowControl};
 
 impl Cpu {
-    pub(super) fn execute(&mut self, ins: &Instruction, start_ip: u16) -> Option<Step> {
+    pub(super) fn execute(&mut self, ins: &Instruction, start_ip: u32) -> Option<Step> {
         use Mnemonic::*;
         let op = ins.mnemonic();
         match op {
@@ -128,7 +128,12 @@ impl Cpu {
             Enter => self.enter(ins)?,
             Leave => {
                 let width = if ins.code() == Code::Leavew { 2 } else { 4 };
-                self.regs.sp = self.regs.bp;
+                let frame_pointer = if self.wide_stack() {
+                    Register::EBP
+                } else {
+                    Register::BP
+                };
+                self.set_stack_pointer(self.get_reg(frame_pointer)?);
                 let value = self.pop(width)?;
                 self.set_reg(
                     if width == 2 {
@@ -168,7 +173,7 @@ impl Cpu {
             Nop | Pause | Into | Wait => {}
             _ if ins.flow_control() == FlowControl::ConditionalBranch => {
                 if self.condition(ins.condition_code())? {
-                    self.regs.ip = ins.near_branch_target() as u16;
+                    self.near_transfer(ins.near_branch_target() as u32)?;
                 }
             }
             _ => return None,
@@ -197,6 +202,20 @@ impl Cpu {
             g => !self.flag(ZF) && self.flag(SF) == self.flag(OF),
             _ => return Option::None,
         })
+    }
+
+    fn near_transfer(&mut self, target: u32) -> Option<()> {
+        self.check_near_target(target)?;
+        self.set_ip(target);
+        Some(())
+    }
+
+    fn check_near_target(&self, target: u32) -> Option<()> {
+        if self.control.segments[Register::CS.number()].is_none() && target > 0xffff {
+            return None;
+        }
+        self.code_address(target, 1)?;
+        Some(())
     }
 
     fn jump(&mut self, ins: &Instruction) -> Option<()> {
@@ -229,29 +248,36 @@ impl Cpu {
             }
             _ => return None,
         };
-        let target = u16::try_from(target).ok()?;
+
         let descriptor = if let Some(segment) = segment {
-            let descriptor = self.descriptor(Register::CS, segment)?;
-            if let Some(descriptor) = descriptor {
-                descriptor.address(true, target.into(), 1, false)?;
-            }
-            descriptor
+            self.check_far_target(segment, target)?
         } else {
+            self.check_near_target(target)?;
             None
         };
         if ins.mnemonic() == Mnemonic::Call {
-            self.check_stack_push(width, 1 + u16::from(segment.is_some()))?;
+            self.check_stack_push(width, 1 + u8::from(segment.is_some()))?;
             if segment.is_some() {
                 self.push(width, self.regs.cs.into())?;
             }
-            self.push(width, self.regs.ip.into())?;
+            self.push(width, self.instruction_pointer())?;
         }
         if let Some(segment) = segment {
             self.control.segments[Register::CS.number()] = descriptor;
             self.regs.cs = segment;
         }
-        self.regs.ip = target;
+        self.set_ip(target);
         Some(())
+    }
+
+    fn check_far_target(&self, selector: u16, target: u32) -> Option<Option<Segment>> {
+        let descriptor = self.descriptor(Register::CS, selector)?;
+        if let Some(code) = descriptor {
+            code.address(true, target, 1, false)?;
+        } else if target > 0xffff {
+            return None;
+        }
+        Some(descriptor)
     }
 
     fn return_from(&mut self, ins: &Instruction) -> Option<()> {
@@ -260,7 +286,7 @@ impl Cpu {
             Code::Retnd | Code::Retnd_imm16 | Code::Retfd | Code::Retfd_imm16 | Code::Iretd => 4,
             _ => return None,
         };
-        let target = u16::try_from(self.peek_stack(width, 0)?).ok()?;
+        let target = self.peek_stack(width, 0)?;
         let far = matches!(
             ins.mnemonic(),
             Mnemonic::Retf | Mnemonic::Iret | Mnemonic::Iretd
@@ -272,26 +298,25 @@ impl Cpu {
         };
         let interrupt = matches!(ins.mnemonic(), Mnemonic::Iret | Mnemonic::Iretd);
         let flags = if interrupt {
-            Some(self.peek_stack(width, u16::from(width) * 2)? as u16)
+            Some(self.peek_stack(width, u32::from(width) * 2)? as u16)
         } else {
             None
         };
         if let Some(selector) = selector {
-            let descriptor = self.descriptor(Register::CS, selector)?;
-            if let Some(descriptor) = descriptor {
-                descriptor.address(true, target.into(), 1, false)?;
-            }
+            let descriptor = self.check_far_target(selector, target)?;
             self.control.segments[Register::CS.number()] = descriptor;
             self.regs.cs = selector;
+        } else {
+            self.check_near_target(target)?;
         }
-        self.regs.ip = target;
-        let words = 1 + u16::from(far) + u16::from(interrupt);
-        self.regs.sp = self.regs.sp.wrapping_add(words * u16::from(width));
+        self.set_ip(target);
+        let words = 1 + u32::from(far) + u32::from(interrupt);
+        self.adjust_stack(words * u32::from(width));
         if let Some(flags) = flags {
             self.regs.flags = self.profile.normalize_flags(flags);
         }
         if ins.op_count() == 1 {
-            self.regs.sp = self.regs.sp.wrapping_add(ins.immediate16());
+            self.adjust_stack(ins.immediate16().into());
         }
         Some(())
     }
@@ -318,7 +343,7 @@ impl Cpu {
             }
         };
         if jump {
-            self.regs.ip = u16::try_from(ins.near_branch_target()).ok()?;
+            self.near_transfer(ins.near_branch_target() as u32)?;
         }
         Some(())
     }
@@ -357,24 +382,34 @@ impl Cpu {
             Register::EBP
         };
         self.push(width, self.get_reg(register)?)?;
-        let frame = self.regs.sp;
+        let frame = if width == 2 {
+            self.get_reg(Register::SP)?
+        } else {
+            self.get_reg(Register::ESP)?
+        };
         if nesting > 0 {
-            let mut parent = self.regs.bp;
+            let frame_pointer = if self.wide_stack() {
+                Register::EBP
+            } else {
+                Register::BP
+            };
+            let mask = if self.wide_stack() { u32::MAX } else { 0xffff };
+            let mut parent = self.get_reg(frame_pointer)?;
             for _ in 1..nesting {
-                parent = parent.wrapping_sub(width.into());
+                parent = parent.wrapping_sub(u32::from(width)) & mask;
                 let address =
-                    self.segment_address(Register::SS, parent.into(), usize::from(width), false)?;
+                    self.segment_address(Register::SS, parent, usize::from(width), false)?;
                 let saved = self.read_mem(address, width);
                 self.push(width, saved)?;
             }
-            self.push(width, frame.into())?;
+            self.push(width, frame)?;
         }
-        self.set_reg(register, frame.into())?;
-        self.regs.sp = self.regs.sp.wrapping_sub(ins.immediate16());
+        self.set_reg(register, frame)?;
+        self.adjust_stack(0u32.wrapping_sub(ins.immediate16().into()));
         Some(())
     }
 
-    fn string(&mut self, ins: &Instruction, start_ip: u16) -> Option<()> {
+    fn string(&mut self, ins: &Instruction, start_ip: u32) -> Option<()> {
         use Mnemonic::*;
         let width = match ins.code() {
             Code::Movsb_m8_m8
@@ -470,7 +505,7 @@ impl Cpu {
         if repeat {
             self.set_reg(counter, count - 1)?;
             if count > 1 && (!is_comparison || self.flag(ZF) != ins.has_repne_prefix()) {
-                self.regs.ip = start_ip;
+                self.set_ip(start_ip);
             }
         }
         Some(())
