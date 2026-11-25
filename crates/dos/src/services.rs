@@ -230,6 +230,8 @@ impl Machine {
                 let ok = self.set_time(hour, minute, second, hundredths);
                 self.set_al(if ok { 0 } else { 0xff });
             }
+            0x2e if al <= 1 => self.set_verify_writes(al == 1),
+            0x2e => {}
             0x2f => {
                 self.cpu.regs.es = self.dta.0;
                 self.cpu.regs.bx = self.dta.1;
@@ -328,7 +330,11 @@ impl Machine {
                     self.emit(&bytes);
                     Ok(())
                 } else {
-                    self.files.write(bx, &bytes, self.adjusted_file_time())
+                    let write = dosa_mount::FileWriteOptions {
+                        modified: self.adjusted_file_time(),
+                        verify: self.verify_writes(),
+                    };
+                    self.files.write(bx, &bytes, write)
                 };
                 if result.is_ok() {
                     self.cpu.regs.ax = cx;
@@ -420,6 +426,7 @@ impl Machine {
                 self.find_result(entry);
             }
             0x51 | 0x62 => self.cpu.regs.bx = PSP,
+            0x54 => self.set_al(u8::from(self.verify_writes())),
             0x56 => {
                 let result = self.path(ds, dx).and_then(|from| {
                     self.path(self.cpu.regs.es, self.cpu.regs.di)

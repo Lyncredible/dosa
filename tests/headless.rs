@@ -896,6 +896,54 @@ fn date_and_time_share_the_guest_clock_and_reprompt_for_invalid_lines() {
 }
 
 #[test]
+fn ver_and_verify_use_the_guest_dos_version_and_verify_flag() {
+    let fixture = Fixture::new();
+    let mut probe = vec![
+        0xb8, 0, 0x30, 0xcd, 0x21, // DOS version
+        0x3d, 5, 0, 0x74, 5, 0xb8, 1, 0x4c, 0xcd, 0x21, 0xb4, 0x54, 0xcd,
+        0x21, // read VERIFY flag set by the shell
+        0x3c, 1, 0x74, 5, 0xb8, 2, 0x4c, 0xcd, 0x21, 0xba, 0, 2, 0x31, 0xc9, 0xb4, 0x3c, 0xcd,
+        0x21, // create GUEST.DAT
+        0x73, 5, 0xb8, 3, 0x4c, 0xcd, 0x21, 0x89, 0xc3, 0xba, 10, 2, 0xb9, 1, 0, 0xb4, 0x40, 0xcd,
+        0x21, // verified write
+        0x73, 5, 0xb8, 4, 0x4c, 0xcd, 0x21, 0xb8, 0, 0x2e, 0xcd,
+        0x21, // switch off from guest
+        0xb8, 0, 0x4c, 0xcd, 0x21,
+    ];
+    probe.resize(0x100, 0);
+    probe.extend_from_slice(b"GUEST.DAT\0x");
+    fs::write(fixture.0.join("VERIFY.COM"), probe).unwrap();
+    fs::write(
+        fixture.0.join("SETUP.BAT"),
+        b"@echo off\r\nver\r\nverify\r\nverify on\r\nverify\r\ncopy SOURCE.DAT NEW.DAT\r\ncopy /y SOURCE.DAT OLD.DAT\r\nVERIFY.COM\r\nif errorlevel 1 exit %errorlevel%\r\nverify\r\n",
+    )
+    .unwrap();
+    let contents = vec![0x42; 8193];
+    fs::write(fixture.0.join("SOURCE.DAT"), &contents).unwrap();
+    fs::write(fixture.0.join("OLD.DAT"), b"old").unwrap();
+
+    let mount = format!("C={}", fixture.0.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args(["--headless", "--mount-rw", &mount, "--exec", "SETUP"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let output = String::from_utf8(output.stdout).unwrap();
+    assert!(output.contains("Dosa DOS version 5.00"), "{output}");
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.starts_with("VERIFY is "))
+            .collect::<Vec<_>>(),
+        ["VERIFY is off", "VERIFY is on", "VERIFY is off"]
+    );
+    for name in ["NEW.DAT", "OLD.DAT"] {
+        assert_eq!(fs::read(fixture.0.join(name)).unwrap(), contents);
+    }
+    assert_eq!(fs::read(fixture.0.join("GUEST.DAT")).unwrap(), b"x");
+}
+
+#[test]
 fn dos_file_creates_and_writes_use_the_adjusted_clock() {
     let fixture = Fixture::new();
     let mut probe = vec![

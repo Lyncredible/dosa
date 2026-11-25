@@ -15,6 +15,13 @@ use super::{
 };
 use crate::names::{canonical_name, find_child, guest_components};
 
+/// Metadata and read-back options for a guest file write.
+#[derive(Clone, Copy, Default)]
+pub struct FileWriteOptions {
+    pub modified: Option<SystemTime>,
+    pub verify: bool,
+}
+
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
@@ -107,17 +114,17 @@ impl WritableFile {
 
     /// Atomically replace the file's contents inside its host directory.
     pub fn replace(&self, bytes: &[u8]) -> Result<()> {
-        self.replace_at(bytes, None)
+        self.replace_with(bytes, FileWriteOptions::default())
     }
 
-    /// Atomically replace the file with an optional DOS modification time.
-    pub fn replace_at(&self, bytes: &[u8], modified: Option<SystemTime>) -> Result<()> {
+    /// Atomically replace the file, optionally verifying the staging file before commit.
+    pub fn replace_with(&self, bytes: &[u8], write: FileWriteOptions) -> Result<()> {
         if !self.writable {
             return Err(MountError::ReadOnly);
         }
         let _guard = lock(&self.transaction)?;
         let parent = self.open_parent()?;
-        self.replace_locked(&parent, bytes, modified)
+        self.replace_locked(&parent, bytes, write)
     }
 
     fn open_parent(&self) -> Result<Dir> {
@@ -130,18 +137,14 @@ impl WritableFile {
         Ok(parent)
     }
 
-    fn replace_locked(
-        &self,
-        parent: &Dir,
-        bytes: &[u8],
-        modified: Option<SystemTime>,
-    ) -> Result<()> {
+    fn replace_locked(&self, parent: &Dir, bytes: &[u8], write: FileWriteOptions) -> Result<()> {
         if bytes.len() as u64 > MAX_FILE_BYTES {
             return Err(MountError::FileTooLarge);
         }
         let metadata = writable_file_metadata(parent, &self.name)?;
         let mut options = OpenOptions::new();
         options
+            .read(write.verify)
             .write(true)
             .create_new(true)
             .follow(FollowSymlinks::No);
@@ -156,8 +159,7 @@ impl WritableFile {
             let result = (|| {
                 file.write_all(bytes)?;
                 file.set_permissions(metadata.permissions())?;
-                set_modified(&file, modified)?;
-                file.sync_all()
+                finish_write(&mut file, bytes, write)
             })();
             // Windows does not permit the staging file to be renamed while its
             // handle is still open without delete sharing.
@@ -175,6 +177,23 @@ impl WritableFile {
         )
         .into())
     }
+}
+
+fn finish_write(file: &mut File, bytes: &[u8], write: FileWriteOptions) -> io::Result<()> {
+    set_modified(file, write.modified)?;
+    file.sync_all()?;
+    if write.verify {
+        file.rewind()?;
+        let mut buffer = [0; 8192];
+        for expected in bytes.chunks(buffer.len()) {
+            let actual = &mut buffer[..expected.len()];
+            file.read_exact(actual)?;
+            if actual != expected {
+                return Err(io::Error::other("written file failed verification"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn set_modified(file: &File, modified: Option<SystemTime>) -> io::Result<()> {
@@ -308,7 +327,14 @@ impl Mount {
         };
         if exists {
             if create {
-                file.replace_locked(&target.parent, &[], modified)?;
+                file.replace_locked(
+                    &target.parent,
+                    &[],
+                    FileWriteOptions {
+                        modified,
+                        ..FileWriteOptions::default()
+                    },
+                )?;
             } else {
                 writable_file_metadata(&target.parent, &file.name)?;
             }
@@ -330,15 +356,15 @@ impl Mount {
 
     /// Copy completed data into a new guest file without replacing an existing entry.
     pub fn write_new_file(&self, path: &str, bytes: &[u8]) -> Result<()> {
-        self.write_new_file_at(path, bytes, None)
+        self.write_new_file_with(path, bytes, FileWriteOptions::default())
     }
 
-    /// Copy completed data and an optional DOS modification time into a new file.
-    pub fn write_new_file_at(
+    /// Copy completed data into a new file with the requested write options.
+    pub fn write_new_file_with(
         &self,
         path: &str,
         bytes: &[u8],
-        modified: Option<SystemTime>,
+        write: FileWriteOptions,
     ) -> Result<()> {
         if bytes.len() as u64 > MAX_FILE_BYTES {
             return Err(MountError::FileTooLarge);
@@ -349,14 +375,14 @@ impl Mount {
         let name = target.new_name(path)?;
         let mut options = OpenOptions::new();
         options
+            .read(write.verify)
             .write(true)
             .create_new(true)
             .follow(FollowSymlinks::No);
         let mut file = target.parent.open_with(&name, &options)?;
         let result = (|| {
             file.write_all(bytes)?;
-            set_modified(&file, modified)?;
-            file.sync_all()
+            finish_write(&mut file, bytes, write)
         })();
         if let Err(error) = result {
             // Release the handle before removing the incomplete file on Windows.
