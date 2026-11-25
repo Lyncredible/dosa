@@ -8,6 +8,7 @@ use dosa_mount::Mount;
 mod batch;
 mod directory;
 mod rename;
+mod search_path;
 
 use batch::Batch;
 pub use batch::BatchStep;
@@ -170,6 +171,14 @@ impl Shell {
         if word.eq_ignore_ascii_case("SET") {
             return self.set_variable(args);
         }
+        if let Some(path) = line.trim_start().get(4..)
+            && word
+                .get(..4)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("PATH"))
+            && path.starts_with([';', '='])
+        {
+            return self.path_command(path.trim_end());
+        }
         let args = args.trim_end();
         if let Some((command, _)) = word.split_once('/')
             && command.eq_ignore_ascii_case("DIR")
@@ -186,6 +195,7 @@ impl Shell {
             "REM" => return Ok(Command::Prompt),
             "HELP" if args.eq_ignore_ascii_case("MOUNT") => MOUNT_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("SET") => SET_HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("PATH") => search_path::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("MD") || args.eq_ignore_ascii_case("MKDIR") => {
                 MKDIR_HELP.as_bytes().to_vec()
             }
@@ -202,6 +212,7 @@ impl Shell {
                 REN source name            Rename files (RENAME)\r\n\
                 TYPE file                  Print a file\r\n\
                 SET [variable=[value]]     Display or change environment variables\r\n\
+                PATH [directories]         Set the executable search path\r\n\
                 MOUNT drive path           Mount host files or images (see HELP MOUNT)\r\n\
                 BOOT A|C path              Boot a floppy or hard disk image\r\n\
                 C:                         Switch drives\r\n\
@@ -230,6 +241,7 @@ impl Shell {
             }
             "MD" | "MKDIR" => return self.change_directory_entry(args, true),
             "RD" | "RMDIR" => return self.change_directory_entry(args, false),
+            "PATH" => return self.path_command(args),
             "REN" | "RENAME" => return self.rename(args),
             "MOUNT" => self.mount_command(args, false)?,
             "IMGMOUNT" => self.mount_command(args, true)?,
@@ -255,13 +267,18 @@ impl Shell {
                     self.drive = drive;
                     return Ok(Command::Prompt);
                 }
-                let (drive, path) = self.resolve(word)?;
-                let executable = self.find_program(drive, path)?;
+                let (drive, executable) = self.find_program(word, &["COM", "EXE", "BAT"])?;
                 if batch::is_batch(&executable) {
                     self.launch_batch(drive, &executable, word, args, false)?;
                     return Ok(Command::Prompt);
                 }
-                self.machine.launch(drive, &executable, args)?;
+                self.machine.launch_from_shell(
+                    drive,
+                    &executable,
+                    args,
+                    self.drive,
+                    &self.directories,
+                )?;
                 return Ok(Command::Launched);
             }
         };
@@ -362,27 +379,6 @@ impl Shell {
         }?;
         self.mount(drive, mount)?;
         Ok(format!("Drive {drive}: mounted\r\n").into_bytes())
-    }
-
-    fn find_program(&self, drive: char, path: String) -> Result<String, Box<dyn Error>> {
-        let mount = self.drive_mount(drive)?;
-        if path
-            .rsplit('\\')
-            .next()
-            .is_some_and(|name| name.contains('.'))
-        {
-            return Ok(path);
-        }
-        for extension in ["COM", "EXE", "BAT"] {
-            let candidate = format!("{path}.{extension}");
-            match mount.metadata(&candidate) {
-                Ok(entry) if !entry.is_dir => return Ok(candidate),
-                Ok(_) => {}
-                Err(error) if error.is_not_found() => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Err(format!("program not found: {path}").into())
     }
 
     fn drive_mount(&self, drive: char) -> Result<&Mount, Box<dyn Error>> {

@@ -28,10 +28,14 @@ enum FileSource {
 
 impl DosFiles {
     pub(crate) fn new(drive: char, cwd: String) -> Self {
+        Self::with_directories(drive, BTreeMap::from([(drive, cwd)]))
+    }
+
+    pub(crate) fn with_directories(drive: char, directories: BTreeMap<char, String>) -> Self {
         Self {
             drive,
             denied_write_drive: None,
-            directories: BTreeMap::from([(drive, cwd)]),
+            directories,
             handles: BTreeMap::new(),
             search: VecDeque::new(),
         }
