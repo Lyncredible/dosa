@@ -33,6 +33,7 @@ Usage: dosa [OPTIONS]
   --text-columns COLS  Select 80 or 132 text columns
   --ansi-text          Interpret DOS ANSI text escape sequences on the display
   --no-ansi-text       Disable ANSI text processing from a launch profile
+  --midi-soundfont PATH Enable MPU-401 UART playback using an SF2 SoundFont
   --virtual-joystick   Map arrow keys and Z/X to the DOS gameport
   --no-virtual-joystick Disable the virtual joystick from a launch profile
   --headless           Run without a window (requires a startup command)
@@ -60,6 +61,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     let mut profile_path = None;
     let mut overrides = SettingsOverrides::default();
     let mut headless = false;
+    let mut midi_soundfont = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("-h" | "--help") => {
@@ -122,6 +124,10 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             }
             Some("--ansi-text") => overrides.ansi_text = Some(true),
             Some("--no-ansi-text") => overrides.ansi_text = Some(false),
+            Some("--midi-soundfont") => {
+                let path = args.next().ok_or("--midi-soundfont needs an SF2 path")?;
+                midi_soundfont = Some(PathBuf::from(path));
+            }
             Some("--virtual-joystick") => overrides.virtual_joystick = Some(true),
             Some("--no-virtual-joystick") => overrides.virtual_joystick = Some(false),
             Some("--headless") => headless = true,
@@ -138,6 +144,14 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     let settings = overrides.apply(launch.settings);
     let command = command.or(launch.command);
     let mut shell = Shell::new();
+    if let Some(path) = midi_soundfont.or(launch.midi_soundfont) {
+        let mut load = || -> Result<(), Box<dyn std::error::Error>> {
+            let mut source = std::io::BufReader::new(std::fs::File::open(&path)?);
+            shell.machine.load_midi_soundfont(&mut source)
+        };
+        load()
+            .map_err(|error| format!("cannot load MIDI SoundFont {}: {error}", path.display()))?;
+    }
     for StartupMount {
         drive,
         path,

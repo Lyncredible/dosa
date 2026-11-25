@@ -15,6 +15,7 @@ pub use files::{DosDevice, matches_dos_pattern};
 mod keyboard;
 mod loader;
 mod mouse;
+mod mpu401;
 mod mscdex;
 mod pic;
 mod pit;
@@ -281,6 +282,8 @@ impl Machine {
     /// Reset the guest CPU and devices while retaining media, the profile, and the shell environment.
     pub fn reset(&mut self) {
         let ansi = self.video.ansi.is_some();
+        let mut mpu = std::mem::take(&mut self.audio.mpu);
+        mpu.reset();
         let mut gameport = std::mem::take(&mut self.gameport);
         gameport.reset_timers();
         *self = Self {
@@ -292,6 +295,18 @@ impl Machine {
             ..Self::new()
         };
         self.set_ansi_text(ansi);
+        self.audio.mpu = mpu;
+    }
+
+    /// Configure the MPU-401 UART and its SoundFont synthesizer while the guest is idle.
+    pub fn load_midi_soundfont(
+        &mut self,
+        source: &mut impl std::io::Read,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.state.is_active() {
+            return Err(DosError::Busy.into());
+        }
+        self.audio.mpu.load(source)
     }
 
     /// Enable DOS console processing of ANSI text escape sequences.
@@ -606,7 +621,7 @@ impl Machine {
         self.mouse = Mouse::default();
         self.pic = Pic::default();
         self.pit = Pit::new(now);
-        self.audio = audio::Audio::new(elapsed);
+        self.audio.restart(elapsed);
         self.modifiers = 0;
         self.locks = 0;
         self.output.clear();
@@ -943,6 +958,7 @@ impl Machine {
         self.boot_disk = None;
         self.pending.clear();
         self.files.close_all();
+        self.audio.mpu.reset();
         self.video.restore_text(&mut self.cpu);
     }
 
