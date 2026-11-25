@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::sync::Arc;
 
+use super::for_loop::ForLoop;
 use super::{Command, Shell, split_word};
 
 const MAX_BATCH_BYTES: u64 = 1024 * 1024;
@@ -69,6 +70,7 @@ struct Frame {
     next_line: usize,
     args: VecDeque<String>,
     tail: String,
+    for_loop: Option<(ForLoop, bool)>,
 }
 
 impl Frame {
@@ -96,6 +98,7 @@ impl Frame {
             next_line,
             args: parameters,
             tail: args.to_owned(),
+            for_loop: None,
         })
     }
 
@@ -146,6 +149,7 @@ pub(super) struct Batch {
     frames: Vec<Frame>,
     remaining: usize,
     echo: bool,
+    prompt_loop: bool,
     location: Option<(Arc<Script>, usize)>,
     pause: Option<Pause>,
 }
@@ -167,6 +171,7 @@ impl Batch {
             frames: vec![frame],
             remaining: MAX_BATCH_LINES,
             echo: true,
+            prompt_loop: false,
             location: None,
             pause: None,
         }
@@ -194,6 +199,21 @@ impl Batch {
         environment: &dosa_dos::Environment,
     ) -> Result<Option<Line>, String> {
         while let Some(frame) = self.frames.last_mut() {
+            if let Some((for_loop, echo)) = &mut frame.for_loop {
+                self.location =
+                    (frame.next_line != 0).then(|| (Arc::clone(&frame.script), frame.next_line));
+                if let Some(command) = for_loop.next_command(MAX_COMMAND_BYTES)? {
+                    if self.remaining == 0 {
+                        return Err(format!("batch line limit of {MAX_BATCH_LINES} exceeded"));
+                    }
+                    self.remaining -= 1;
+                    return Ok(Some(Line {
+                        command,
+                        echo: self.echo && *echo,
+                    }));
+                }
+                frame.for_loop = None;
+            }
             let Some(raw) = frame.script.lines.get(frame.next_line) else {
                 self.frames.pop();
                 continue;
@@ -232,6 +252,17 @@ impl Batch {
 }
 
 impl Shell {
+    pub(super) fn start_prompt_loop(&mut self, args: &str) -> Result<Command, Box<dyn Error>> {
+        let for_loop = ForLoop::parse(self, args, MAX_BATCH_LINES)?;
+        let script = Arc::new(Script::new("FOR".to_owned(), "")?);
+        let mut frame = Frame::new(script, 0, "FOR", "")?;
+        frame.for_loop = Some((for_loop, false));
+        let mut batch = Batch::new(frame);
+        batch.prompt_loop = true;
+        self.batch = Some(batch);
+        Ok(Command::Prompt)
+    }
+
     pub fn batch_active(&self) -> bool {
         self.batch.is_some()
     }
@@ -304,11 +335,15 @@ impl Shell {
         let echo = line
             .echo
             .then(|| format!("{}{}\r\n", self.prompt(), line.command));
-        let command = self.execute_batch_command(&line.command)?;
+        let command = self.execute_batch_command(&line.command, line.echo)?;
         Ok(Some(BatchStep { echo, command }))
     }
 
-    fn execute_batch_command(&mut self, mut line: &str) -> Result<Command, Box<dyn Error>> {
+    fn execute_batch_command(
+        &mut self,
+        mut line: &str,
+        echo: bool,
+    ) -> Result<Command, Box<dyn Error>> {
         // Reject shell operators that the batch interpreter cannot execute.
         let mut quoted = false;
         for character in line.chars() {
@@ -325,7 +360,7 @@ impl Shell {
         loop {
             let (word, args) = split_word(line.trim())?;
             match word.to_ascii_uppercase().as_str() {
-                "IF" | "PAUSE" if args == "/?" => return self.execute(line),
+                "IF" | "PAUSE" | "FOR" if args == "/?" => return self.execute(line),
                 "IF" => {
                     let (matched, command) = self.test_condition(args)?;
                     if !matched {
@@ -362,7 +397,17 @@ impl Shell {
                 "ECHO" => return Ok(self.echo_batch(args)),
                 "MOUNT" | "IMGMOUNT" => return Err("mount host paths using the interactive shell or --mount before starting a batch file".into()),
                 "BOOT" => return Err("boot host disk images from the interactive shell".into()),
-                "FOR" | "SETLOCAL" | "ENDLOCAL" | "CHOICE" => {
+                "FOR" => {
+                    let batch = self.batch.as_ref().expect("executing a batch command");
+                    if batch.frame().for_loop.is_some() {
+                        return Err("nested FOR commands require a separate batch frame".into());
+                    }
+                    let for_loop = ForLoop::parse(self, args, batch.remaining)?;
+                    let frame = self.batch.as_mut().unwrap().frames.last_mut().unwrap();
+                    frame.for_loop = Some((for_loop, echo));
+                    return Ok(Command::Prompt);
+                }
+                "SETLOCAL" | "ENDLOCAL" | "CHOICE" => {
                     return Err(format!("batch command {word} is unsupported").into());
                 }
                 _ => return self.execute(line),
@@ -394,6 +439,7 @@ impl Shell {
             }
             let frame = batch.frames.last_mut().expect("executing a batch command");
             frame.next_line = frame.script.label(label)?;
+            frame.for_loop = None;
         }
         Ok(Command::Prompt)
     }
@@ -461,7 +507,9 @@ impl Shell {
         .map_err(|error| format!("{name}: batch text must be ASCII or UTF-8 ({error})"))?;
         let frame = Frame::new(Arc::new(Script::new(name, source)?), 0, word, args)?;
         match self.batch.as_mut() {
-            Some(batch) if call => batch.push(frame)?,
+            Some(batch) if call || batch.prompt_loop && batch.frames.len() == 1 => {
+                batch.push(frame)?
+            }
             Some(batch) => {
                 // A BAT invoked without CALL replaces the current frame.
                 *batch.frames.last_mut().expect("executing a batch command") = frame;

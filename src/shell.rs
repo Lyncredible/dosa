@@ -8,6 +8,7 @@ use dosa_mount::Mount;
 mod batch;
 mod condition;
 mod directory;
+mod for_loop;
 mod prompt;
 mod rename;
 mod search_path;
@@ -195,12 +196,15 @@ impl Shell {
             "ECHO" => format!("{args}\r\n").into_bytes(),
             "REM" => return Ok(Command::Prompt),
             "IF" if args == "/?" => condition::HELP.as_bytes().to_vec(),
+            "FOR" if args == "/?" => for_loop::HELP.as_bytes().to_vec(),
+            "FOR" => return self.start_prompt_loop(args),
             "SHIFT" if args == "/?" => batch::SHIFT_HELP.as_bytes().to_vec(),
             "PAUSE" if args == "/?" => batch::PAUSE_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("MOUNT") => MOUNT_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("SET") => SET_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("PATH") => search_path::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("IF") => condition::HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("FOR") => for_loop::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("SHIFT") => batch::SHIFT_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("PAUSE") => batch::PAUSE_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("PROMPT") => prompt::HELP.as_bytes().to_vec(),
