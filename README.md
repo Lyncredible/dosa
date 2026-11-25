@@ -99,6 +99,8 @@ Choose **Audio → Record audio to WAV** to capture guest audio as 48 kHz, 16-bi
 
 **Debug → Inspect guest** pauses DOS and shows 16-bit registers and bytes at CS:IP, DS:SI, and SS:SP. Choose **Step instruction** or press F10 while inspection is visible. **Resume guest** closes the inspection and continues execution.
 
+**View → Reset guest** stops the current guest and any active batch, resets the emulated CPU and devices, and returns to the DOS prompt. Mounted media and desktop settings remain available.
+
 Audio offers master volume and mute while a guest runs. Unmuting restores the selected level. Keyboard menu access uses Alt+D, Alt+C, Alt+S, Alt+V, and Alt+A, followed by arrow keys and Enter.
 
 **Edit** (`Alt+E`) copies the visible DOS text screen or pastes up to 4,096 characters. At the shell prompt, pasted line breaks become spaces and Enter submits the edited command. In a running program, paste feeds the DOS BIOS keyboard queue one character at a time, including Enter for line breaks. Choose **Stop pasting** to discard the remaining paste.

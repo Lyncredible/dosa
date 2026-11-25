@@ -351,6 +351,24 @@ impl Desktop {
         }
     }
 
+    fn reset_guest(&mut self) {
+        self.running = false;
+        self.paused = false;
+        self.inspecting = false;
+        self.paste.clear();
+        self.line.clear();
+        self.status = match self
+            .shell
+            .reset()
+            .and_then(|()| self.settings.apply(&mut self.shell))
+        {
+            Ok(()) => "Guest reset".into(),
+            Err(error) => format!("Reset failed: {error}"),
+        };
+        self.write_prompt();
+        self.render();
+    }
+
     fn write_blocked_zip(&self) -> Option<char> {
         self.shell.machine.denied_write_drive().filter(|&drive| {
             self.shell
@@ -677,6 +695,7 @@ impl App for Desktop {
                 self.update_guest(result);
                 self.render();
             }
+            MenuAction::ResetGuest => self.reset_guest(),
             MenuAction::SetTextMode(mode) if !self.running => self.set_text_mode(mode),
             MenuAction::Exit => self.exit = true,
             _ => {}
@@ -1141,6 +1160,49 @@ mod tests {
             .is_err()
         );
         assert_eq!(std::fs::read(path).unwrap(), b"existing image");
+    }
+
+    #[test]
+    fn reset_stops_a_paused_batch_and_preserves_mounts_and_settings() {
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(
+            scratch.path().join("RUN.BAT"),
+            b"@echo off\r\nWAIT\r\necho BATCH-CONTINUED\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            scratch.path().join("WAIT.COM"),
+            [0xb4, 0, 0xcd, 0x16, 0xb8, 0, 0x4c, 0xcd, 0x21],
+        )
+        .unwrap();
+        let mut shell = Shell::new();
+        shell
+            .mount('D', Mount::open_writable_directory(scratch.path()).unwrap())
+            .unwrap();
+        let mut desktop = Desktop::new(shell, Some("run"));
+        desktop.tick();
+        desktop.tick();
+        assert!(desktop.menu().running);
+        assert!(desktop.menu().batch_active);
+        desktop.menu_action(MenuAction::SetInspection(true));
+        assert!(desktop.menu().paused);
+        desktop.menu_action(MenuAction::SetSpeed(Speed::Fast));
+        desktop.menu_action(MenuAction::ResetGuest);
+        desktop.tick();
+
+        let menu = desktop.menu();
+        assert!(!menu.running && !menu.paused && !menu.batch_active);
+        assert!(menu.inspection.is_empty());
+        assert_eq!(menu.active_drive, 'D');
+        assert_eq!(menu.drives.get(&'D'), Some(&"Folder (read/write)"));
+        assert_eq!(menu.speed, Speed::Fast);
+        assert_eq!(menu.status, "Guest reset");
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("reset should show the prompt")
+        };
+        let text = screen_text(frame);
+        assert!(text.contains("D:\\>"));
+        assert!(!text.contains("BATCH-CONTINUED"));
     }
 
     #[test]
