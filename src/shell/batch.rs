@@ -10,6 +10,8 @@ const MAX_COMMAND_BYTES: usize = 8192;
 const MAX_CALL_DEPTH: usize = 16;
 pub(super) const SHIFT_HELP: &str =
     "SHIFT\r\n    Move each batch argument down one position, starting at %0.\r\n";
+pub(super) const PAUSE_HELP: &str = "PAUSE\r\n    Wait for a key before continuing the batch.\r\n";
+pub const PAUSE_MESSAGE: &[u8] = b"Press any key to continue . . .";
 
 pub struct BatchStep {
     /// The command line as it appears in the DOS console when echo is on.
@@ -145,6 +147,13 @@ pub(super) struct Batch {
     remaining: usize,
     echo: bool,
     location: Option<(Arc<Script>, usize)>,
+    pause: Option<Pause>,
+}
+
+#[derive(Clone, Copy)]
+enum Pause {
+    Key,
+    ConfirmAbort,
 }
 
 struct Line {
@@ -159,6 +168,7 @@ impl Batch {
             remaining: MAX_BATCH_LINES,
             echo: true,
             location: None,
+            pause: None,
         }
     }
 
@@ -243,10 +253,44 @@ impl Shell {
         }
     }
 
-    /// Execute one batch line when no guest program is running.
+    /// Execute one batch line when no guest program is running or waiting for input.
     pub fn step_batch(&mut self) -> Result<Option<BatchStep>, Box<dyn Error>> {
+        if self.batch_waiting() {
+            return Ok(None);
+        }
         let result = self.step_batch_line();
         result.map_err(|error| self.guest_failed(error))
+    }
+
+    pub fn batch_waiting(&self) -> bool {
+        self.batch
+            .as_ref()
+            .is_some_and(|batch| batch.pause.is_some())
+    }
+
+    /// Handle a DOS key during PAUSE and return the console response.
+    pub fn resume_batch(&mut self, key: u8) -> Option<&'static [u8]> {
+        let batch = self.batch.as_mut()?;
+        match (batch.pause?, key.to_ascii_uppercase()) {
+            (Pause::Key, 3) => {
+                batch.pause = Some(Pause::ConfirmAbort);
+                Some(b"\r\nTerminate batch job (Y/N)? ")
+            }
+            (Pause::Key, _) => {
+                batch.pause = None;
+                Some(b"\r\n")
+            }
+            (Pause::ConfirmAbort, b'Y') => {
+                self.batch = None;
+                self.errorlevel = 3;
+                Some(b"Y\r\n")
+            }
+            (Pause::ConfirmAbort, b'N') => {
+                batch.pause = None;
+                Some(b"N\r\n")
+            }
+            (Pause::ConfirmAbort, _) => None,
+        }
     }
 
     fn step_batch_line(&mut self) -> Result<Option<BatchStep>, Box<dyn Error>> {
@@ -281,7 +325,7 @@ impl Shell {
         loop {
             let (word, args) = split_word(line.trim())?;
             match word.to_ascii_uppercase().as_str() {
-                "IF" if args == "/?" => return self.execute(line),
+                "IF" | "PAUSE" if args == "/?" => return self.execute(line),
                 "IF" => {
                     let (matched, command) = self.test_condition(args)?;
                     if !matched {
@@ -292,6 +336,13 @@ impl Shell {
                 "CALL" => return self.call_batch(args),
                 "GOTO" => return self.goto_batch(args),
                 "GOTO:EOF" if args.is_empty() => return self.goto_batch(":EOF"),
+                "PAUSE" => {
+                    if !args.is_empty() {
+                        return Err("usage: PAUSE".into());
+                    }
+                    self.batch.as_mut().expect("executing a batch command").pause = Some(Pause::Key);
+                    return Ok(Command::Pause);
+                }
                 "SHIFT" if args == "/?" => return self.execute(line),
                 "SHIFT" => {
                     if !args.is_empty() {
@@ -311,7 +362,7 @@ impl Shell {
                 "ECHO" => return Ok(self.echo_batch(args)),
                 "MOUNT" | "IMGMOUNT" => return Err("mount host paths using the interactive shell or --mount before starting a batch file".into()),
                 "BOOT" => return Err("boot host disk images from the interactive shell".into()),
-                "FOR" | "SETLOCAL" | "ENDLOCAL" | "PAUSE" | "CHOICE" => {
+                "FOR" | "SETLOCAL" | "ENDLOCAL" | "CHOICE" => {
                     return Err(format!("batch command {word} is unsupported").into());
                 }
                 _ => return self.execute(line),

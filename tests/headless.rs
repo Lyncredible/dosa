@@ -409,6 +409,58 @@ fn batch_shift_exposes_later_arguments_and_keeps_call_frames_separate() {
 }
 
 #[test]
+fn batch_pause_reads_headless_input_and_confirms_cancellation() {
+    use std::process::Stdio;
+
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.0.join("WAIT.BAT"),
+        b"@echo off\r\necho before\r\npause\r\necho after\r\n",
+    )
+    .unwrap();
+    let run = |keys: &[u8]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([
+                "--mount",
+                &format!("C={}", fixture.0.display()),
+                "--headless",
+                "--exec",
+                "WAIT",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(keys).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let output = run(b"x");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        output.stdout,
+        b"before\r\nPress any key to continue . . .\r\nafter\r\n"
+    );
+    let output = run(b"\x03n");
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        output
+            .stdout
+            .ends_with(b"Terminate batch job (Y/N)? N\r\nafter\r\n")
+    );
+    let output = run(b"\x03xy");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(output.stdout.ends_with(b"Terminate batch job (Y/N)? Y\r\n"));
+    let output = run(b"");
+    assert!(!output.status.success(), "{output:?}");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("WAIT.BAT:3") && error.contains("PAUSE needs a key"),
+        "{error}"
+    );
+}
+
+#[test]
 fn dir_formats_wide_bare_and_lowercase_listings() {
     let fixture = Fixture::new();
     fs::create_dir(fixture.0.join("AAA")).unwrap();
