@@ -150,6 +150,98 @@ fn rename_handles_dos_wildcards_without_overwriting_files() {
 }
 
 #[test]
+fn batch_redirection_keeps_stream_positions_across_nested_commands() {
+    let fixture = Fixture::new();
+    let readonly = fixture.0.join("readonly");
+    fs::create_dir(&readonly).unwrap();
+    fs::write(readonly.join("INPUT.DAT"), b"ABCDE").unwrap();
+    let pick = [
+        0x31, 0xdb, 0xb9, 1, 0, 0xba, 0, 2, 0xb4, 0x3f, 0xcd, 0x21, // read one byte
+        0x73, 5, 0xb8, 1, 0x4c, 0xcd, 0x21, 0x85, 0xc0, 0x74, 8, // no output at EOF
+        0x8a, 0x16, 0, 2, 0xb4, 2, 0xcd, 0x21, // print the byte with AH=02h
+        0xb8, 0, 0x4c, 0xcd, 0x21,
+    ];
+    fs::write(fixture.0.join("PICK.COM"), pick).unwrap();
+    let mut switch = vec![
+        0xba, 0, 2, 0xb8, 1, 0x3d, 0xcd, 0x21, // open NUL
+        0x73, 5, 0xb8, 1, 0x4c, 0xcd, 0x21, 0x89, 0xc3, 0xb9, 1, 0, 0xb4, 0x46, 0xcd,
+        0x21, // replace child stdout
+        0x73, 5, 0xb8, 2, 0x4c, 0xcd, 0x21, 0x31, 0xdb, 0xb4, 0x3e, 0xcd,
+        0x21, // close child stdin
+        0x73, 5, 0xb8, 3, 0x4c, 0xcd, 0x21, 0xb2, b'X', 0xb4, 2, 0xcd, 0x21, 0xb8, 0, 0x4c, 0xcd,
+        0x21,
+    ];
+    switch.resize(0x100, 0);
+    switch.extend_from_slice(b"NUL\0");
+    fs::write(fixture.0.join("SWITCH.COM"), switch).unwrap();
+    fs::write(
+        fixture.0.join("RUN.BAT"),
+        b"@echo off\r\necho first\r\npick\r\nswitch\r\ncall :sub\r\npick >NUL\r\ncall CHILD.BAT >ALT.LOG\r\necho display >CON\r\npick\r\necho last\r\nexit /b 0\r\n:sub\r\npick\r\npause\r\ngoto :EOF\r\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("CHILD.BAT"),
+        b"@echo on\r\necho inside\r\n@echo off\r\npick\r\n",
+    )
+    .unwrap();
+    fs::write(fixture.0.join("OUT.LOG"), b"prior\r\n").unwrap();
+    let run = |command: &str| {
+        Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([
+                "--headless",
+                "--mount-rw",
+                &format!("C={}", fixture.0.display()),
+                "--mount",
+                &format!("D={}", readonly.display()),
+                "--exec",
+                command,
+            ])
+            .output()
+            .unwrap()
+    };
+
+    let result = run("RUN <D:INPUT.DAT >>OUT.LOG");
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(result.stdout, b"display\r\n");
+    assert_eq!(
+        fs::read(fixture.0.join("OUT.LOG")).unwrap(),
+        b"prior\r\nfirst\r\nABPress any key to continue . . .\r\nlast\r\n"
+    );
+    assert_eq!(
+        fs::read(fixture.0.join("ALT.LOG")).unwrap(),
+        b"C:\\> echo inside\r\ninside\r\nE"
+    );
+
+    fs::write(
+        fixture.0.join("OUTER.BAT"),
+        b"@echo off\r\ncall RUN.BAT <D:INPUT.DAT >OTHER.LOG\r\necho restored\r\n",
+    )
+    .unwrap();
+    let result = run("OUTER");
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(result.stdout, b"display\r\nrestored\r\n");
+    assert_eq!(
+        fs::read(fixture.0.join("OTHER.LOG")).unwrap(),
+        b"first\r\nABPress any key to continue . . .\r\nlast\r\n"
+    );
+    fs::write(
+        fixture.0.join("CHAIN.BAT"),
+        b"@echo off\r\nNEXT.BAT\r\necho unreachable\r\n",
+    )
+    .unwrap();
+    fs::write(fixture.0.join("NEXT.BAT"), b"echo chained\r\n").unwrap();
+    let result = run("CHAIN >CHAIN.LOG");
+    assert!(
+        result.status.success() && result.stdout.is_empty(),
+        "{result:?}"
+    );
+    assert_eq!(
+        fs::read(fixture.0.join("CHAIN.LOG")).unwrap(),
+        b"chained\r\n"
+    );
+}
+
+#[test]
 fn shell_redirects_files_devices_and_batch_commands() {
     use std::process::Stdio;
 

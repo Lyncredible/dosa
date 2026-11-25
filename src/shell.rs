@@ -412,10 +412,7 @@ impl Shell {
                 }
                 let (drive, executable) = self.find_program(word, &["COM", "EXE", "BAT"])?;
                 if batch::is_batch(&executable) {
-                    if io.is_some() {
-                        return Err("redirect individual commands inside the batch file".into());
-                    }
-                    self.launch_batch(drive, &executable, word, args, false)?;
+                    self.launch_batch(drive, &executable, word, args, false, io.take())?;
                     return Ok(Command::Prompt);
                 }
                 if let Some(io) = io.take() {

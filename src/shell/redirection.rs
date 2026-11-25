@@ -2,7 +2,7 @@ use std::error::Error;
 
 use dosa_dos::{ShellInput, ShellIo};
 
-use super::{Command, Shell, split_word};
+use super::{Command, PAUSE_MESSAGE, Shell, pending_input::PendingInput, split_word};
 
 pub(super) struct Redirection<'a> {
     line: String,
@@ -93,22 +93,21 @@ impl Shell {
         let (word, args) = split_word(line)?;
         let word = word.to_ascii_uppercase();
         if matches!(word.as_str(), "BOOT" | "MOUNT" | "IMGMOUNT")
-            || batch
-                && matches!(
-                    word.as_str(),
-                    "CALL" | "GOTO" | "GOTO:EOF" | "PAUSE" | "SHIFT" | "EXIT"
-                )
+            || batch && matches!(word.as_str(), "GOTO" | "GOTO:EOF" | "SHIFT" | "EXIT")
         {
             return Err("redirection is unavailable for this command".into());
         }
         let mut io = Some(self.machine.prepare_shell_io(
             self.drive,
             &self.directories,
+            self.batch_io(),
             request.input,
             request.output,
         )?);
         let command = match word.as_str() {
             "ECHO" if batch => self.echo_batch(args.trim_end()),
+            "CALL" if batch => self.call_batch(args.trim_end(), io.take())?,
+            "PAUSE" if batch && args.trim_end() != "/?" => self.pause_batch(args.trim_end())?,
             "ECHO." if batch && args.is_empty() => Command::Print(b"\r\n".to_vec()),
             _ => self.execute_command(line, &mut io)?,
         };
@@ -139,6 +138,10 @@ impl Shell {
         let mut skip_lf = false;
         loop {
             match command {
+                Command::Pause => {
+                    self.pending_input = Some(PendingInput::BatchPause);
+                    command = Command::WaitForInput(PAUSE_MESSAGE.to_vec());
+                }
                 Command::Print(bytes) => {
                     if !self.machine.write_shell_stdout(&mut io, &bytes)? {
                         display.extend(bytes);
