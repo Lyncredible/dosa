@@ -1,7 +1,9 @@
+use std::fs::FileTimes;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
@@ -105,12 +107,17 @@ impl WritableFile {
 
     /// Atomically replace the file's contents inside its host directory.
     pub fn replace(&self, bytes: &[u8]) -> Result<()> {
+        self.replace_at(bytes, None)
+    }
+
+    /// Atomically replace the file with an optional DOS modification time.
+    pub fn replace_at(&self, bytes: &[u8], modified: Option<SystemTime>) -> Result<()> {
         if !self.writable {
             return Err(MountError::ReadOnly);
         }
         let _guard = lock(&self.transaction)?;
         let parent = self.open_parent()?;
-        self.replace_locked(&parent, bytes)
+        self.replace_locked(&parent, bytes, modified)
     }
 
     fn open_parent(&self) -> Result<Dir> {
@@ -123,7 +130,12 @@ impl WritableFile {
         Ok(parent)
     }
 
-    fn replace_locked(&self, parent: &Dir, bytes: &[u8]) -> Result<()> {
+    fn replace_locked(
+        &self,
+        parent: &Dir,
+        bytes: &[u8],
+        modified: Option<SystemTime>,
+    ) -> Result<()> {
         if bytes.len() as u64 > MAX_FILE_BYTES {
             return Err(MountError::FileTooLarge);
         }
@@ -144,6 +156,7 @@ impl WritableFile {
             let result = (|| {
                 file.write_all(bytes)?;
                 file.set_permissions(metadata.permissions())?;
+                set_modified(&file, modified)?;
                 file.sync_all()
             })();
             // Windows does not permit the staging file to be renamed while its
@@ -162,6 +175,15 @@ impl WritableFile {
         )
         .into())
     }
+}
+
+fn set_modified(file: &File, modified: Option<SystemTime>) -> io::Result<()> {
+    if let Some(time) = modified {
+        file.try_clone()?
+            .into_std()
+            .set_times(FileTimes::new().set_modified(time))?;
+    }
+    Ok(())
 }
 
 impl Mount {
@@ -249,6 +271,20 @@ impl Mount {
         path: &str,
         disposition: WriteDisposition,
     ) -> Result<WritableFile> {
+        self.open_writable_file_at(path, disposition, None)
+    }
+
+    /// Create or truncate a file with an optional DOS modification time.
+    pub fn create_file(&self, path: &str, modified: Option<SystemTime>) -> Result<WritableFile> {
+        self.open_writable_file_at(path, WriteDisposition::CreateOrTruncate, modified)
+    }
+
+    fn open_writable_file_at(
+        &self,
+        path: &str,
+        disposition: WriteDisposition,
+        modified: Option<SystemTime>,
+    ) -> Result<WritableFile> {
         let writable = self.writable()?;
         let _guard = lock(&writable.transaction)?;
         let target = resolve_target(&writable.root, path)?;
@@ -272,7 +308,7 @@ impl Mount {
         };
         if exists {
             if create {
-                file.replace_locked(&target.parent, &[])?;
+                file.replace_locked(&target.parent, &[], modified)?;
             } else {
                 writable_file_metadata(&target.parent, &file.name)?;
             }
@@ -282,7 +318,12 @@ impl Mount {
                 .write(true)
                 .create_new(true)
                 .follow(FollowSymlinks::No);
-            target.parent.open_with(&file.name, &options)?;
+            let created = target.parent.open_with(&file.name, &options)?;
+            if let Err(error) = set_modified(&created, modified) {
+                drop(created);
+                let _ = target.parent.remove_file(&file.name);
+                return Err(error.into());
+            }
         }
         Ok(file)
     }

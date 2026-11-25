@@ -878,6 +878,52 @@ fn date_and_time_share_the_guest_clock_and_reprompt_for_invalid_lines() {
 }
 
 #[test]
+fn dos_file_creates_and_writes_use_the_adjusted_clock() {
+    let fixture = Fixture::new();
+    let mut probe = vec![
+        0xba, 0, 2, 0x31, 0xc9, 0xb4, 0x3c, 0xcd, 0x21, // create EMPTY.DAT
+        0x73, 5, 0xb8, 1, 0x4c, 0xcd, 0x21, 0x89, 0xc3, // keep file handle
+        0xb4, 0x3e, 0xcd, 0x21, // close
+        0xba, 10, 2, 0x31, 0xc9, 0xb4, 0x3c, 0xcd, 0x21, // truncate WRITE.DAT
+        0x73, 5, 0xb8, 2, 0x4c, 0xcd, 0x21, 0x89, 0xc3, // keep file handle
+        0xb9, 44, 16, 0x31, 0xd2, 0xb4, 0x2d, 0xcd, 0x21, // set time to 16:44
+        0xba, 20, 2, 0xb9, 1, 0, 0xb4, 0x40, 0xcd, 0x21, // write one byte
+        0x73, 5, 0xb8, 3, 0x4c, 0xcd, 0x21, 0xb8, 0, 0x57, 0xcd,
+        0x21, // DOS handle modification time
+        0x73, 5, 0xb8, 4, 0x4c, 0xcd, 0x21, 0x81, 0xfa, 0x5d, 0x28, 0x74, 5, 0xb8, 5, 0x4c, 0xcd,
+        0x21, // February 29, 2000
+        0x81, 0xe1, 0xe0, 0xff, 0x81, 0xf9, 0x80, 0x85, 0x74, 5, // 16:44
+        0xb8, 6, 0x4c, 0xcd, 0x21, 0xb8, 0, 0x4c, 0xcd, 0x21,
+    ];
+    probe.resize(0x100, 0);
+    probe.extend_from_slice(b"EMPTY.DAT\0WRITE.DAT\0x");
+    fs::write(fixture.0.join("STAMP.COM"), probe).unwrap();
+    fs::write(fixture.0.join("WRITE.DAT"), b"old contents").unwrap();
+    fs::write(
+        fixture.0.join("SETUP.BAT"),
+        b"@echo off\r\ndate 02-29-2000\r\ntime 13:36\r\nstamp\r\nif errorlevel 1 exit %errorlevel%\r\ndir *.dat /od\r\n",
+    )
+    .unwrap();
+
+    let mount = format!("C={}", fixture.0.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args(["--headless", "--mount-rw", &mount, "--exec", "SETUP"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let listing = String::from_utf8(output.stdout).unwrap();
+    for (name, time) in [("EMPTY.DAT", "1:36p"), ("WRITE.DAT", "4:44p")] {
+        let row = listing
+            .lines()
+            .find(|line| line.contains(name))
+            .unwrap_or_else(|| panic!("{listing}"));
+        assert!(row.contains("02-29-00") && row.contains(time), "{row}");
+    }
+    assert_eq!(fs::read(fixture.0.join("EMPTY.DAT")).unwrap(), b"");
+    assert_eq!(fs::read(fixture.0.join("WRITE.DAT")).unwrap(), b"x");
+}
+
+#[test]
 fn dir_p_pages_at_the_selected_text_height_and_can_be_cancelled() {
     use std::process::Stdio;
 
