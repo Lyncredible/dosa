@@ -24,7 +24,7 @@ Usage: dosa [OPTIONS]
   --mount DRIVE=PATH   Mount a host file, directory, or ZIP (repeatable)
   --mount-rw DRIVE=DIR Mount a writable host directory (repeatable)
   --mount-session DRIVE=ZIP Mount a writable ZIP copy until exit (repeatable)
-  --mount-fat DRIVE=IMG Mount a read-only FAT volume image (repeatable)
+  --mount-fat DRIVE=IMG Mount a read-only FAT volume or MBR image (repeatable)
   --mount-iso DRIVE=ISO Mount a read-only ISO 9660 data image (repeatable)
   --exec COMMAND       Run a DOS shell command on startup
   --cpu 8086|286|386   Select the guest CPU profile

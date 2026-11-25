@@ -138,7 +138,7 @@ impl Mount {
         }
     }
 
-    /// Mount a FAT volume image as a read-only DOS drive.
+    /// Mount a raw FAT volume or the first primary FAT partition in an MBR image.
     pub fn open_fat_image(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if !fs::metadata(path)?.is_file() {

@@ -13,3 +13,7 @@ The mount crate has Windows tests for DOS name resolution, file and directory mo
 ## Writable ZIP copies
 
 Use `--mount-session`, `session_zip = true` in a profile, or Drives → **Mount ZIP**. The mount materializes validated DOS paths into a temporary writable drive and retains the original archive. The existing ZIP entry and file limits apply, with an additional 512 MiB limit on initial expansion. **Mount read-only ZIP** keeps the original access mode available. DOS and profile integration tests verify write access, reuse within a batch, and unchanged source bytes.
+
+## FAT disk images
+
+Dosa mounts raw FAT volumes and the first primary FAT partition in MBR table order. The reader keeps all FAT seeks and reads within the declared volume. Tests exercise a generated FAT16 partition from DOS and reject overlapping and truncated layouts. [UEFI legacy MBR layout](https://uefi.org/specs/UEFI/2.11/05_GUID_Partition_Table_Format.html)
