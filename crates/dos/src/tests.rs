@@ -52,6 +52,72 @@ fn guest_display_detection_agrees_with_bios_equipment_word() {
 }
 
 #[test]
+fn named_null_and_console_handles_support_file_services() {
+    let directory = Directory::new("devices");
+    directory.write("PROBE.COM", &[0xeb, 0xfe]); // wait in a guest loop
+    let mut machine = directory.machine();
+    machine.launch('C', "PROBE.COM", "").unwrap();
+    let ds = machine.cpu.regs.ds;
+    machine.cpu.load(ds, 0x200, b"nUl.TxT\0CoN\0Q");
+    let call = |machine: &mut Machine, ax, bx, cx, dx| {
+        machine.cpu.regs.ax = ax;
+        machine.cpu.regs.bx = bx;
+        machine.cpu.regs.cx = cx;
+        machine.cpu.regs.dx = dx;
+        machine.interrupt(0x21).unwrap();
+        machine.cpu.regs
+    };
+
+    let null = call(&mut machine, 0x3c00, 0, 0, 0x200);
+    assert_eq!(null.flags & 1, 0);
+    assert_eq!(null.ax, 5);
+    let handle = null.ax;
+    assert_eq!(call(&mut machine, 0x4400, handle, 0, 0).dx, 0x84);
+    assert_eq!(call(&mut machine, 0x3f00, handle, 1, 0x20c).ax, 0);
+    assert_eq!(machine.cpu.read_u8(ds, 0x20c), b'Q');
+    assert_eq!(call(&mut machine, 0x4000, handle, 1, 0x20c).ax, 1);
+    assert_eq!(call(&mut machine, 0x4200, handle, 0, 10).ax, 0);
+    assert!(machine.take_output().is_empty());
+    assert_eq!(call(&mut machine, 0x3e00, handle, 0, 0).flags & 1, 0);
+    assert!(!directory.path().join("nUl.TxT").exists());
+
+    let console = call(&mut machine, 0x3d02, 0, 0, 0x208);
+    assert_eq!(console.flags & 1, 0);
+    assert_eq!(console.ax, handle);
+    assert_eq!(call(&mut machine, 0x4400, handle, 0, 0).dx & 0x83, 0x83);
+    assert_eq!(call(&mut machine, 0x4406, handle, 0, 0).ax as u8, 0);
+    call(&mut machine, 0x3f00, handle, 1, 0x20d);
+    assert_eq!(machine.run(20).unwrap(), RunState::WaitingForKey);
+    machine.key(b'Y', 0x15);
+    assert_eq!(machine.run(20).unwrap(), RunState::Running);
+    assert_eq!(machine.cpu.read_u8(ds, 0x20d), b'Y');
+    assert_eq!(call(&mut machine, 0x4000, handle, 2, 0x20c).ax, 2);
+    assert_eq!(machine.take_output(), b"QY");
+    assert_eq!(call(&mut machine, 0x3e00, handle, 0, 0).flags & 1, 0);
+    let closed = call(&mut machine, 0x4400, handle, 0, 0);
+    assert_eq!((closed.flags & 1, closed.ax), (1, 6));
+}
+
+#[test]
+fn named_device_paths_respect_directories_and_access_modes() {
+    let directory = Directory::new("device-names");
+    fs::create_dir(directory.path().join("SUB")).unwrap();
+    let mut machine = directory.machine();
+    assert!(machine.files.open(&machine.mounts, "NUL", 0).is_ok());
+    assert_eq!(
+        machine.files.open(&machine.mounts, "C:\\MISSING\\NUL", 0),
+        Err(3)
+    );
+    assert_eq!(machine.files.open(&machine.mounts, "Z:\\NUL", 0), Err(15));
+    let handle = machine
+        .files
+        .open(&machine.mounts, "C:\\SUB\\NUL", 0)
+        .unwrap();
+    assert!(machine.files.device(handle).unwrap().readable);
+    assert!(!machine.files.device(handle).unwrap().writable);
+}
+
+#[test]
 fn dos_break_checks_disk_calls_only_when_enabled() {
     let directory = Directory::new("disk-break");
     directory.write(
