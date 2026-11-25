@@ -206,6 +206,7 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
     let mut output = io::stdout().lock();
     let mut remaining_slices = 1000;
     let mut command = shell.execute(command)?;
+    let mut skip_lf = false;
     loop {
         match command {
             Command::Print(text) => output.write_all(&text)?,
@@ -214,11 +215,10 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
                 let mut input = io::stdin().lock();
                 while shell.batch_waiting() {
                     output.flush()?;
-                    let mut key = [0];
-                    input.read_exact(&mut key).map_err(|error| {
+                    let key = read_console_key(&mut input, &mut skip_lf).map_err(|error| {
                         shell.guest_failed(format!("PAUSE needs a key from stdin: {error}").into())
                     })?;
-                    if let Some(response) = shell.resume_batch(key[0]) {
+                    if let Some(response) = shell.resume_batch(key) {
                         output.write_all(response)?;
                     }
                 }
@@ -228,12 +228,12 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
                 output.flush()?;
                 let mut input = io::stdin().lock();
                 command = loop {
-                    let mut key = [0];
-                    input.read_exact(&mut key).map_err(|error| {
+                    let key = read_console_key(&mut input, &mut skip_lf).map_err(|error| {
                         let requirement = shell.pending_input_requirement();
                         shell.guest_failed(format!("{requirement} from stdin: {error}").into())
                     })?;
-                    if let Some(next) = shell.resume_input(key[0])? {
+                    skip_lf = key == b'\r' && shell.line_input_waiting();
+                    if let Some(next) = shell.resume_input(key)? {
                         break next;
                     }
                 };
@@ -285,6 +285,15 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
         }
         command = step.command;
     }
+}
+
+fn read_console_key(input: &mut impl Read, skip_lf: &mut bool) -> io::Result<u8> {
+    let mut key = [0];
+    input.read_exact(&mut key)?;
+    if std::mem::take(skip_lf) && key[0] == b'\n' {
+        input.read_exact(&mut key)?;
+    }
+    Ok(key[0])
 }
 
 #[cfg(test)]

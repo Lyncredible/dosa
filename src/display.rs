@@ -767,6 +767,8 @@ impl App for Desktop {
                 let key = match event.key {
                     Key::Character('c' | 'C') if event.modifiers.ctrl => 3,
                     Key::Character(character) if !event.modifiers.ctrl => encode_cp437(character),
+                    Key::Enter => 13,
+                    Key::Backspace => 8,
                     Key::Escape => 27,
                     _ => 0,
                 };
@@ -1386,6 +1388,41 @@ mod tests {
         cursor.cursor_mask[1] = 0x4000;
         draw_mouse_cursor(&mut pixels, 2, 1, &cursor);
         assert_eq!(pixels, [245, 235, 225, 255, 40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn desktop_date_prompt_accepts_editing_and_returns_to_the_shell() {
+        let mut desktop = Desktop::new(Shell::new(), Some("DATE"));
+        let mut press = |key| {
+            desktop.input(Input {
+                key,
+                pressed: true,
+                text: None,
+                modifiers: Default::default(),
+                scan_code: 0,
+            })
+        };
+        press(Key::Character('3'));
+        press(Key::Backspace);
+        for character in "02-29-2000".chars() {
+            press(Key::Character(character));
+        }
+        press(Key::Enter);
+
+        assert!(!desktop.shell.input_waiting());
+        assert_eq!(
+            desktop.shell.machine.clock_snapshot().date(),
+            (2000, 2, 29, 2)
+        );
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected the text console");
+        };
+        let text = screen_text(frame);
+        assert!(
+            text.contains("Enter new date (mm-dd-yy): 02-29-2000"),
+            "{text}"
+        );
+        assert!(text.trim_end().ends_with("C:\\>"));
     }
 
     #[test]
