@@ -1,15 +1,21 @@
-//! Windows non-client menu bar. Commands are queued for the winit loop.
+//! Windows caption popup. Open requests are handled by the winit loop.
 
-use std::{cell::RefCell, collections::BTreeMap, io, ptr::null_mut, sync::Arc};
+use std::{cell::Cell, io, ptr::null, sync::Arc};
 
 use windows_sys::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+    Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+    Graphics::{
+        Dwm::{DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWINDOWATTRIBUTE, DwmSetWindowAttribute},
+        Gdi::ClientToScreen,
+    },
     UI::{
+        HiDpi::GetDpiForWindow,
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
-            AppendMenuW, CreateMenu, CreatePopupMenu, DestroyMenu, DrawMenuBar, HMENU, IsWindow,
-            MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, SetMenu, WM_COMMAND,
-            WM_NCDESTROY,
+            AppendMenuW, CreatePopupMenu, DestroyMenu, GetWindowRect, HMENU, HTCAPTION, HTSYSMENU,
+            IsWindow, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, TPM_NONOTIFY,
+            TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_NCDESTROY, WM_NCLBUTTONDBLCLK,
+            WM_NCLBUTTONDOWN, WM_NCRBUTTONUP,
         },
     },
 };
@@ -20,37 +26,33 @@ use winit::{
 
 use crate::{
     MenuAction, MenuState,
-    menu::{self, CATEGORIES, Command, Item, Tab},
+    menu::{self, CATEGORIES, Command, Tab},
 };
 
 const SUBCLASS: usize = 1;
-const FIRST_COMMAND: usize = 0x1000;
+const BRAND_WIDTH: i32 = 95;
 
-#[derive(Clone)]
 enum Action {
     Run(Command),
     SelectDrive(char),
 }
 
-#[derive(Default)]
-struct Dispatch {
-    actions: Vec<Option<Action>>,
-    pending: Vec<Action>,
+#[derive(Clone, Copy)]
+pub(crate) enum OpenAt {
+    Title,
+    Pointer(POINT),
 }
 
-#[derive(PartialEq, Eq)]
-struct Model {
-    groups: Vec<Vec<Item>>,
-    drives: BTreeMap<char, &'static str>,
-    drive: char,
+#[derive(Default)]
+struct Dispatch {
+    enabled: Cell<bool>,
+    pending: Cell<Option<OpenAt>>,
 }
 
 pub(crate) struct NativeMenu {
     window: Arc<Window>,
     hwnd: HWND,
-    dispatch: Box<RefCell<Dispatch>>,
-    bar: Option<OwnedMenu>,
-    model: Option<Model>,
+    dispatch: Box<Dispatch>,
     selected_drive: Option<char>,
     caption: String,
 }
@@ -62,24 +64,26 @@ impl NativeMenu {
             return Err(io::Error::other("expected a Win32 window"));
         };
         let hwnd = handle.hwnd.get() as HWND;
-        let dispatch = Box::<RefCell<Dispatch>>::default();
+        let dispatch = Box::<Dispatch>::default();
         // The heap allocation is stable and outlives the subclass registration.
-        let context = (&*dispatch as *const RefCell<Dispatch>) as usize;
+        let context = (&*dispatch as *const Dispatch) as usize;
         if unsafe { SetWindowSubclass(hwnd, Some(on_message), SUBCLASS, context) } == 0 {
             return Err(io::Error::last_os_error());
         }
+        // Older Windows releases use their standard theme when these attributes are unavailable.
+        set_caption_color(hwnd, DWMWA_CAPTION_COLOR, [29, 34, 44]);
+        set_caption_color(hwnd, DWMWA_TEXT_COLOR, [222, 229, 240]);
         Ok(Self {
             window,
             hwnd,
             dispatch,
-            bar: None,
-            model: None,
             selected_drive: None,
             caption: "Dosa".into(),
         })
     }
 
-    pub fn sync(&mut self, state: &MenuState, fullscreen: bool) -> io::Result<()> {
+    pub fn sync(&mut self, state: &MenuState, fullscreen: bool) {
+        self.dispatch.enabled.set(state.enabled && !fullscreen);
         let caption = if state.enabled {
             caption(state)
         } else {
@@ -89,76 +93,74 @@ impl NativeMenu {
             self.window.set_title(&caption);
             self.caption = caption;
         }
-        if !state.enabled || fullscreen {
-            if self.bar.is_some() {
-                self.attach(null_mut())?;
-                self.bar = None;
-                self.model = None;
-                self.dispatch.borrow_mut().actions.clear();
-            }
-            return Ok(());
+        if !self.dispatch.enabled.get() {
+            self.dispatch.pending.set(None);
         }
+    }
+
+    pub fn request_keyboard_open(&self) -> bool {
+        if !self.dispatch.enabled.get() {
+            return false;
+        }
+        self.dispatch.pending.set(Some(OpenAt::Title));
+        true
+    }
+
+    pub fn take_request(&self) -> Option<OpenAt> {
+        self.dispatch.pending.take()
+    }
+
+    pub fn show(&mut self, state: &MenuState, at: OpenAt) -> io::Result<Option<Command>> {
+        let point = match at {
+            OpenAt::Pointer(point) => point,
+            OpenAt::Title => {
+                let mut point = POINT {
+                    x: scaled(self.hwnd, 8),
+                    y: 0,
+                };
+                if unsafe { ClientToScreen(self.hwnd, &mut point) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                point
+            }
+        };
         let drive = self
             .selected_drive
             .or(state.write_blocked_zip)
             .unwrap_or(state.active_drive);
-        let model = Model {
-            groups: CATEGORIES
-                .iter()
-                .map(|&(tab, _)| menu::options(tab, state, drive, false))
-                .collect(),
-            drives: state.drives.clone(),
-            drive,
+        let (root, mut actions) = build(state, drive)?;
+        let command_id = unsafe {
+            TrackPopupMenuEx(
+                root.0,
+                TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                point.x,
+                point.y,
+                self.hwnd,
+                null(),
+            )
         };
-        if self.model.as_ref() == Some(&model) {
-            return Ok(());
-        }
-
-        let (bar, actions) = build(&model)?;
-        self.attach(bar.0)?;
-        self.dispatch.borrow_mut().actions = actions;
-        self.bar = Some(bar);
-        self.model = Some(model);
-        Ok(())
-    }
-
-    fn attach(&self, menu: HMENU) -> io::Result<()> {
-        if unsafe { SetMenu(self.hwnd, menu) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        unsafe { DrawMenuBar(self.hwnd) };
-        Ok(())
-    }
-
-    pub fn take_commands(&mut self) -> Vec<Command> {
-        let actions = std::mem::take(&mut self.dispatch.borrow_mut().pending);
-        actions
-            .into_iter()
-            .filter_map(|action| match action {
-                Action::Run(command) => Some(command),
-                Action::SelectDrive(drive) => {
-                    self.selected_drive = Some(drive);
-                    None
-                }
-            })
-            .collect()
+        let action = usize::try_from(command_id)
+            .ok()
+            .and_then(|index| index.checked_sub(1))
+            .and_then(|index| actions.get_mut(index))
+            .and_then(Option::take);
+        Ok(match action {
+            Some(Action::Run(command)) => Some(command),
+            Some(Action::SelectDrive(drive)) => {
+                self.selected_drive = Some(drive);
+                None
+            }
+            None => None,
+        })
     }
 }
 
 impl Drop for NativeMenu {
     fn drop(&mut self) {
-        // The window also removes the subclass on destruction. If it's alive,
-        // detach before the owned menu and callback context are freed.
+        // The callback context must outlive its registration.
         unsafe {
             if IsWindow(self.hwnd) != 0 {
                 RemoveWindowSubclass(self.hwnd, Some(on_message), SUBCLASS);
-                if self.bar.is_some() && SetMenu(self.hwnd, null_mut()) == 0 {
-                    // The window still owns the attached menu.
-                    std::mem::forget(self.bar.take());
-                }
-            } else {
-                // Windows destroyed its attached menu with the HWND.
-                std::mem::forget(self.bar.take());
             }
         }
     }
@@ -174,33 +176,61 @@ unsafe extern "system" fn on_message(
 ) -> LRESULT {
     if message == WM_NCDESTROY {
         unsafe { RemoveWindowSubclass(hwnd, Some(on_message), id) };
-    } else if message == WM_COMMAND
-        && lparam == 0
-        && (FIRST_COMMAND..=u16::MAX as usize).contains(&wparam)
-    {
-        // The menu is attached and used on the event-loop thread only.
-        let dispatch = unsafe { &*(context as *const RefCell<Dispatch>) };
-        if let Ok(mut dispatch) = dispatch.try_borrow_mut()
-            && let Some(Some(action)) = dispatch.actions.get(wparam - FIRST_COMMAND).cloned()
-        {
-            dispatch.pending.push(action);
-            return 0;
+    } else if matches!(
+        message,
+        WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK | WM_NCRBUTTONUP
+    ) {
+        let dispatch = unsafe { &*(context as *const Dispatch) };
+        let point = POINT {
+            x: i32::from(lparam as i16),
+            y: i32::from((lparam >> 16) as i16),
+        };
+        let hit = wparam as u32;
+        if dispatch.enabled.get() && (hit == HTCAPTION || hit == HTSYSMENU) {
+            if message == WM_NCRBUTTONUP {
+                dispatch.pending.set(Some(OpenAt::Pointer(point)));
+                return 0;
+            }
+            if in_brand(hwnd, point.x) {
+                if message == WM_NCLBUTTONDOWN {
+                    dispatch.pending.set(Some(OpenAt::Title));
+                }
+                return 0;
+            }
         }
     }
     unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
 }
 
+fn in_brand(hwnd: HWND, screen_x: i32) -> bool {
+    let mut bounds = RECT::default();
+    (unsafe { GetWindowRect(hwnd, &mut bounds) != 0 })
+        && screen_x >= bounds.left
+        && screen_x < bounds.left + scaled(hwnd, BRAND_WIDTH)
+}
+
+fn scaled(hwnd: HWND, logical: i32) -> i32 {
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    logical * i32::try_from(dpi).unwrap_or(96).max(96) / 96
+}
+
+fn set_caption_color(hwnd: HWND, attribute: DWMWINDOWATTRIBUTE, [r, g, b]: [u8; 3]) {
+    let color = u32::from_le_bytes([r, g, b, 0]);
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            attribute as u32,
+            (&raw const color).cast(),
+            size_of::<u32>() as u32,
+        );
+    }
+}
+
 struct OwnedMenu(HMENU);
 
 impl OwnedMenu {
-    fn new(popup: bool) -> io::Result<Self> {
-        let menu = unsafe {
-            if popup {
-                CreatePopupMenu()
-            } else {
-                CreateMenu()
-            }
-        };
+    fn new() -> io::Result<Self> {
+        let menu = unsafe { CreatePopupMenu() };
         if menu.is_null() {
             Err(io::Error::last_os_error())
         } else {
@@ -229,60 +259,69 @@ impl Drop for OwnedMenu {
     }
 }
 
-fn build(model: &Model) -> io::Result<(OwnedMenu, Vec<Option<Action>>)> {
-    let bar = OwnedMenu::new(false)?;
-    let root = OwnedMenu::new(true)?;
+fn build(state: &MenuState, drive: char) -> io::Result<(OwnedMenu, Vec<Option<Action>>)> {
+    let root = OwnedMenu::new()?;
     let mut actions = Vec::new();
     let mut add = |menu: &OwnedMenu, label: &str, action, enabled, chosen| {
         let flags =
             MF_STRING | if enabled { 0 } else { MF_GRAYED } | if chosen { MF_CHECKED } else { 0 };
-        menu.append(flags, FIRST_COMMAND + actions.len(), label)?;
+        menu.append(flags, actions.len() + 1, label)?;
         actions.push(enabled.then_some(action));
         Ok::<_, io::Error>(())
     };
-    for (&(tab, label), items) in CATEGORIES.iter().zip(&model.groups) {
-        let category = OwnedMenu::new(true)?;
+    for (tab, label) in CATEGORIES {
+        let category = OwnedMenu::new()?;
         if tab == Tab::Drives {
-            let drives = OwnedMenu::new(true)?;
+            let drives = OwnedMenu::new()?;
             for letter in 'A'..='Z' {
-                let info = model.drives.get(&letter).copied().unwrap_or("Not mounted");
+                let info = state.drives.get(&letter).copied().unwrap_or("Not mounted");
                 add(
                     &drives,
                     &format!("{letter}:  {info}"),
                     Action::SelectDrive(letter),
                     true,
-                    letter == model.drive,
+                    letter == drive,
                 )?;
             }
-            category.popup(&format!("Drive {}:", model.drive), drives)?;
+            category.popup(&format!("Drive {drive}:"), drives)?;
             category.append(MF_SEPARATOR, 0, "")?;
         }
-        for item in items {
+        for item in menu::options(tab, state, drive, false) {
+            let label = if matches!(tab, Tab::Cpu | Tab::Speed)
+                || matches!(item.command, Command::Fullscreen)
+            {
+                format!("&{}", item.label)
+            } else {
+                item.label.to_owned()
+            };
             add(
                 &category,
-                item.label,
-                Action::Run(item.command.clone()),
+                &label,
+                Action::Run(item.command),
                 item.enabled,
                 item.chosen,
             )?;
         }
-        root.popup(label, category)?;
+        let label = match tab {
+            Tab::Debug => String::from("De&bug"),
+            _ => format!("&{label}"),
+        };
+        root.popup(&label, category)?;
     }
     root.append(MF_SEPARATOR, 0, "")?;
     add(
         &root,
-        "Reset guest",
+        "&Reset guest",
         Action::Run(Command::App(MenuAction::ResetGuest)),
         true,
         false,
     )?;
-    bar.popup("Menu", root)?;
-    Ok((bar, actions))
+    Ok((root, actions))
 }
 
 fn caption(state: &MenuState) -> String {
     let mut title = format!(
-        "Dosa  ·  {}  ·  {}  ·  {}:",
+        "Dosa ▾    {}  ·  {}  ·  {}:",
         menu::cpu_label(state.cpu),
         menu::speed_label(state.speed),
         state.active_drive

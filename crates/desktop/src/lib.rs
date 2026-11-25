@@ -228,12 +228,8 @@ impl<A: App> Desktop<A> {
 
     #[cfg(windows)]
     fn sync_native_menu(&mut self, window: &Window) {
-        if let Some(native) = &mut self.native_menu
-            && native
-                .sync(&self.app.menu(), window.fullscreen().is_some())
-                .is_err()
-        {
-            self.native_menu = None;
+        if let Some(native) = &mut self.native_menu {
+            native.sync(&self.app.menu(), window.fullscreen().is_some());
         }
     }
 
@@ -342,7 +338,21 @@ impl<A: App> ApplicationHandler for Desktop<A> {
                     }
                     let input = self.keyboard.translate(event);
                     let state = self.app.menu();
-                    let (handled, command) = if state.enabled {
+                    #[cfg(windows)]
+                    let title_menu = state.enabled
+                        && !state.running
+                        && window.fullscreen().is_none()
+                        && input.pressed
+                        && input.key == Key::Function(10)
+                        && self
+                            .native_menu
+                            .as_ref()
+                            .is_some_and(|native| native.request_keyboard_open());
+                    #[cfg(not(windows))]
+                    let title_menu = false;
+                    let (handled, command) = if title_menu {
+                        (true, None)
+                    } else if state.enabled {
                         self.menu.key(
                             &input,
                             &state,
@@ -448,9 +458,23 @@ impl<A: App> ApplicationHandler for Desktop<A> {
         }
 
         #[cfg(windows)]
-        if let Some(native) = &mut self.native_menu {
-            for command in native.take_commands() {
-                self.use_menu_command(&window, Some(command));
+        if let Some(at) = self
+            .native_menu
+            .as_ref()
+            .and_then(native_menu::NativeMenu::take_request)
+        {
+            self.pointer.set_position(None);
+            self.sync_pointer(&window, true);
+            let state = self.app.menu();
+            if state.enabled && window.fullscreen().is_none() {
+                let result = self.native_menu.as_mut().unwrap().show(&state, at);
+                match result {
+                    Ok(command) => self.use_menu_command(&window, command),
+                    Err(_) => {
+                        self.native_menu = None;
+                        window.set_title("Dosa");
+                    }
+                }
             }
         }
         let now = Instant::now();
