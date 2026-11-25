@@ -33,6 +33,7 @@ pub struct SettingsOverrides {
     pub speed: Option<Speed>,
     pub text_mode: Option<TextMode>,
     pub text_columns: Option<u16>,
+    pub ansi_text: Option<bool>,
 }
 
 impl SettingsOverrides {
@@ -45,6 +46,7 @@ impl SettingsOverrides {
         Settings {
             cpu: self.cpu.unwrap_or(base.cpu),
             speed: self.speed.unwrap_or(base.speed),
+            ansi_text: self.ansi_text.unwrap_or(base.ansi_text),
             text_mode: match (columns, rows) {
                 (132, TextMode::Rows25 | TextMode::WideRows25) => TextMode::WideRows25,
                 (132, TextMode::Rows43 | TextMode::WideRows43) => TextMode::WideRows43,
@@ -66,6 +68,7 @@ struct ProfileFile {
     speed: Option<String>,
     text_rows: Option<u8>,
     text_columns: Option<u16>,
+    ansi_text: Option<bool>,
     #[serde(default)]
     mounts: Vec<MountEntry>,
 }
@@ -119,6 +122,7 @@ impl LaunchProfile {
             cpu,
             speed,
             text_mode,
+            ansi_text: profile.ansi_text,
             text_columns: profile
                 .text_columns
                 .map(|columns| parse_text_columns(&columns.to_string()))
@@ -259,6 +263,23 @@ pub fn parse_text_rows(value: &str) -> Result<TextMode, String> {
 #[cfg(test)]
 mod wide_tests {
     use super::*;
+
+    #[test]
+    fn ansi_text_requires_opt_in_and_can_be_overridden() {
+        assert!(!LaunchProfile::default().settings.ansi_text);
+        let profile = LaunchProfile::parse("ansi_text = true", Path::new("demo.toml")).unwrap();
+        assert!(
+            SettingsOverrides::default()
+                .apply(profile.settings)
+                .ansi_text
+        );
+        let settings = SettingsOverrides {
+            ansi_text: Some(false),
+            ..Default::default()
+        }
+        .apply(profile.settings);
+        assert!(!settings.ansi_text);
+    }
 
     #[test]
     fn row_and_column_overrides_preserve_the_other_dimension() {
