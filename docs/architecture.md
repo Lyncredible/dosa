@@ -4,7 +4,7 @@ dosa runs DOS applications in a Rust emulator and presents the guest display in 
 
 | Crate | Owns |
 | --- | --- |
-| `dosa-cpu` | Real-mode x86 execution, registers, segmented memory, instruction outcomes and interrupt dispatch |
+| `dosa-cpu` | x86 execution, registers, segmentation, descriptor tables, and interrupt dispatch |
 | `dosa-mount` | Host directory, single-file, and ZIP sources exposed through DOS drive paths |
 | `dosa-dos` | Guest program loading, DOS and BIOS services, input queue, and guest display state |
 | `dosa-desktop` | Native window and input, GPU presentation, and application lifecycle |

@@ -847,22 +847,15 @@ impl Machine {
     }
 
     fn step(&mut self) -> Result<(), DosError> {
-        let interrupts_enabled = self.cpu.can_accept_maskable_interrupt() && !self.cpu.is_halted();
-        self.mouse
-            .dispatch_callback(&mut self.cpu, interrupts_enabled);
-        self.service_hardware_interrupt();
-        match bios::hook(&self.cpu) {
-            Some(Hook::Tick) => bios::advance_timer(&mut self.cpu),
-            Some(Hook::TimerEoi) => self.pic.end_irq(0),
-            Some(Hook::Keyboard) => {
-                let key = self.keyboard.read_bios_key();
-                self.queue_bios_key(key);
-                self.pic.end_irq(1);
-            }
-            None => {}
+        if !self.cpu.protected_mode() {
+            let interrupts_enabled =
+                self.cpu.can_accept_maskable_interrupt() && !self.cpu.is_halted();
+            self.mouse
+                .dispatch_callback(&mut self.cpu, interrupts_enabled);
         }
-        if self.mouse.at_driver_entry(&self.cpu) {
-            self.mouse_interrupt();
+        self.service_hardware_interrupt();
+        if !self.cpu.protected_mode() {
+            self.run_firmware_hooks();
         }
         let step = self
             .cpu
@@ -921,6 +914,22 @@ impl Machine {
         Ok(())
     }
 
+    fn run_firmware_hooks(&mut self) {
+        match bios::hook(&self.cpu) {
+            Some(Hook::Tick) => bios::advance_timer(&mut self.cpu),
+            Some(Hook::TimerEoi) => self.pic.end_irq(0),
+            Some(Hook::Keyboard) => {
+                let key = self.keyboard.read_bios_key();
+                self.queue_bios_key(key);
+                self.pic.end_irq(1);
+            }
+            None => {}
+        }
+        if self.mouse.at_driver_entry(&self.cpu) {
+            self.mouse_interrupt();
+        }
+    }
+
     fn irq_requests(&self) -> u8 {
         u8::from(self.pit.irq_requested())
             | (u8::from(self.keyboard.irq_requested()) << 1)
@@ -935,10 +944,16 @@ impl Machine {
             return false;
         };
         let vector = TIMER_VECTOR + irq;
-        if irq == 0 {
+        let protected = self.cpu.protected_mode();
+        if irq == 0 && !protected {
             self.pit.acknowledge_irq();
         }
-        if self.has_interrupt_handler(vector) {
+        if (protected || self.has_interrupt_handler(vector))
+            && self.cpu.enter_interrupt(vector).is_some()
+        {
+            if irq == 0 && protected {
+                self.pit.acknowledge_irq();
+            }
             if vector == KEYBOARD_VECTOR {
                 self.keyboard.acknowledge_irq();
             }
@@ -946,7 +961,6 @@ impl Machine {
                 self.audio.acknowledge_irq();
             }
             self.pic.acknowledge(irq);
-            self.cpu.enter_interrupt(vector);
             return true;
         }
         false

@@ -98,7 +98,7 @@ fn stack_far_call_and_interrupt_vectors_round_trip() {
     advance(&mut cpu, 1);
     assert_eq!(cpu.regs.sp, 0xfffe);
     assert_eq!(cpu.step().unwrap(), Step::Interrupt(0x60));
-    cpu.enter_interrupt(0x60);
+    cpu.enter_interrupt(0x60).unwrap();
     assert!(!cpu.flag(IF));
     assert_eq!(cpu.regs.cs, 0x4321);
     assert_eq!(cpu.regs.ip, 0x200);
@@ -303,9 +303,9 @@ fn cpu_profiles_expose_different_real_mode_flags_and_stack_behavior() {
 
 #[test]
 fn supported_cpu_generation_can_still_report_unimplemented_instructions() {
-    let mut cpu = program_for(CpuProfile::I286, &[0x0f, 0x01, 0xe0]); // SMSW AX
+    let mut cpu = program_for(CpuProfile::I286, &[0x62, 0x06, 0, 2]); // BOUND AX,[0200h]
     let error = cpu.step().unwrap_err();
-    assert_eq!(error.mnemonic, Mnemonic::Smsw);
+    assert_eq!(error.mnemonic, Mnemonic::Bound);
     assert_eq!(error.kind, CpuErrorKind::Unsupported);
     assert_eq!(cpu.regs.ip, 0x0100);
 }
@@ -364,7 +364,7 @@ fn hlt_stops_instruction_fetch_until_an_interrupt_returns_to_the_next_ip() {
     assert_eq!(cpu.regs.ip, 0x0102);
     assert_eq!(cpu.regs.ax, 0);
 
-    cpu.enter_interrupt(8);
+    cpu.enter_interrupt(8).unwrap();
     assert!(!cpu.is_halted());
     assert!(!cpu.can_accept_maskable_interrupt());
     assert_eq!(cpu.read_u16(cpu.regs.ss, cpu.regs.sp), 0x0102);
@@ -372,4 +372,79 @@ fn hlt_stops_instruction_fetch_until_an_interrupt_returns_to_the_next_ip() {
     assert_eq!(cpu.regs.ax, 0x1234);
     assert_eq!(cpu.regs.sp, 0xfffe);
     assert!(cpu.can_accept_maskable_interrupt());
+}
+
+#[test]
+fn protected_mode_descriptor_tables_round_trip_by_profile() {
+    let bios = [
+        0x0f, 1, 0x16, 0, 2, // LGDT [0200h]
+        0x0f, 1, 0x06, 8, 2, // SGDT [0208h]
+        0x0f, 1, 0x1e, 0, 2, // LIDT [0200h]
+        0x0f, 1, 0x0e, 0x10, 2, // SIDT [0210h]
+    ];
+    for (profile, upper) in [(CpuProfile::I286, 0xff), (CpuProfile::I386, 0)] {
+        let mut cpu = program_for(profile, &bios);
+        cpu.load(cpu.regs.ds, 0x200, &[0x37, 0, 0x11, 0x22, 0x33, 0x44]);
+        advance(&mut cpu, 4);
+        for offset in [0x208, 0x210] {
+            let bytes = std::array::from_fn::<_, 6, _>(|byte| {
+                cpu.read_u8(cpu.regs.ds, offset + byte as u16)
+            });
+            assert_eq!(bytes, [0x37, 0, 0x11, 0x22, 0x33, upper]);
+        }
+    }
+    let mut cpu = program_for(CpuProfile::I8086, &bios);
+    assert_eq!(
+        cpu.step().unwrap_err().kind,
+        CpuErrorKind::UnavailableOnProfile(CpuProfile::I8086)
+    );
+
+    let mut cpu = program(&[
+        0x66, 0x0f, 1, 0x16, 0, 2, // 32-bit LGDT [0200h]
+        0x0f, 1, 0x06, 8, 2, // SGDT still stores all 32 base bits
+    ]);
+    cpu.load(cpu.regs.ds, 0x200, &[0x37, 0, 0x11, 0x22, 0x33, 0x44]);
+    advance(&mut cpu, 2);
+    assert_eq!(cpu.read_u8(cpu.regs.ds, 0x20d), 0x44);
+}
+
+#[test]
+fn protected_mode_286_keeps_pe_set_and_enforces_segment_bounds() {
+    let mut cpu = program_for(
+        CpuProfile::I286,
+        &[
+            0xfa, 0x0f, 1, 0x16, 0, 2, // CLI; LGDT [0200h]
+            0xb8, 1, 0, 0x0f, 1, 0xf0, // LMSW AX with PE set
+            0xea, 0, 0, 8, 0, // JMP 0008:0000
+        ],
+    );
+    cpu.load(cpu.regs.ds, 0x200, &[0x17, 0, 0, 0, 2, 0]);
+    cpu.load(
+        0x2000,
+        0,
+        &[
+            0, 0, 0, 0, 0, 0, 0, 0, 0x20, 0, 0, 0x10, 2, 0x9a, 0, 0, // Code at 21000h.
+            0x03, 0, 0, 0x20, 2, 0x92, 0, 0, // Data at 22000h, four bytes.
+        ],
+    );
+    cpu.load(
+        0x2100,
+        0,
+        &[
+            0x31, 0xc0, 0x0f, 1, 0xf0, 0x0f, 1, 0xe0, // Try to clear PE and read it back.
+            0xbb, 0x10, 0, 0x8e, 0xdb, // DS = 0010h.
+            0xc6, 0x06, 3, 0, 0x7a, // Write the last valid byte.
+            0xc7, 0x06, 3, 0, 0xcd, 0xab, // Word at same offset crosses the limit.
+        ],
+    );
+    advance(&mut cpu, 11);
+    assert!(cpu.protected_mode());
+    assert_eq!(cpu.regs.ax & 1, 1);
+    assert_eq!(cpu.regs.cs, 8);
+    assert_eq!(cpu.regs.ds, 0x10);
+    assert_eq!(cpu.read_u8(0x2200, 3), 0x7a);
+    let fault_ip = cpu.regs.ip;
+    assert!(cpu.step().is_err());
+    assert_eq!(cpu.regs.ip, fault_ip);
+    assert_eq!(cpu.read_u16(0x2200, 3), 0x007a);
 }

@@ -1,8 +1,11 @@
-//! Real-mode x86 execution, with software interrupts and I/O delegated to the machine.
+//! x86 execution, with software interrupts and I/O delegated to the machine.
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 use std::fmt;
 
+use control::{Control, Segment};
+
 mod arithmetic;
+mod control;
 mod execute;
 mod profile;
 
@@ -62,6 +65,7 @@ impl Default for Registers {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RegisterSnapshot {
     registers: Registers,
+    segments: [Option<Segment>; 6],
     high: [u16; 8],
     fs: u16,
     gs: u16,
@@ -91,6 +95,7 @@ pub enum Step {
 pub enum CpuErrorKind {
     Unsupported,
     UnavailableOnProfile(CpuProfile),
+    InstructionFetch,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,6 +111,9 @@ impl fmt::Display for CpuError {
         match self.kind {
             CpuErrorKind::Unsupported => {
                 write!(f, "unsupported {:?} instruction or operand", self.mnemonic)?;
+            }
+            CpuErrorKind::InstructionFetch => {
+                f.write_str("invalid protected-mode instruction fetch")?
             }
             CpuErrorKind::UnavailableOnProfile(profile) => {
                 write!(
@@ -147,6 +155,7 @@ pub struct Cpu {
     pub memory: Box<[u8]>,
     mapping: Option<MemoryMapping>,
     profile: CpuProfile,
+    control: Control,
     high: [u16; 8],
     fs: u16,
     gs: u16,
@@ -164,6 +173,7 @@ impl Cpu {
     pub fn save_registers(&self) -> RegisterSnapshot {
         RegisterSnapshot {
             registers: self.regs,
+            segments: self.control.segments,
             high: self.high,
             fs: self.fs,
             gs: self.gs,
@@ -174,6 +184,7 @@ impl Cpu {
 
     pub fn restore_registers(&mut self, snapshot: RegisterSnapshot) {
         self.regs = snapshot.registers;
+        self.control.segments = snapshot.segments;
         self.high = snapshot.high;
         self.fs = snapshot.fs;
         self.gs = snapshot.gs;
@@ -194,6 +205,7 @@ impl Cpu {
             memory: vec![0; MEMORY_SIZE].into_boxed_slice(),
             mapping: None,
             profile,
+            control: Control::new(profile),
             high: [0; 8],
             fs: 0,
             gs: 0,
@@ -268,22 +280,37 @@ impl Cpu {
         }
         let cs = self.regs.cs;
         let ip = self.regs.ip;
-        let address = Self::linear(cs, ip.into());
+        let fetch_error = CpuError {
+            cs,
+            ip,
+            mnemonic: Mnemonic::INVALID,
+            kind: CpuErrorKind::InstructionFetch,
+        };
+        let address = self.code_address(ip.into(), 1).ok_or(fetch_error)?;
         let unwrapped_ip = usize::from(ip) + 15 <= 1 << 16;
         let ram_only = self
             .mapping
             .as_ref()
             .is_none_or(|map| address >= map.end || address + 15 <= map.start);
         let tail: [u8; 15];
-        let code = if unwrapped_ip && ram_only && address + 15 <= MEMORY_SIZE {
+        let readable_window = self.code_address(ip.into(), 15).is_some();
+        let code = if unwrapped_ip && ram_only && readable_window && address + 15 <= MEMORY_SIZE {
             &self.memory[address..address + 15]
         } else {
-            tail = std::array::from_fn(|index| self.read_u8(cs, ip.wrapping_add(index as u16)));
+            tail = std::array::from_fn(|index| {
+                self.code_address(ip.wrapping_add(index as u16).into(), 1)
+                    .map_or(0, |address| self.read_byte(address))
+            });
             &tail
         };
         // Prior to SSE2, the PAUSE encoding was a REP NOP.
         let instruction =
             Decoder::with_ip(16, code, u64::from(ip), DecoderOptions::NO_PAUSE).decode();
+        if self.control.segments[Register::CS.number()].is_some()
+            && self.code_address(ip.into(), instruction.len()).is_none()
+        {
+            return Err(fetch_error);
+        }
         if !instruction.is_invalid()
             && !self
                 .profile
@@ -322,18 +349,30 @@ impl Cpu {
         Ok(step)
     }
 
-    pub fn enter_interrupt(&mut self, vector: u8) {
-        let offset = u16::from(vector) * 4;
-        let target_ip = self.read_u16(0, offset);
-        let target_cs = self.read_u16(0, offset + 2);
-        self.push(2, u32::from(self.profile.normalize_flags(self.regs.flags)));
-        self.push(2, u32::from(self.regs.cs));
-        self.push(2, u32::from(self.regs.ip));
-        self.regs.flags &= !(IF | TF);
+    pub fn enter_interrupt(&mut self, vector: u8) -> Option<()> {
+        let (target_ip, target_cs, descriptor, disable_irq) = if self.protected_mode() {
+            let (ip, cs, descriptor, disable_irq) = self.interrupt_gate(vector)?;
+            (ip, cs, Some(descriptor), disable_irq)
+        } else {
+            let offset = u16::from(vector) * 4;
+            (
+                self.read_u16(0, offset),
+                self.read_u16(0, offset + 2),
+                None,
+                true,
+            )
+        };
+        self.check_stack_push(2, 3)?;
+        self.push(2, u32::from(self.profile.normalize_flags(self.regs.flags)))?;
+        self.push(2, u32::from(self.regs.cs))?;
+        self.push(2, u32::from(self.regs.ip))?;
+        self.regs.flags &= !(TF | if disable_irq { IF } else { 0 });
         self.interrupt_shadow = false;
         self.halted = false;
         self.regs.cs = target_cs;
+        self.control.segments[Register::CS.number()] = descriptor;
         self.regs.ip = target_ip;
+        Some(())
     }
 
     pub fn complete_port_read(&mut self, width: u8, value: u32) {
@@ -417,11 +456,35 @@ impl Cpu {
         Some(if address32 { offset } else { offset & 0xffff })
     }
 
-    fn memory_address(&self, ins: &Instruction) -> Option<usize> {
-        Some(Self::linear(
-            self.get_reg(ins.memory_segment())? as u16,
+    fn memory_address(&self, ins: &Instruction, write: bool) -> Option<usize> {
+        self.segment_address(
+            ins.memory_segment(),
             self.offset(ins)?,
-        ))
+            ins.memory_size().size(),
+            write,
+        )
+    }
+
+    fn code_address(&self, offset: u32, width: usize) -> Option<usize> {
+        if let Some(segment) = self.control.segments[Register::CS.number()] {
+            segment.address(true, offset, width, false)
+        } else {
+            Some(Self::linear(self.regs.cs, offset))
+        }
+    }
+
+    fn segment_address(
+        &self,
+        register: Register,
+        offset: u32,
+        width: usize,
+        write: bool,
+    ) -> Option<usize> {
+        if let Some(segment) = self.control.segments[register.number()] {
+            segment.address(false, offset, width, write)
+        } else {
+            Some(Self::linear(self.get_reg(register)? as u16, offset))
+        }
     }
 
     fn width(ins: &Instruction, index: u32) -> Option<u8> {
@@ -439,7 +502,9 @@ impl Cpu {
     fn read_op(&self, ins: &Instruction, index: u32) -> Option<u32> {
         Some(match ins.op_kind(index) {
             OpKind::Register => self.get_reg(ins.op_register(index))?,
-            OpKind::Memory => self.read_mem(self.memory_address(ins)?, Self::width(ins, index)?),
+            OpKind::Memory => {
+                self.read_mem(self.memory_address(ins, false)?, Self::width(ins, index)?)
+            }
             OpKind::Immediate8 => ins.immediate8().into(),
             OpKind::Immediate8_2nd => ins.immediate8_2nd().into(),
             OpKind::Immediate16 => ins.immediate16().into(),
@@ -453,9 +518,11 @@ impl Cpu {
     fn write_op(&mut self, ins: &Instruction, index: u32, value: u32) -> Option<()> {
         match ins.op_kind(index) {
             OpKind::Register => self.set_reg(ins.op_register(index), value)?,
-            OpKind::Memory => {
-                self.write_mem(self.memory_address(ins)?, Self::width(ins, index)?, value)
-            }
+            OpKind::Memory => self.write_mem(
+                self.memory_address(ins, true)?,
+                Self::width(ins, index)?,
+                value,
+            ),
             _ => return None,
         }
         Some(())
@@ -495,6 +562,7 @@ impl Cpu {
             DS => self.regs.ds.into(),
             FS => self.fs.into(),
             GS => self.gs.into(),
+            CR0 if self.profile == CpuProfile::I386 => self.control.cr0,
             _ => {
                 let (index, shift, mask) = Self::register_slice(register)?;
                 let lows = [
@@ -514,6 +582,9 @@ impl Cpu {
 
     fn set_reg(&mut self, register: Register, value: u32) -> Option<()> {
         use Register::*;
+        if register.is_segment_register() {
+            self.control.segments[register.number()] = self.descriptor(register, value as u16)?;
+        }
         match register {
             ES => self.regs.es = value as u16,
             CS => self.regs.cs = value as u16,
@@ -521,6 +592,7 @@ impl Cpu {
             DS => self.regs.ds = value as u16,
             FS => self.fs = value as u16,
             GS => self.gs = value as u16,
+            CR0 if self.profile == CpuProfile::I386 => self.write_cr0(value)?,
             _ => {
                 let (index, shift, mask) = Self::register_slice(register)?;
                 let low = self.gpr(index);
@@ -534,19 +606,37 @@ impl Cpu {
         Some(())
     }
 
-    fn push(&mut self, width: u8, value: u32) {
-        self.regs.sp = self.regs.sp.wrapping_sub(width.into());
-        self.write_mem(
-            Self::linear(self.regs.ss, self.regs.sp.into()),
-            width,
-            value,
-        );
+    fn check_stack_push(&self, width: u8, count: u16) -> Option<()> {
+        if self.control.segments[Register::SS.number()].is_none() {
+            return Some(());
+        }
+        for word in 1..=count {
+            let offset = self.regs.sp.wrapping_sub(word * u16::from(width));
+            self.segment_address(Register::SS, offset.into(), usize::from(width), true)?;
+        }
+        Some(())
     }
 
-    fn pop(&mut self, width: u8) -> u32 {
-        let value = self.read_mem(Self::linear(self.regs.ss, self.regs.sp.into()), width);
+    fn push(&mut self, width: u8, value: u32) -> Option<()> {
+        let offset = self.regs.sp.wrapping_sub(width.into());
+        let address =
+            self.segment_address(Register::SS, offset.into(), usize::from(width), true)?;
+        self.write_mem(address, width, value);
+        self.regs.sp = offset;
+        Some(())
+    }
+
+    fn peek_stack(&self, width: u8, relative: u16) -> Option<u32> {
+        let offset = self.regs.sp.wrapping_add(relative);
+        let address =
+            self.segment_address(Register::SS, offset.into(), usize::from(width), false)?;
+        Some(self.read_mem(address, width))
+    }
+
+    fn pop(&mut self, width: u8) -> Option<u32> {
+        let value = self.peek_stack(width, 0)?;
         self.regs.sp = self.regs.sp.wrapping_add(width.into());
-        value
+        Some(value)
     }
 
     fn flag(&self, mask: u16) -> bool {
