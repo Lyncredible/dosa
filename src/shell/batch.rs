@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::sync::Arc;
 
@@ -8,6 +8,8 @@ const MAX_BATCH_BYTES: u64 = 1024 * 1024;
 const MAX_BATCH_LINES: usize = 10_000;
 const MAX_COMMAND_BYTES: usize = 8192;
 const MAX_CALL_DEPTH: usize = 16;
+pub(super) const SHIFT_HELP: &str =
+    "SHIFT\r\n    Move each batch argument down one position, starting at %0.\r\n";
 
 pub struct BatchStep {
     /// The command line as it appears in the DOS console when echo is on.
@@ -63,7 +65,7 @@ impl Script {
 struct Frame {
     script: Arc<Script>,
     next_line: usize,
-    args: Vec<String>,
+    args: VecDeque<String>,
     tail: String,
 }
 
@@ -77,17 +79,14 @@ impl Frame {
         if args.len() > MAX_COMMAND_BYTES {
             return Err(command_length_error().into());
         }
-        let mut parameters = vec![command.to_owned()];
+        let mut parameters = VecDeque::from([command.to_owned()]);
         let mut rest = args;
-        for _ in 0..9 {
-            if rest.is_empty() {
-                break;
-            }
+        while !rest.is_empty() {
             let (_, next) = split_word(rest)?;
             // Keep quotation marks for parameter substitution. The shell
             // interprets these when splitting a later command or path.
             let parameter = rest[..rest.len() - next.len()].trim_end();
-            parameters.push(parameter.to_owned());
+            parameters.push_back(parameter.to_owned());
             rest = next;
         }
         Ok(Self {
@@ -293,6 +292,16 @@ impl Shell {
                 "CALL" => return self.call_batch(args),
                 "GOTO" => return self.goto_batch(args),
                 "GOTO:EOF" if args.is_empty() => return self.goto_batch(":EOF"),
+                "SHIFT" if args == "/?" => return self.execute(line),
+                "SHIFT" => {
+                    if !args.is_empty() {
+                        return Err("usage: SHIFT".into());
+                    }
+                    let batch = self.batch.as_mut().expect("executing a batch command");
+                    let frame = batch.frames.last_mut().expect("an executing line has a batch frame");
+                    frame.args.pop_front();
+                    return Ok(Command::Prompt);
+                }
                 "EXIT" if !args.is_empty() => return self.exit_batch(args),
                 "EXIT" => {
                     self.batch = None;
@@ -302,7 +311,7 @@ impl Shell {
                 "ECHO" => return Ok(self.echo_batch(args)),
                 "MOUNT" | "IMGMOUNT" => return Err("mount host paths using the interactive shell or --mount before starting a batch file".into()),
                 "BOOT" => return Err("boot host disk images from the interactive shell".into()),
-                "FOR" | "SETLOCAL" | "ENDLOCAL" | "SHIFT" | "PAUSE" | "CHOICE" => {
+                "FOR" | "SETLOCAL" | "ENDLOCAL" | "PAUSE" | "CHOICE" => {
                     return Err(format!("batch command {word} is unsupported").into());
                 }
                 _ => return self.execute(line),

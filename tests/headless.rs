@@ -384,6 +384,31 @@ fn batch_if_compares_strings_and_tests_dos_files() {
 }
 
 #[test]
+fn batch_shift_exposes_later_arguments_and_keeps_call_frames_separate() {
+    let fixture = Fixture::new();
+    let mut source = String::from(
+        "@echo off\r\necho [%0][%1][%9]\r\nshift\r\necho [%0][%1][%9]\r\ncall :INNER sub arg\r\necho [%0][%1][%9]\r\necho [%*]\r\n",
+    );
+    source.push_str(&"shift\r\n".repeat(12));
+    source.push_str(
+        "echo [%0][%1][%9]\r\nexit /b\r\n:INNER\r\nshift\r\necho [%0][%1]\r\nexit /b\r\n",
+    );
+    fs::write(fixture.0.join("SHIFTING.BAT"), source).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args([
+            "--mount",
+            &format!("C={}", fixture.0.display()),
+            "--headless",
+            "--exec",
+            "SHIFTING 1 \"two words\" 3 4 5 6 7 8 9 10 11",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"[SHIFTING][1][9]\r\n[1][\"two words\"][10]\r\n[sub][arg]\r\n[1][\"two words\"][10]\r\n[1 \"two words\" 3 4 5 6 7 8 9 10 11]\r\n[][][]\r\n");
+}
+
+#[test]
 fn dir_formats_wide_bare_and_lowercase_listings() {
     let fixture = Fixture::new();
     fs::create_dir(fixture.0.join("AAA")).unwrap();
