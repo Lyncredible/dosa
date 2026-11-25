@@ -6,6 +6,8 @@ pub use iso_image::ISO_SECTOR_BYTES;
 mod names;
 mod timestamp;
 pub use timestamp::DosTimestamp;
+mod volume;
+pub use volume::VolumeIdentity;
 mod writable;
 mod zip_mount;
 
@@ -246,6 +248,24 @@ impl Mount {
             return Err(MountError::UnsupportedSource);
         };
         Ok(Self { source })
+    }
+
+    /// Read a volume label and serial where the backing format records them.
+    pub fn volume_identity(&self) -> Result<VolumeIdentity> {
+        match &self.source {
+            Source::FatImage(image) => image.identity(),
+            Source::IsoImage(image) => Ok(VolumeIdentity::new(image.volume_label(), None)),
+            _ => Ok(VolumeIdentity::default()),
+        }
+    }
+
+    /// Bytes available on a writable host mount or in the FAT allocation table.
+    pub fn free_bytes(&self) -> Result<Option<u64>> {
+        match &self.source {
+            Source::FatImage(image) => image.free_bytes().map(Some),
+            Source::WritableDirectory(directory) => Ok(volume::available_space(&directory.root)),
+            _ => Ok(Some(0)),
+        }
     }
 
     /// Apply the drive's effective write protection to an entry's DOS flags.

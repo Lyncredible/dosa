@@ -18,7 +18,10 @@ fn reads_a_generated_fat12_volume_through_dos() {
     file.set_len(1_474_560).unwrap();
     fatfs::format_volume(
         &mut file,
-        fatfs::FormatVolumeOptions::new().fat_type(fatfs::FatType::Fat12),
+        fatfs::FormatVolumeOptions::new()
+            .fat_type(fatfs::FatType::Fat12)
+            .volume_id(0x1234_abcd)
+            .volume_label(*b"TEST FLOPPY"),
     )
     .unwrap();
     {
@@ -48,14 +51,51 @@ fn reads_a_generated_fat12_volume_through_dos() {
 
     let mut drive = std::ffi::OsString::from("A=");
     drive.push(&image);
-    let result = Command::new(env!("CARGO_BIN_EXE_dosa"))
-        .args(["--headless", "--mount-fat"])
-        .arg(drive)
-        .args(["--exec", &format!("TYPE A:\\NOTES\\{}", listing[0].name)])
-        .output()
+    let run = |command: &str| {
+        let result = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args(["--headless", "--mount-fat"])
+            .arg(&drive)
+            .args(["--exec", command])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{command}: {result:?}");
+        String::from_utf8(result.stdout).unwrap()
+    };
+    assert_eq!(
+        run(&format!("TYPE A:\\NOTES\\{}", listing[0].name)),
+        "FAT12 works\r\n"
+    );
+    let volume = " Volume in drive A is TEST FLOPPY\r\n Volume Serial Number is 1234-ABCD\r\n";
+    assert_eq!(run("VOL"), volume);
+    assert_eq!(run("VOL a:"), volume);
+    let directory = run("DIR A:\\ /S");
+    assert!(directory.starts_with(volume), "{directory}");
+    assert!(directory.contains("Total files listed:\r\n"), "{directory}");
+    assert!(
+        directory
+            .lines()
+            .any(|line| line.split_whitespace().eq(["1", "file(s)", "13", "bytes"]))
+    );
+    let word = |at| usize::from(u16::from_le_bytes([before[at], before[at + 1]]));
+    let bytes_per_sector = word(11);
+    let sectors_per_cluster = usize::from(before[13]);
+    let root_sectors = (word(17) * 32).div_ceil(bytes_per_sector);
+    let data_sectors = word(19) - word(14) - usize::from(before[16]) * word(22) - root_sectors;
+    // The subdirectory and its file each occupy one cluster on this fixture.
+    let free_bytes =
+        (data_sectors / sectors_per_cluster - 2) * sectors_per_cluster * bytes_per_sector;
+    let reported = directory
+        .lines()
+        .last()
+        .unwrap()
+        .trim()
+        .strip_suffix(" bytes free")
         .unwrap();
-    assert!(result.status.success(), "{:?}", result);
-    assert_eq!(result.stdout, b"FAT12 works\r\n");
+    assert_eq!(
+        reported.replace(',', "").parse::<usize>().unwrap(),
+        free_bytes,
+        "{directory}"
+    );
     assert_eq!(std::fs::read(image).unwrap(), before);
 }
 

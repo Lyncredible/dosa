@@ -24,9 +24,14 @@ pub(super) struct IsoImage {
     file: Mutex<File>,
     root: Extent,
     volume_size: u64,
+    volume_label: String,
 }
 
 impl IsoImage {
+    pub fn volume_label(&self) -> &str {
+        &self.volume_label
+    }
+
     pub fn sector_count(&self) -> u32 {
         (self.volume_size / SECTOR as u64) as u32
     }
@@ -72,10 +77,11 @@ impl IsoImage {
                     if !directory {
                         return Err(invalid("invalid ISO 9660 root directory"));
                     }
-                    primary = Some((root, size));
+                    let label = String::from_utf8_lossy(&descriptor[40..72]).into_owned();
+                    primary = Some((root, size, label));
                 }
                 255 => {
-                    let (root, volume_size) =
+                    let (root, volume_size, volume_label) =
                         primary.ok_or_else(|| invalid("ISO 9660 primary volume is missing"))?;
                     if file.stream_position()? > volume_size {
                         return Err(invalid("ISO 9660 descriptor lies outside the volume"));
@@ -84,6 +90,7 @@ impl IsoImage {
                         file: Mutex::new(file),
                         root,
                         volume_size,
+                        volume_label,
                     };
                     image.list(&[], "")?;
                     return Ok(image);

@@ -15,6 +15,7 @@ mod pending_input;
 mod prompt;
 mod rename;
 mod search_path;
+mod volume;
 
 use batch::Batch;
 pub use batch::{BatchStep, PAUSE_MESSAGE};
@@ -233,6 +234,7 @@ impl Shell {
             "HELP" if args.eq_ignore_ascii_case("RD") || args.eq_ignore_ascii_case("RMDIR") => {
                 RMDIR_HELP.as_bytes().to_vec()
             }
+            "HELP" if args.eq_ignore_ascii_case("VOL") => volume::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("DIR") => directory::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("COPY") => copy::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("DEL") || args.eq_ignore_ascii_case("ERASE") => {
@@ -254,12 +256,14 @@ impl Shell {
                 PROMPT [text]               Customize the DOS prompt\r\n\
                 MOUNT drive path           Mount host files or images (see HELP MOUNT)\r\n\
                 BOOT A|C path              Boot a floppy or hard disk image\r\n\
+                VOL [drive:]               Display a drive volume label\r\n\
                 C:                         Switch drives\r\n\
                 CLS                        Clear the screen\r\n\
                 EXIT                       Close Dosa\r\n\
                 Enter a COM, EXE, or BAT name and arguments to run it.\r\n"
                 .to_vec(),
             "DIR" => return self.directory(args),
+            "VOL" => return self.volume(args),
             "CD" | "CHDIR" => {
                 if args.is_empty() {
                     format!("{}\r\n", self.current_path()).into_bytes()
