@@ -1,5 +1,8 @@
 use crate::{CONVENTIONAL_END, DosError, Machine, PSP, Pending, PendingCall, RunState, ZERO};
-use crate::{CodePage, DOS_VERSION, files::DosDevice};
+use crate::{
+    CodePage, DOS_VERSION,
+    files::{DosDevice, OutputTarget},
+};
 use dosa_mount::{Allocation, Entry};
 
 impl Machine {
@@ -96,7 +99,7 @@ impl Machine {
                 let value = self.console_key(ascii, scan);
                 self.set_al(value);
                 if echo && value != 0 {
-                    self.emit(&[value]);
+                    self.write_stdout(&[value]);
                 }
             }
             Pending::HandleRead => {
@@ -156,17 +159,17 @@ impl Machine {
                         b'\r',
                     );
                     self.line.clear();
-                    self.emit(b"\r\n");
+                    self.write_stdout(b"\r\n");
                     return;
                 }
                 8 => {
                     if self.line.pop().is_some() {
-                        self.emit(b"\x08 \x08");
+                        self.write_stdout(b"\x08 \x08");
                     }
                 }
                 32..=255 if self.line.len() < limit => {
                     self.line.push(ascii);
-                    self.emit(&[ascii]);
+                    self.write_stdout(&[ascii]);
                 }
                 _ => {}
             }
@@ -199,7 +202,7 @@ impl Machine {
                 check_break: true,
             }),
             0x02 => {
-                self.emit(&[dl]);
+                self.write_stdout(&[dl]);
                 self.set_al(dl);
             }
             0x06 if dl == 0xff => match self.keys.pop_front() {
@@ -214,7 +217,7 @@ impl Machine {
                 }
             },
             0x06 => {
-                self.emit(&[dl]);
+                self.write_stdout(&[dl]);
                 self.set_al(dl);
             }
             0x07 | 0x08 => self.resume(Pending::Console {
@@ -223,7 +226,7 @@ impl Machine {
             }),
             0x09 => {
                 let bytes = self.read_until(ds, dx, b'$', 1 << 16);
-                self.emit(&bytes);
+                self.write_stdout(&bytes);
                 self.set_al(b'$');
             }
             0x0a => {
@@ -531,36 +534,44 @@ impl Machine {
     }
 
     fn write_handle(&mut self, handle: u16, count: u16, segment: u16, offset: u16) {
-        let channel = self.files.device(handle);
-        let result = match channel {
-            Some(channel) if !channel.writable => Err(5),
-            Some(channel) if channel.device == DosDevice::Null => Ok(()),
-            _ => {
-                if channel.is_none()
-                    && let Err(code) = self.files.check_write_handle(handle)
-                {
-                    self.failure(code);
-                    return;
-                }
+        let result = match self.files.output_target(handle) {
+            Ok(OutputTarget::Null) => Ok(()),
+            Ok(target) => {
                 let bytes: Vec<_> = (0..count)
                     .map(|i| self.cpu.read_u8(segment, offset.wrapping_add(i)))
                     .collect();
-                if channel.is_some() {
-                    self.emit(&bytes);
-                    Ok(())
-                } else {
-                    let write = dosa_mount::FileWriteOptions {
-                        modified: self.adjusted_file_time(),
-                        verify: self.verify_writes(),
-                    };
-                    self.files.write(handle, &bytes, write)
-                }
+                self.write_output(target, &bytes)
             }
+            Err(code) => Err(code),
         };
         if result.is_ok() {
             self.cpu.regs.ax = count;
         }
         self.result(result);
+    }
+
+    fn write_stdout(&mut self, bytes: &[u8]) {
+        if !bytes.is_empty()
+            && let Ok(target) = self.files.output_target(1)
+        {
+            // Legacy character calls have no file-write error result.
+            let _ = self.write_output(target, bytes);
+        }
+    }
+
+    fn write_output(&mut self, target: OutputTarget, bytes: &[u8]) -> Result<(), u16> {
+        match target {
+            OutputTarget::Console => self.emit(bytes),
+            OutputTarget::Null => {}
+            OutputTarget::File(handle) => {
+                let write = dosa_mount::FileWriteOptions {
+                    modified: self.adjusted_file_time(),
+                    verify: self.verify_writes(),
+                };
+                return self.files.write(handle, bytes, write);
+            }
+        }
+        Ok(())
     }
 
     fn result(&mut self, result: Result<(), u16>) {
