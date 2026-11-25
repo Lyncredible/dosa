@@ -11,6 +11,6 @@ Use the Microsoft MS-DOS 6.22 User’s Guide and the Microsoft Help command refe
 | System and session | `CLS`, `EXIT`, and drive changes work. Add `BREAK`, `CHCP`, `CTTY`, `DATE`, `LH`/`LOADHIGH`, `TIME`, `VER`, `VERIFY`, and `VOL`. Track any dependencies on emulated devices, code pages, and memory managers. |
 | Command I/O | Implement and verify DOS pipes, input/output redirection, and device names with commands and batch files. |
 
-After the first directory compatibility work, simplify Dosa’s mount commands and help. Make `MOUNT` the documented command for files, folders, ZIPs, and disk images. Preserve `IMGMOUNT` as a compatibility alias. Put startup flags and writable-directory examples in the README and command-line help.
+Dosa documents `MOUNT` for files, directories, ZIPs, and disk images. `HELP MOUNT` lists the shell options. The legacy `IMGMOUNT` invocation still opens ISO images, and startup flags are documented in the README and command-line help.
 
 Exercise the shell prompt, startup command, and batch paths with generated fixtures. Validate behavior on read-only and writable mounts before marking a command complete.

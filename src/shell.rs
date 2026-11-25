@@ -11,6 +11,13 @@ mod directory;
 use batch::Batch;
 pub use batch::BatchStep;
 
+const MOUNT_HELP: &str = "MOUNT drive [/ISO | /FAT | /RW | /SESSION] host-path\r\n\
+    Files, directories, and ZIPs open read-only by default.\r\n\
+    /ISO      Mount an ISO 9660 data image.\r\n\
+    /FAT      Mount a FAT volume or partitioned disk image.\r\n\
+    /RW       Mount a writable host directory.\r\n\
+    /SESSION  Mount a temporary writable copy of a ZIP.\r\n";
+
 pub enum Command {
     Print(Vec<u8>),
     Launched,
@@ -168,12 +175,12 @@ impl Shell {
             "EXIT" => return Ok(Command::Exit),
             "ECHO" => format!("{args}\r\n").into_bytes(),
             "REM" => return Ok(Command::Prompt),
+            "HELP" if args.eq_ignore_ascii_case("MOUNT") => MOUNT_HELP.as_bytes().to_vec(),
             "HELP" => b"DIR [path] [/W] [/B] [/L]   List files\r\n\
                 CD [path]    Show or change directory\r\n\
                 TYPE file    Print a file\r\n\
-                MOUNT C path Mount a host file, folder or ZIP\r\n\
-                IMGMOUNT D path Mount an ISO 9660 data image\r\n\
-                Start dosa with --mount-rw C=path for a writable directory.\r\n\
+                MOUNT drive path   Mount a file, directory, ZIP or disk image\r\n\
+                HELP MOUNT   Show mount options\r\n\
                 C:           Switch drives\r\n\
                 CLS          Clear the screen\r\n\
                 EXIT         Close dosa\r\n\
@@ -198,31 +205,8 @@ impl Shell {
                 let (drive, path) = self.resolve(unquote(args))?;
                 self.drive_mount(drive)?.read(&path)?
             }
-            command @ ("MOUNT" | "IMGMOUNT") => {
-                let usage = if command == "IMGMOUNT" {
-                    "usage: IMGMOUNT D host-iso"
-                } else {
-                    "usage: MOUNT C host-path"
-                };
-                let (letter, host) = split_word(args)?;
-                let drive = letter
-                    .trim_end_matches(':')
-                    .parse::<char>()
-                    .ok()
-                    .filter(char::is_ascii_alphabetic)
-                    .ok_or(usage)?
-                    .to_ascii_uppercase();
-                if host.is_empty() {
-                    return Err(usage.into());
-                }
-                let mount = if command == "IMGMOUNT" {
-                    Mount::open_iso_image(unquote(host))?
-                } else {
-                    Mount::open(unquote(host))?
-                };
-                self.mount(drive, mount)?;
-                format!("Drive {drive}: mounted\r\n").into_bytes()
-            }
+            "MOUNT" => self.mount_command(args, false)?,
+            "IMGMOUNT" => self.mount_command(args, true)?,
             _ => {
                 if args.is_empty() && word.len() == 2 && word.ends_with(':') {
                     let (drive, _) = self.resolve(word)?;
@@ -241,6 +225,47 @@ impl Shell {
             }
         };
         Ok(Command::Print(output))
+    }
+
+    fn mount_command(&mut self, args: &str, legacy_iso: bool) -> Result<Vec<u8>, Box<dyn Error>> {
+        const USAGE: &str = "usage: MOUNT drive [/ISO | /FAT | /RW | /SESSION] host-path";
+        if args == "/?" {
+            return Ok(MOUNT_HELP.as_bytes().to_vec());
+        }
+        let (letter, host) = split_word(args)?;
+        let drive = letter
+            .trim_end_matches(':')
+            .parse::<char>()
+            .ok()
+            .filter(char::is_ascii_alphabetic)
+            .ok_or(USAGE)?
+            .to_ascii_uppercase();
+        let (format, host) = if legacy_iso {
+            ("/ISO".to_owned(), host)
+        } else {
+            let (first, rest) = split_word(host)?;
+            let option = first.to_ascii_uppercase();
+            if !host.starts_with('"')
+                && matches!(option.as_str(), "/ISO" | "/FAT" | "/RW" | "/SESSION")
+            {
+                (option, rest)
+            } else {
+                (String::new(), host)
+            }
+        };
+        let path = unquote(host);
+        if path.is_empty() {
+            return Err(USAGE.into());
+        }
+        let mount = match format.as_str() {
+            "/ISO" => Mount::open_iso_image(path),
+            "/FAT" => Mount::open_fat_image(path),
+            "/RW" => Mount::open_writable_directory(path),
+            "/SESSION" => Mount::open_session_zip(path),
+            _ => Mount::open(path),
+        }?;
+        self.mount(drive, mount)?;
+        Ok(format!("Drive {drive}: mounted\r\n").into_bytes())
     }
 
     fn find_program(&self, drive: char, path: String) -> Result<String, Box<dyn Error>> {
