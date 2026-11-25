@@ -274,6 +274,31 @@ impl Mount {
         Ok(file)
     }
 
+    /// Copy completed data into a new guest file without replacing an existing entry.
+    pub fn write_new_file(&self, path: &str, bytes: &[u8]) -> Result<()> {
+        if bytes.len() as u64 > MAX_FILE_BYTES {
+            return Err(MountError::FileTooLarge);
+        }
+        let writable = self.writable()?;
+        let _guard = lock(&writable.transaction)?;
+        let target = resolve_target(&writable.root, path)?;
+        let name = target.new_name(path)?;
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        let mut file = target.parent.open_with(&name, &options)?;
+        let result = file.write_all(bytes).and_then(|()| file.sync_all());
+        if let Err(error) = result {
+            // Release the handle before removing the incomplete file on Windows.
+            drop(file);
+            let _ = target.parent.remove_file(&name);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     pub fn remove_file(&self, path: &str) -> Result<()> {
         self.remove_file_with_name(path, None)
     }

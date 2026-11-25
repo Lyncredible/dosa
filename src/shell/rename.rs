@@ -74,7 +74,7 @@ impl Shell {
     }
 }
 
-fn destination_name(source: &str, pattern: &str) -> String {
+pub(super) fn destination_name(source: &str, pattern: &str) -> String {
     if let Some((stem_pattern, extension_pattern)) = pattern.split_once('.') {
         let (stem, extension) = source.split_once('.').unwrap_or((source, ""));
         let mut result = substitute(stem, stem_pattern);

@@ -150,6 +150,92 @@ fn rename_handles_dos_wildcards_without_overwriting_files() {
 }
 
 #[test]
+fn copy_from_zip_combines_sources_and_follows_overwrite_rules() {
+    use std::process::Stdio;
+    use zip::write::SimpleFileOptions;
+
+    let fixture = Fixture::new();
+    let host = fixture.0.join("destination");
+    fs::create_dir(&host).unwrap();
+    let zip = fixture.0.join("input.zip");
+    let mut archive = zip::ZipWriter::new(fs::File::create(&zip).unwrap());
+    for (name, data) in [
+        ("ALPHA.TXT", &b"A\x1aX"[..]),
+        ("BETA.TXT", &b"B\x1aY"[..]),
+        ("ALPHA.REF", &b"1"[..]),
+        ("BETA.REF", &b"2"[..]),
+    ] {
+        archive
+            .start_file(name, SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(data).unwrap();
+    }
+    archive.finish().unwrap();
+    let c = format!("C={}", host.display());
+    let d = format!("D={}", zip.display());
+    let run = |command: &str, answers: &[u8]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([
+                "--mount-rw",
+                &c,
+                "--mount",
+                &d,
+                "--headless",
+                "--exec",
+                command,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(answers).unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    for (command, name, expected) in [
+        ("COPY D:ALPHA.TXT", "ALPHA.TXT", &b"A\x1aX"[..]),
+        ("COPY /A D:BETA.TXT OUT.TXT /A /V", "OUT.TXT", &b"B\x1a"[..]),
+        ("COPY D:*.TXT MERGE.TXT", "MERGE.TXT", &b"AB"[..]),
+        (
+            "COPY /B D:ALPHA.TXT+D:BETA.TXT MERGE.BIN",
+            "MERGE.BIN",
+            &b"A\x1aXB\x1aY"[..],
+        ),
+        ("COPY D:*.TXT+D:*.REF *.DOC", "ALPHA.DOC", &b"A1"[..]),
+    ] {
+        let result = run(command, b"");
+        assert!(result.status.success(), "{command}: {result:?}");
+        assert_eq!(fs::read(host.join(name)).unwrap(), expected, "{command}");
+    }
+    assert_eq!(fs::read(host.join("BETA.DOC")).unwrap(), b"B2");
+
+    let result = run("COPY D:BETA.TXT ALPHA.TXT", b"n");
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        result.stdout,
+        b"Overwrite C:\\ALPHA.TXT (Y/N)? N\r\n0 file(s) copied.\r\n"
+    );
+    assert_eq!(fs::read(host.join("ALPHA.TXT")).unwrap(), b"A\x1aX");
+    let result = run("COPY D:BETA.TXT ALPHA.TXT", b"y");
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(fs::read(host.join("ALPHA.TXT")).unwrap(), b"B\x1aY");
+
+    for rejected in ["COPY ALPHA.TXT ALPHA.TXT /Y", "COPY ALPHA.TXT D:"] {
+        let result = run(rejected, b"");
+        assert!(!result.status.success(), "{rejected}: {result:?}");
+    }
+    fs::write(host.join("COPYING.BAT"), b"@echo off\r\ncopy D:ALPHA.TXT ALPHA.TXT\r\nset COPYCMD=/-Y\r\ncopy D:BETA.TXT ALPHA.TXT\r\ncopy /Y D:BETA.TXT OUT.TXT\r\necho done\r\n").unwrap();
+    let result = run("COPYING", b"n");
+    assert!(result.status.success(), "{result:?}");
+    let output = String::from_utf8(result.stdout).unwrap();
+    assert_eq!(output.matches("Overwrite").count(), 1);
+    assert!(output.ends_with("done\r\n"), "{output}");
+    assert_eq!(fs::read(host.join("ALPHA.TXT")).unwrap(), b"A\x1aX");
+    assert_eq!(fs::read(host.join("OUT.TXT")).unwrap(), b"B\x1aY");
+}
+
+#[test]
 fn delete_dos_files_with_and_without_confirmation() {
     use std::process::Stdio;
 

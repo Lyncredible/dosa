@@ -263,6 +263,12 @@ impl Shell {
         Ok(Command::Prompt)
     }
 
+    pub(super) fn command_from_batch_file(&self) -> bool {
+        self.batch
+            .as_ref()
+            .is_some_and(|batch| !batch.prompt_loop || batch.frames.len() > 1)
+    }
+
     pub fn batch_active(&self) -> bool {
         self.batch.is_some()
     }
@@ -277,7 +283,7 @@ impl Shell {
 
     /// Stop an active batch and attach its current source line to an error.
     pub fn guest_failed(&mut self, error: Box<dyn Error>) -> Box<dyn Error> {
-        self.deletion = None;
+        self.confirmation = None;
         self.errorlevel = 1;
         match self.batch.take() {
             Some(batch) => batch.contextualize(error),
