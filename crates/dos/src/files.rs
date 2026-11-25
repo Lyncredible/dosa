@@ -23,13 +23,14 @@ struct File {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DosDevice {
+pub enum DosDevice {
     Console,
     Null,
 }
 
 impl DosDevice {
-    pub(crate) fn named(path: &str) -> Option<Self> {
+    /// Recognize a DOS device by its final path component.
+    pub fn named(path: &str) -> Option<Self> {
         let name = path.rsplit(['\\', '/', ':']).next()?;
         let stem = name.split('.').next()?;
         if stem.eq_ignore_ascii_case("CON") {

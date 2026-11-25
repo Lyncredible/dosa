@@ -9,7 +9,7 @@ mod code_page;
 mod dma;
 mod environment;
 mod files;
-pub use files::matches_dos_pattern;
+pub use files::{DosDevice, matches_dos_pattern};
 mod keyboard;
 mod loader;
 mod mouse;
