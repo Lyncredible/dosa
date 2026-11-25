@@ -364,17 +364,11 @@ impl Shell {
             let target = script.label(label)?;
             batch.push(Frame::new(script, target, word, tail)?)?;
         } else {
-            let (drive, mut path) = self.resolve(word)?;
-            if path
-                .rsplit('\\')
-                .next()
-                .is_some_and(|name| !name.contains('.'))
-            {
-                path.push_str(".BAT");
-            }
-            if !is_batch(&path) {
+            let name = word.rsplit(['\\', '/', ':']).next().unwrap_or("");
+            if name.contains('.') && !is_batch(name) {
                 return Err("CALL requires a .BAT file or a batch label".into());
             }
+            let (drive, path) = self.find_program(word, &["BAT"])?;
             self.launch_batch(drive, &path, word, tail, true)?;
         }
         Ok(Command::Prompt)

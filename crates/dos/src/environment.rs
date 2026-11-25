@@ -14,7 +14,6 @@ impl Default for Environment {
             .split_once('=')
             .expect("the default BLASTER variable has a value");
         Self(BTreeMap::from([
-            ("PATH".into(), "\\".into()),
             ("COMSPEC".into(), "COMMAND.COM".into()),
             (name.into(), value.into()),
         ]))

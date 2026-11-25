@@ -309,25 +309,46 @@ impl Machine {
     }
 
     pub fn launch(&mut self, drive: char, path: &str, args: &str) -> Result<(), DosError> {
+        let drive = normalize_drive(drive)?;
+        let cwd = executable_parent(path).replace('/', "\\");
+        self.launch_with_files(drive, path, args, DosFiles::new(drive, cwd))
+    }
+
+    /// Start a program while inheriting the shell's default drive and per-drive directories.
+    pub fn launch_from_shell(
+        &mut self,
+        drive: char,
+        path: &str,
+        args: &str,
+        current_drive: char,
+        directories: &BTreeMap<char, String>,
+    ) -> Result<(), DosError> {
+        let files =
+            DosFiles::with_directories(normalize_drive(current_drive)?, directories.clone());
+        self.launch_with_files(normalize_drive(drive)?, path, args, files)
+    }
+
+    fn launch_with_files(
+        &mut self,
+        drive: char,
+        path: &str,
+        args: &str,
+        files: DosFiles,
+    ) -> Result<(), DosError> {
         if self.state.is_active() {
             return Err(DosError::Busy);
         }
-        let drive = normalize_drive(drive)?;
         let mount = self.drive(drive).ok_or(DosError::UnmountedDrive(drive))?;
         let entry = mount.metadata(path).map_err(DosError::Mount)?;
         let bytes = mount.read(path).map_err(DosError::Mount)?;
-        let path = path.replace('/', "\\");
-        let cwd = path
-            .rsplit_once('\\')
-            .map_or("", |(parent, _)| parent)
-            .trim_matches('\\');
-        let name = if cwd.is_empty() {
+        let parent = executable_parent(path).replace('/', "\\");
+        let name = if parent.is_empty() {
             format!("{drive}:\\{}", entry.name)
         } else {
-            format!("{drive}:\\{cwd}\\{}", entry.name)
+            format!("{drive}:\\{parent}\\{}", entry.name)
         };
         let cpu = loader::load(&bytes, &name, args, self.cpu_profile, &self.environment)?;
-        self.start(cpu, drive, cwd);
+        self.start(cpu, files);
         Ok(())
     }
 
@@ -343,13 +364,13 @@ impl Machine {
         cpu.regs.dx = u16::from(drive.number());
         cpu.regs.flags |= 0x0200;
         cpu.load(0, 0x7c00, &sector);
-        self.start(cpu, 'C', "");
+        self.start(cpu, DosFiles::new('C', String::new()));
         disk.install_data(&mut self.cpu);
         self.boot_disk = Some(disk);
         Ok(())
     }
 
-    fn start(&mut self, mut cpu: Cpu, drive: char, cwd: &str) {
+    fn start(&mut self, mut cpu: Cpu, files: DosFiles) {
         let mut video = Adapter::new();
         video::initialize(&mut cpu, &mut video);
         let elapsed = self.clock.elapsed();
@@ -360,7 +381,7 @@ impl Machine {
         self.cpu = cpu;
         self.video = video;
         self.boot_disk = None;
-        self.files = DosFiles::new(drive, cwd.to_owned());
+        self.files = files;
         self.pending.clear();
         self.keys.clear();
         self.keyboard = Keyboard::default();
@@ -710,6 +731,11 @@ impl Machine {
         self.cpu.regs.flags |= CARRY;
         self.cpu.regs.ax = code;
     }
+}
+
+fn executable_parent(path: &str) -> &str {
+    path.rsplit_once(['\\', '/'])
+        .map_or("", |(parent, _)| parent.trim_matches(['\\', '/']))
 }
 
 fn normalize_drive(drive: char) -> Result<char, DosError> {

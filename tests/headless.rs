@@ -200,8 +200,80 @@ fn batch_environment_expands_and_reaches_a_guest_through_the_psp() {
     assert!(
         output
             .stdout
-            .ends_with(b"[]\r\nBLASTER=A220 I7 D1 T3\r\nCOMSPEC=COMMAND.COM\r\nPATH=\\\r\n")
+            .ends_with(b"[]\r\nBLASTER=A220 I7 D1 T3\r\nCOMSPEC=COMMAND.COM\r\n")
     );
+}
+
+#[test]
+fn path_search_preserves_the_shell_drive_and_directories() {
+    let fixture = Fixture::new();
+    for folder in ["C/WORK", "C/TOOLS", "D/BIN", "D/SVC"] {
+        fs::create_dir_all(fixture.0.join(folder)).unwrap();
+    }
+    let mut check = Vec::new();
+    let mut failures = Vec::new();
+    let mut must_match = |bytes: &[u8]| {
+        check.extend_from_slice(bytes);
+        check.extend([0x75, 0]); // JNE failure
+        failures.push(check.len() - 1);
+    };
+    must_match(&[0xb4, 0x19, 0xcd, 0x21, 0x3c, 2]); // Default drive C:
+    for (drive, prefix) in [(0, *b"WO"), (4, *b"SV")] {
+        must_match(&[
+            0xbe, 0, 2, 0xb2, drive, 0xb4, 0x47, 0xcd, 0x21, // Query directory
+            0x81, 0x3e, 0, 2, prefix[0], prefix[1], // Compare prefix at DS:0200h
+        ]);
+    }
+    check.extend([0xb8, 42, 0x4c, 0xcd, 0x21]);
+    let failure = check.len();
+    check.extend([0xb8, 1, 0x4c, 0xcd, 0x21]);
+    for offset in failures {
+        check[offset] = u8::try_from(failure - offset - 1).unwrap();
+    }
+    fs::write(fixture.0.join("D/BIN/CHECK.COM"), check).unwrap();
+    // A matching BAT in a later path entry distinguishes which directory won.
+    fs::write(fixture.0.join("C/TOOLS/CHECK.BAT"), b"echo wrong\r\n").unwrap();
+    fs::write(fixture.0.join("D/BIN/REPORT.BAT"), b"echo path report\r\n").unwrap();
+    fs::write(
+        fixture.0.join("C/WORK/LOCAL.BAT"),
+        b"echo current directory\r\n",
+    )
+    .unwrap();
+    fs::write(fixture.0.join("D/BIN/LOCAL.BAT"), b"echo path instead\r\n").unwrap();
+    fs::write(
+        fixture.0.join("C/START.BAT"),
+        b"@echo off\r\npath\r\ncd C:\\WORK\r\ncd D:\\SVC\r\npath E:\\MISSING;D:\\BIN;C:\\TOOLS\r\ncall LOCAL\r\ncheck.com\r\necho check %ERRORLEVEL%\r\ncall report\r\npath;\r\npath\r\nset path=D:\\BIN\r\npath\r\ncall report\r\n",
+    )
+    .unwrap();
+    let run = |command: &str| {
+        Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([
+                "--mount",
+                &format!("C={}", fixture.0.join("C").display()),
+                "--mount",
+                &format!("D={}", fixture.0.join("D").display()),
+                "--headless",
+                "--exec",
+                command,
+            ])
+            .output()
+            .unwrap()
+    };
+    let output = run("START");
+    assert_eq!(output.status.code(), Some(42), "{output:?}");
+    assert_eq!(
+        output.stdout,
+        b"No Path\r\ncurrent directory\r\ncheck 42\r\npath report\r\nNo Path\r\nPATH=D:\\BIN\r\npath report\r\n"
+    );
+
+    fs::write(
+        fixture.0.join("C/EXPLICIT.BAT"),
+        b"@echo off\r\nset path=D:\\BIN\r\nC:\\CHECK.COM\r\n",
+    )
+    .unwrap();
+    let output = run("EXPLICIT");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("program not found: C:\\CHECK.COM"));
 }
 
 #[test]
