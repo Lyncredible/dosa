@@ -85,13 +85,10 @@ impl BootDisk {
         ))
     }
 
-    pub fn equipment(&self) -> u16 {
-        0x0020 | u16::from(self.drive == BootDrive::Floppy)
-    }
-
     pub fn install_data(&self, cpu: &mut Cpu) {
-        cpu.write_u16(0x40, 0x10, self.equipment());
-        cpu.write_u16(0x40, 0x13, 640);
+        if self.drive == BootDrive::Floppy {
+            crate::bios::install_floppy(cpu);
+        }
         cpu.write_u8(0x40, 0x75, u8::from(self.drive == BootDrive::HardDisk));
     }
 

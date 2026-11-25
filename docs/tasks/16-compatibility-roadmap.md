@@ -4,6 +4,7 @@ Prioritize the next compatibility increment using public reproductions that iden
 
 | Candidate | Bounded first increment |
 | --- | --- |
+| BIOS display detection | The BIOS equipment interrupt and memory field report the same display type. A generated DOS program verifies both paths to hardware detection. |
 | PC speaker | Emulate PIT channel 2 and port 61h gating, verify headless samples with a synthetic guest tone, then feed a bounded audio buffer in the native frontend. |
 | Saved games and guest files | Design an explicit writable mount or copy-on-write overlay, specify DOS create, write, rename, and delete behavior, and test write confinement and persistence. |
 | Disk media | Add one read-only disk image format backed by synthetic fixtures. Treat ISO/MSCDEX and booting as separate increments. |

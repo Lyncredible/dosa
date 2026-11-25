@@ -20,12 +20,7 @@ impl Machine {
                     self.output.push(al);
                 }
             }
-            0x11 => {
-                self.cpu.regs.ax = self
-                    .boot_disk
-                    .as_ref()
-                    .map_or(0x0020, |disk| disk.equipment())
-            }
+            0x11 => self.cpu.regs.ax = crate::bios::equipment(&self.cpu),
             0x12 => self.cpu.regs.ax = 640,
             0x13 if let Some(disk) = &mut self.boot_disk => disk.interrupt(&mut self.cpu),
             0x16 => match ah {

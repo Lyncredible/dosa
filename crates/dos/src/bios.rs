@@ -13,6 +13,8 @@ const TIMER_RETURN: u16 = TIMER_ENTRY + 3;
 const KEYBOARD_ENTRY: u16 = 0x0900;
 const USER_TIMER_ENTRY: u16 = 0x1c00;
 const BDA: u16 = 0x0040;
+const EQUIPMENT: u16 = 0x0010;
+const COLOR_80_COLUMN_DISPLAY: u16 = 0x0020;
 const TICKS: u16 = 0x006c;
 const MIDNIGHT: u16 = 0x0070;
 const TICKS_PER_DAY: u32 = 0x1800b0;
@@ -25,6 +27,7 @@ pub(super) enum Hook {
 }
 
 pub(super) fn install(cpu: &mut Cpu, now: u64) {
+    cpu.write_u16(BDA, EQUIPMENT, COLOR_80_COLUMN_DISPLAY);
     for (vector, entry) in [
         (TIMER_VECTOR, TIMER_ENTRY),
         (KEYBOARD_VECTOR, KEYBOARD_ENTRY),
@@ -40,6 +43,14 @@ pub(super) fn install(cpu: &mut Cpu, now: u64) {
     cpu.write_u8(ROM, KEYBOARD_ENTRY, 0xcf);
     cpu.write_u8(ROM, USER_TIMER_ENTRY, 0xcf);
     write_ticks(cpu, (now / BIOS_DIVISOR % u64::from(TICKS_PER_DAY)) as u32);
+}
+
+pub(super) fn equipment(cpu: &Cpu) -> u16 {
+    cpu.read_u16(BDA, EQUIPMENT)
+}
+
+pub(super) fn install_floppy(cpu: &mut Cpu) {
+    cpu.write_u16(BDA, EQUIPMENT, equipment(cpu) | 1);
 }
 
 pub(super) fn default_keyboard(cpu: &Cpu) -> bool {
