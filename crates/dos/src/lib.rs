@@ -138,7 +138,8 @@ impl PausedGuest<'_> {
 #[derive(Clone, Copy)]
 enum Pending {
     Bios,
-    Console { echo: bool },
+    Console { echo: bool, check_break: bool },
+    Dos { ah: u8, al: u8 },
     Line,
     HandleRead,
 }
@@ -186,6 +187,7 @@ pub struct Machine {
     clock: Instant,
     session_clock: clock::SessionClock,
     verify_writes: bool,
+    extended_break: bool,
     paused_since: Option<Instant>,
     dta: (u16, u16),
     blocks: BTreeMap<u16, u16>,
@@ -227,6 +229,7 @@ impl Machine {
             clock: Instant::now(),
             session_clock: clock::SessionClock::default(),
             verify_writes: false,
+            extended_break: false,
             paused_since: None,
             dta: (PSP, 0x80),
             blocks: BTreeMap::new(),
@@ -270,6 +273,15 @@ impl Machine {
 
     pub fn set_verify_writes(&mut self, enabled: bool) {
         self.verify_writes = enabled;
+    }
+
+    /// Whether DOS checks for Ctrl+C during non-console system calls.
+    pub fn extended_break(&self) -> bool {
+        self.extended_break
+    }
+
+    pub fn set_extended_break(&mut self, enabled: bool) {
+        self.extended_break = enabled;
     }
 
     pub fn set_date(&mut self, year: u16, month: u8, day: u8) -> bool {
@@ -610,7 +622,7 @@ impl Machine {
             if instruction != 0 && instruction % TIMER_SAMPLE_INTERVAL == 0 {
                 self.advance_timers();
             }
-            self.poll_keyboard_wait();
+            self.poll_pending_call();
             if self.state != RunState::Running {
                 break;
             }
@@ -629,7 +641,7 @@ impl Machine {
         self.audio.advance(elapsed, &self.cpu);
     }
 
-    fn poll_keyboard_wait(&mut self) {
+    fn poll_pending_call(&mut self) {
         let Some(pending) = self.pending.last().copied() else {
             return;
         };

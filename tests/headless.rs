@@ -896,6 +896,36 @@ fn date_and_time_share_the_guest_clock_and_reprompt_for_invalid_lines() {
 }
 
 #[test]
+fn break_command_shares_the_guest_ctrl_c_setting() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.0.join("FLAGS.COM"),
+        [
+            0xb8, 0, 0x33, 0xcd, 0x21, // Get the flag
+            0x80, 0xfa, 1, 0x74, 5, 0xb8, 1, 0x4c, 0xcd, 0x21, 0x30, 0xd2, 0xb8, 1, 0x33, 0xcd,
+            0x21, // Clear the flag
+            0xb8, 0, 0x4c, 0xcd, 0x21,
+        ],
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("FLAGS.BAT"),
+        b"@echo off\r\nbreak\r\nbreak on\r\nbreak\r\nFLAGS.COM\r\nif errorlevel 1 exit %errorlevel%\r\nbreak\r\n",
+    )
+    .unwrap();
+    let mount = format!("C={}", fixture.0.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args(["--headless", "--mount", &mount, "--exec", "FLAGS.BAT"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        output.stdout,
+        b"BREAK is off\r\nBREAK is on\r\nBREAK is off\r\n"
+    );
+}
+
+#[test]
 fn ver_and_verify_use_the_guest_dos_version_and_verify_flag() {
     let fixture = Fixture::new();
     let mut probe = vec![

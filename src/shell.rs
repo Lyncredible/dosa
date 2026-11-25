@@ -33,6 +33,7 @@ const RMDIR_HELP: &str = "RMDIR [drive:]path\r\nRD [drive:]path\r\nRemove an emp
 const SET_HELP: &str =
     "SET [variable=[value]]\r\nList, set, or clear DOS environment variables.\r\n";
 
+const BREAK_HELP: &str = "BREAK [ON | OFF]\r\nShow or set extended Ctrl+C checking.\r\n";
 const VER_HELP: &str = "VER\r\nDisplay the DOS version reported to programs.\r\n";
 const VERIFY_HELP: &str =
     "VERIFY [ON | OFF]\r\nShow or set read-back verification of file writes.\r\n";
@@ -241,6 +242,7 @@ impl Shell {
             }
             "HELP" if args.eq_ignore_ascii_case("DATE") => clock::DATE_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("TIME") => clock::TIME_HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("BREAK") => BREAK_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("VER") => VER_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("VERIFY") => VERIFY_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("VOL") => volume::HELP.as_bytes().to_vec(),
@@ -268,6 +270,7 @@ impl Shell {
                 DATE [mm-dd-yy]            Show or set the DOS date\r\n\
                 TIME [hh:mm]               Show or set the DOS time\r\n\
                 VER                        Display the DOS version\r\n\
+                BREAK [ON|OFF]             Show or set extended Ctrl+C checking\r\n\
                 VERIFY [ON|OFF]            Show or set file write verification\r\n\
                 VOL [drive:]               Display a drive volume label\r\n\
                 C:                         Switch drives\r\n\
@@ -286,6 +289,23 @@ impl Shell {
                     format!("Dosa DOS version {major}.{minor:02}\r\n").into_bytes()
                 }
                 _ => return Err("usage: VER".into()),
+            },
+            "BREAK" => match args.to_ascii_uppercase().as_str() {
+                "/?" => BREAK_HELP.as_bytes().to_vec(),
+                "" => {
+                    let state = if self.machine.extended_break() {
+                        "on"
+                    } else {
+                        "off"
+                    };
+                    format!("BREAK is {state}\r\n").into_bytes()
+                }
+                "ON" | "OFF" => {
+                    self.machine
+                        .set_extended_break(args.eq_ignore_ascii_case("ON"));
+                    return Ok(Command::Prompt);
+                }
+                _ => return Err("usage: BREAK [ON | OFF]".into()),
             },
             "VERIFY" => match args.to_ascii_uppercase().as_str() {
                 "/?" => VERIFY_HELP.as_bytes().to_vec(),

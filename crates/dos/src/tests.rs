@@ -52,6 +52,58 @@ fn guest_display_detection_agrees_with_bios_equipment_word() {
 }
 
 #[test]
+fn dos_break_checks_disk_calls_only_when_enabled() {
+    let directory = Directory::new("disk-break");
+    directory.write(
+        "OPEN.COM",
+        &[
+            0xba, 0x14, 1, 0xb8, 0, 0x3d, 0xcd, 0x21, // open DATA.TXT
+            0x73, 5, 0xb8, 1, 0x4c, 0xcd, 0x21, // fail if open failed
+            0xb8, 0, 0x4c, 0xcd, 0x21, // exit 0
+            b'D', b'A', b'T', b'A', b'.', b'T', b'X', b'T', 0,
+        ],
+    );
+    directory.write("DATA.TXT", b"x");
+    for (enabled, status) in [(false, 0), (true, 3)] {
+        let mut machine = directory.machine();
+        machine.set_extended_break(enabled);
+        machine.launch('C', "OPEN.COM", "").unwrap();
+        machine.key(3, 0x2e);
+        assert_eq!(machine.run(100).unwrap(), RunState::Exited(status));
+        assert_eq!(machine.take_output() == b"^C\r\n", enabled);
+    }
+}
+
+#[test]
+fn dos_break_leaves_raw_input_and_resumes_cooked_input_after_int23() {
+    let directory = Directory::new("console-break");
+    directory.write(
+        "INPUT.COM",
+        &[
+            0xba, 0x20, 1, 0xb8, 0x23, 0x25, 0xcd, 0x21, // install INT 23h
+            0xb4, 7, 0xcd, 0x21, 0x3c, 3, 0x74, 5, // raw read must return Ctrl+C
+            0xb8, 1, 0x4c, 0xcd, 0x21, 0xb4, 8, 0xcd, 0x21, // cooked read checks Ctrl+C
+            0xb4, 0x4c, 0xcd, 0x21, // exit with the input byte
+            0, 0, 0, 0x2e, 0xfe, 0x06, 0x26, 0x01, 0xcf, 0, // INC CS:[0126h], IRET, counter
+        ],
+    );
+    let mut machine = directory.machine();
+    machine.launch('C', "INPUT.COM", "").unwrap();
+    machine.key(3, 0x2e);
+    assert_eq!(machine.run(100).unwrap(), RunState::WaitingForKey);
+    let segment = machine.cpu.regs.cs;
+    assert_eq!(machine.cpu.read_u8(segment, 0x126), 0);
+
+    machine.key(3, 0x2e);
+    assert_eq!(machine.run(100).unwrap(), RunState::WaitingForKey);
+    assert_eq!(machine.cpu.read_u8(segment, 0x126), 1);
+    assert_eq!(machine.take_output(), b"^C\r\n");
+
+    machine.key(b'Q', 0x10);
+    assert_eq!(machine.run(100).unwrap(), RunState::Exited(b'Q'));
+}
+
+#[test]
 fn paused_debugger_steps_through_wait_and_consumes_no_wall_clock_time() {
     let directory = Directory::new("debugger");
     directory.write(
