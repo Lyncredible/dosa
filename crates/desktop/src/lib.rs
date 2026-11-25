@@ -11,6 +11,8 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{Fullscreen, Theme, Window, WindowId};
 
 mod audio;
+#[cfg(windows)]
+mod gamepads;
 mod input;
 mod menu;
 #[cfg(windows)]
@@ -33,6 +35,9 @@ pub trait App {
     fn frame(&self) -> Frame<'_>;
 
     fn input(&mut self, event: Input);
+
+    /// Two stable controller slots. A missing entry represents a disconnected controller.
+    fn gamepads(&mut self, _states: [Option<GamepadState>; 2]) {}
 
     /// Drain mono 48 kHz audio produced by the guest since the previous tick.
     fn audio(&mut self) -> Vec<f32> {
@@ -64,6 +69,25 @@ pub trait App {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GamepadState {
+    /// Left to right, from 0 to 255.
+    pub x: u8,
+    /// Top to bottom, from 0 to 255.
+    pub y: u8,
+    pub buttons: [bool; 2],
+}
+
+impl Default for GamepadState {
+    fn default() -> Self {
+        Self {
+            x: 128,
+            y: 128,
+            buttons: [false; 2],
+        }
+    }
+}
+
 /// A tightly packed, top-to-bottom RGBA8 framebuffer.
 pub struct Frame<'a> {
     pub width: u32,
@@ -80,6 +104,8 @@ pub fn run(app: impl App + 'static) -> Result<(), Box<dyn Error>> {
         renderer: None,
         next_tick: Instant::now(),
         keyboard: input::Keyboard::default(),
+        #[cfg(windows)]
+        gamepads: gamepads::Gamepads::default(),
         pointer: pointer::Pointer::default(),
         menu: menu::Menu::default(),
         #[cfg(windows)]
@@ -105,6 +131,8 @@ struct Desktop<A> {
     renderer: Option<Renderer>,
     next_tick: Instant,
     keyboard: input::Keyboard,
+    #[cfg(windows)]
+    gamepads: gamepads::Gamepads,
     pointer: pointer::Pointer,
     menu: menu::Menu,
     #[cfg(windows)]
@@ -479,6 +507,9 @@ impl<A: App> ApplicationHandler for Desktop<A> {
         }
         let now = Instant::now();
         if now >= self.next_tick {
+            #[cfg(windows)]
+            self.app
+                .gamepads(self.gamepads.read(now, window.has_focus()));
             self.app.tick();
             let samples = self.app.audio();
             if !samples.is_empty() && !self.audio_attempted {

@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use dosa_desktop::{
-    App, CpuMode, Frame, Input, Key, MenuAction, MenuState, PointerEvent, PointerMode, Scaling,
-    Speed, TextMode, Volume,
+    App, CpuMode, Frame, GamepadState, Input, Key, MenuAction, MenuState, PointerEvent,
+    PointerMode, Scaling, Speed, TextMode, Volume,
 };
 use dosa_dos::{CpuProfile, JoystickState, MouseCursor, RunState, TextFrame, Video};
 use dosa_mount::Mount;
@@ -770,6 +770,31 @@ impl App for Desktop {
         }
     }
 
+    fn gamepads(&mut self, mut states: [Option<GamepadState>; 2]) {
+        let first_connector = if self.settings.virtual_joystick {
+            states[1] = states[0].or(states[1]);
+            1
+        } else {
+            0
+        };
+        for (index, state) in states.into_iter().enumerate().skip(first_connector) {
+            self.shell.machine.set_joystick(
+                index,
+                state.map(|state| {
+                    if self.paused {
+                        JoystickState::default()
+                    } else {
+                        JoystickState {
+                            x: state.x,
+                            y: state.y,
+                            buttons: state.buttons,
+                        }
+                    }
+                }),
+            );
+        }
+    }
+
     fn input(&mut self, event: Input) {
         if self.running && self.joystick_input(event.scan_code, event.pressed) {
             return;
@@ -1095,6 +1120,44 @@ mod tests {
         desktop.running = true;
         desktop.paste_text("\u{f8}");
         assert_eq!(desktop.paste.pop_front(), Some(0x9b));
+    }
+
+    #[test]
+    fn gamepad_updates_and_disconnects_reach_the_dos_gameport() {
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(
+            folder.path().join("JOY.COM"),
+            [0xba, 1, 2, 0xec, 0xb4, 0x4c, 0xcd, 0x21],
+        )
+        .unwrap();
+        let mut shell = Shell::new();
+        shell
+            .mount('C', Mount::open(folder.path()).unwrap())
+            .unwrap();
+        let mut desktop = Desktop::with_settings(
+            shell,
+            None,
+            Settings {
+                virtual_joystick: true,
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+        let pad = GamepadState {
+            x: 50,
+            buttons: [false, true],
+            ..Default::default()
+        };
+        for (states, expected) in [
+            ([Some(pad), None], 0x70),
+            ([None, Some(pad)], 0x70),
+            ([None, None], 0xfc),
+        ] {
+            desktop.submit("JOY");
+            desktop.gamepads(states);
+            desktop.tick();
+            assert_eq!(desktop.shell.errorlevel(), expected);
+        }
     }
 
     #[test]
