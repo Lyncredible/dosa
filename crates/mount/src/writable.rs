@@ -8,7 +8,8 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File, Metadata, OpenOptions};
 
 use super::{
-    Entry, MAX_FILE_BYTES, Mount, MountError, Result, Source, host_children, lock, read_bounded,
+    DosTimestamp, Entry, MAX_FILE_BYTES, Mount, MountError, Result, Source, host_children, lock,
+    read_bounded,
 };
 use crate::names::{canonical_name, find_child, guest_components};
 
@@ -68,6 +69,18 @@ impl WritableFile {
         let mut bytes = Vec::new();
         file.take(limit).read_to_end(&mut bytes)?;
         Ok(bytes)
+    }
+
+    pub fn modified(&self) -> Result<Option<DosTimestamp>> {
+        let _guard = lock(&self.transaction)?;
+        let metadata = self.open_parent()?.symlink_metadata(&self.name)?;
+        if !metadata.is_file() {
+            return Err(MountError::UnsupportedSource);
+        }
+        Ok(metadata
+            .modified()
+            .ok()
+            .and_then(|time| DosTimestamp::from_host(time.into_std())))
     }
 
     pub fn length(&self) -> Result<u64> {

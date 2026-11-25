@@ -200,6 +200,14 @@ impl IsoImage {
                     .is_none_or(|(existing, _)| version > *existing)
                 {
                     let mut entry = Entry::new(name.into(), directory, extent.size);
+                    entry.modified = super::DosTimestamp::from_fields(
+                        1900 + u16::from(data[18]),
+                        data[19],
+                        data[20],
+                        data[21],
+                        data[22],
+                        data[23],
+                    );
                     if data[25] & 1 != 0 {
                         entry.attributes |= super::attributes::HIDDEN;
                     }

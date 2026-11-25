@@ -4,7 +4,9 @@ use std::sync::Mutex;
 
 use fatfs::{Dir, DirEntry, FileSystem, FsOptions};
 
-use super::{Entry, MAX_FILE_BYTES, MountError, Result, lock, read_bounded, valid_component};
+use super::{
+    DosTimestamp, Entry, MAX_FILE_BYTES, MountError, Result, lock, read_bounded, valid_component,
+};
 
 const READ_BUDGET: u64 = MAX_FILE_BYTES * 2;
 const READ_OPERATIONS: usize = 2_000_000;
@@ -317,12 +319,21 @@ fn info(entry: &DirEntry<'_, ImageReader<'_>>) -> Option<Entry> {
     } else {
         name.clone()
     };
+    let modified = entry.modified();
     Some(Entry {
         name,
         host_name,
         is_dir: entry.is_dir(),
         size: entry.len(),
         attributes: entry.attributes().bits(),
+        modified: DosTimestamp::from_fields(
+            modified.date.year,
+            modified.date.month as u8,
+            modified.date.day as u8,
+            modified.time.hour as u8,
+            modified.time.min as u8,
+            modified.time.sec as u8,
+        ),
     })
 }
 
