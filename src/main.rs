@@ -281,7 +281,7 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
             return Ok(shell.errorlevel());
         };
         if let Some(echo) = step.echo {
-            output.write_all(echo.as_bytes())?;
+            output.write_all(&shell.machine.code_page().encode_text(&echo))?;
         }
         command = step.command;
     }

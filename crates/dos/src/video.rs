@@ -1,8 +1,5 @@
-use crate::vga::Vga;
+use crate::{CodePage, vga::Vga};
 use dosa_cpu::Cpu;
-use font8x8::{
-    BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, LATIN_FONTS, MISC_FONTS, UnicodeFonts,
-};
 
 #[cfg(test)]
 #[path = "text_video_tests.rs"]
@@ -23,6 +20,7 @@ pub struct TextFrame<'a> {
     pub columns: u16,
     pub rows: u16,
     pub character_height: u16,
+    pub code_page: CodePage,
     pub cells: &'a [u8],
     pub cursor: Option<(u16, u16)>,
 }
@@ -87,6 +85,7 @@ impl TextGeometry {
 }
 
 pub(crate) struct Adapter {
+    pub(crate) code_page: CodePage,
     mode: u8,
     col: usize,
     row: usize,
@@ -108,6 +107,7 @@ pub(crate) struct Adapter {
 impl Adapter {
     pub(crate) fn new() -> Self {
         Self {
+            code_page: CodePage::default(),
             mode: 3,
             col: 0,
             row: 0,
@@ -145,6 +145,7 @@ impl Adapter {
                 columns: self.text.columns as u16,
                 rows: self.text.rows() as u16,
                 character_height: self.text.character_height,
+                code_page: self.code_page,
                 cells: &cpu.memory[TEXT..TEXT + self.text.text_bytes()],
                 cursor: (self.cursor_shape & 0x2000 == 0)
                     .then_some((self.col as u16, self.row as u16)),
@@ -194,6 +195,7 @@ impl Adapter {
     pub(crate) fn copy_console(&mut self, previous: &Self, from: &Cpu, to: &mut Cpu) {
         to.memory[TEXT..TEXT + MAX_TEXT_BYTES]
             .copy_from_slice(&from.memory[TEXT..TEXT + MAX_TEXT_BYTES]);
+        self.code_page = previous.code_page;
         self.console = previous.console;
         self.next_scan_lines = self.console.scan_lines;
         self.col = previous.col;
@@ -393,7 +395,7 @@ impl Adapter {
 
     fn graphics_character(&self, x: usize, y: usize, character: u8, color: u8) {
         let height = if self.mode == 0x12 { 16 } else { 8 };
-        let glyph = graphics_glyph(character);
+        let glyph = self.code_page.glyphs()[usize::from(character)];
         for row in 0..height {
             for column in 0..8 {
                 if x + column >= self.vga.width() || y + row >= self.vga.height() {
@@ -678,28 +680,6 @@ impl Adapter {
             _ => self.vga.write_port(port, value),
         }
     }
-}
-
-fn graphics_glyph(character: u8) -> [u8; 8] {
-    const EXTENDED: &str = concat!(
-        "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒ",
-        "áíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐",
-        "└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀",
-        "αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ "
-    );
-    let character = if character >= 128 {
-        EXTENDED.chars().nth(usize::from(character - 128)).unwrap()
-    } else {
-        char::from(character)
-    };
-    BASIC_FONTS
-        .get(character)
-        .or_else(|| LATIN_FONTS.get(character))
-        .or_else(|| BOX_FONTS.get(character))
-        .or_else(|| BLOCK_FONTS.get(character))
-        .or_else(|| GREEK_FONTS.get(character))
-        .or_else(|| MISC_FONTS.get(character))
-        .unwrap_or_else(|| BASIC_FONTS.get('?').unwrap())
 }
 
 fn cga_scanline(y: usize) -> usize {

@@ -59,6 +59,19 @@ fn graphics_string_colors_and_cp437_blocks_are_visible() {
 }
 
 #[test]
+fn bios_graphics_text_uses_the_active_code_page() {
+    let print = |page| {
+        let (mut cpu, mut video) = setup();
+        video.code_page = page;
+        bios(&mut video, &mut cpu, 0x13, 0, 0, 0);
+        bios(&mut video, &mut cpu, 0x099b, 15, 1, 0);
+        std::array::from_fn::<_, 64, _>(|i| video.vga.pixel(i % 8, i / 8, None))
+    };
+
+    assert_ne!(print(CodePage::Cp437), print(CodePage::Cp850));
+}
+
+#[test]
 fn wide_console_wraps_scrolls_and_reports_bios_stride() {
     for rows in [25, 43, 50] {
         let (mut cpu, mut video) = setup();

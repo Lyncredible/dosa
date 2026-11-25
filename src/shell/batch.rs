@@ -431,7 +431,7 @@ impl Shell {
             let state = if batch.echo { "on" } else { "off" };
             Command::Print(format!("ECHO is {state}.\r\n").into_bytes())
         } else {
-            Command::Print(format!("{args}\r\n").into_bytes())
+            Command::Print(self.machine.code_page().encode_text(&format!("{args}\r\n")))
         }
     }
 
@@ -505,14 +505,12 @@ impl Shell {
         if bytes.len() as u64 > MAX_BATCH_BYTES {
             return Err(format!("{name}: batch file exceeds the 1 MiB size limit").into());
         }
-        let source = std::str::from_utf8(
-            &bytes[..bytes
-                .iter()
-                .position(|&byte| byte == 0x1a)
-                .unwrap_or(bytes.len())],
-        )
-        .map_err(|error| format!("{name}: batch text must be ASCII or UTF-8 ({error})"))?;
-        let frame = Frame::new(Arc::new(Script::new(name, source)?), 0, word, args)?;
+        let bytes = bytes.split(|&byte| byte == 0x1a).next().unwrap_or_default();
+        let source = match std::str::from_utf8(bytes) {
+            Ok(text) => std::borrow::Cow::Borrowed(text),
+            Err(_) => std::borrow::Cow::Owned(self.machine.code_page().decode_text(bytes)),
+        };
+        let frame = Frame::new(Arc::new(Script::new(name, &source)?), 0, word, args)?;
         match self.batch.as_mut() {
             Some(batch) if call || batch.prompt_loop && batch.frames.len() == 1 => {
                 batch.push(frame)?

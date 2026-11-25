@@ -5,6 +5,7 @@ mod audio;
 mod bios;
 mod boot_disk;
 mod clock;
+mod code_page;
 mod dma;
 mod environment;
 mod files;
@@ -36,6 +37,7 @@ pub use video::{TextFrame, Video};
 use bios::{Hook, TIMER_VECTOR};
 pub use boot_disk::BootDrive;
 pub use clock::DosClock;
+pub use code_page::CodePage;
 use dosa_cpu::{Cpu, CpuError, Step};
 pub use dosa_cpu::{CpuProfile, Registers};
 use dosa_mount::{Mount, MountError};
@@ -282,6 +284,14 @@ impl Machine {
 
     pub fn set_extended_break(&mut self, enabled: bool) {
         self.extended_break = enabled;
+    }
+
+    pub fn code_page(&self) -> CodePage {
+        self.video.code_page
+    }
+
+    pub fn set_code_page(&mut self, page: CodePage) {
+        self.video.code_page = page;
     }
 
     pub fn set_date(&mut self, year: u16, month: u8, day: u8) -> bool {
