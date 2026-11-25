@@ -331,6 +331,59 @@ fn prompt_formats_batch_echo_and_cd_still_reports_the_directory() {
 }
 
 #[test]
+fn batch_if_compares_strings_and_tests_dos_files() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.0.join("Long Folder")).unwrap();
+    fs::create_dir(fixture.0.join("FAKE.DAT")).unwrap();
+    fs::write(fixture.0.join("Long Folder/MARK.TXT"), b"data").unwrap();
+    fs::write(
+        fixture.0.join("VERIFY.BAT"),
+        b"@echo off\r\n\
+          set WORD=two words\r\n\
+          if \"%WORD%\"==\"two words\" echo spaces\r\n\
+          if not abc==ABC echo case sensitive\r\n\
+          if \"abc\"==abc echo wrong quoting\r\n\
+          if \"a==b\" == \"a==b\" echo embedded equals\r\n\
+          if \"%UNDEFINED%\"==\"\" echo empty variable\r\n\
+          if exist \"Long Folder\\M??K.*\" if errorlevel 0 echo wildcard\r\n\
+          if exist \"Long Folder\\MARK.TXT\" echo exact file\r\n\
+          if not exist \"Long Folder\" echo a directory is not a file\r\n\
+          if exist \"Long Folder\\NUL\" echo directory probe\r\n\
+          if not exist *.DAT echo wildcard excludes directories\r\n\
+          if exist NUL echo null device\r\n\
+          if not exist MISSING\\NUL echo missing directory\r\n\
+          if not exist D:\\MARK.TXT echo unmounted drive\r\n",
+    )
+    .unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([
+                "--mount",
+                &format!("C={}", fixture.0.display()),
+                "--headless",
+                "--exec",
+                "VERIFY",
+            ])
+            .output()
+            .unwrap()
+    };
+    let output = run();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"spaces\r\ncase sensitive\r\nembedded equals\r\nempty variable\r\nwildcard\r\nexact file\r\na directory is not a file\r\ndirectory probe\r\nwildcard excludes directories\r\nnull device\r\nmissing directory\r\nunmounted drive\r\n");
+
+    fs::write(
+        fixture.0.join("VERIFY.BAT"),
+        b"@echo off\r\nif exist NUL\r\n",
+    )
+    .unwrap();
+    let output = run();
+    assert!(!output.status.success(), "{output:?}");
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(message.contains("VERIFY.BAT:2"), "{message}");
+    assert!(message.contains("IF [NOT] EXIST"), "{message}");
+}
+
+#[test]
 fn dir_formats_wide_bare_and_lowercase_listings() {
     let fixture = Fixture::new();
     fs::create_dir(fixture.0.join("AAA")).unwrap();

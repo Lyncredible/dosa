@@ -6,6 +6,7 @@ use dosa_dos::{BootDrive, Machine};
 use dosa_mount::Mount;
 
 mod batch;
+mod condition;
 mod directory;
 mod prompt;
 mod rename;
@@ -192,9 +193,11 @@ impl Shell {
             "EXIT" => return Ok(Command::Exit),
             "ECHO" => format!("{args}\r\n").into_bytes(),
             "REM" => return Ok(Command::Prompt),
+            "IF" if args == "/?" => condition::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("MOUNT") => MOUNT_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("SET") => SET_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("PATH") => search_path::HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("IF") => condition::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("PROMPT") => prompt::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("MD") || args.eq_ignore_ascii_case("MKDIR") => {
                 MKDIR_HELP.as_bytes().to_vec()

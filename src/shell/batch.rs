@@ -282,9 +282,10 @@ impl Shell {
         loop {
             let (word, args) = split_word(line.trim())?;
             match word.to_ascii_uppercase().as_str() {
+                "IF" if args == "/?" => return self.execute(line),
                 "IF" => {
-                    let (negate, threshold, command) = parse_condition(args)?;
-                    if (self.errorlevel >= threshold) == negate {
+                    let (matched, command) = self.test_condition(args)?;
+                    if !matched {
                         return Ok(Command::Prompt);
                     }
                     line = command;
@@ -421,22 +422,6 @@ fn append_command_text(output: &mut String, value: &str) -> Result<(), String> {
     }
     output.push_str(value);
     Ok(())
-}
-
-fn parse_condition(args: &str) -> Result<(bool, u8, &str), Box<dyn Error>> {
-    let (word, remaining) = split_word(args)?;
-    let negate = word.eq_ignore_ascii_case("NOT");
-    let (predicate, rest) = if negate {
-        split_word(remaining)?
-    } else {
-        (word, remaining)
-    };
-    let (threshold, command) = split_word(rest)?;
-    let usage = "usage: IF [NOT] ERRORLEVEL number command (number must be 0–255)";
-    if !predicate.eq_ignore_ascii_case("ERRORLEVEL") || command.is_empty() {
-        return Err(usage.into());
-    }
-    Ok((negate, threshold.parse().map_err(|_| usage)?, command))
 }
 
 pub(super) fn is_batch(path: &str) -> bool {
