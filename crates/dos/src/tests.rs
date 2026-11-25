@@ -1,30 +1,33 @@
 use crate::{Machine, RunState, Video};
 use dosa_mount::Mount;
-use std::{fs, path::PathBuf};
+use std::{fs, path::Path};
 
-pub(super) struct Directory(PathBuf);
+pub(super) struct Directory(tempfile::TempDir);
 
 impl Directory {
     pub(super) fn new(name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("dosa-dos-{}-{name}", std::process::id()));
-        fs::create_dir_all(&path).unwrap();
-        Self(path)
+        Self(
+            tempfile::Builder::new()
+                .prefix(&format!("dosa-dos-{name}-"))
+                .tempdir()
+                .unwrap(),
+        )
+    }
+
+    fn path(&self) -> &Path {
+        self.0.path()
     }
 
     pub(super) fn write(&self, name: &str, bytes: &[u8]) {
-        fs::write(self.0.join(name), bytes).unwrap();
+        fs::write(self.path().join(name), bytes).unwrap();
     }
 
     pub(super) fn machine(&self) -> Machine {
         let mut machine = Machine::new();
-        machine.mount('C', Mount::open(&self.0).unwrap()).unwrap();
         machine
-    }
-}
-
-impl Drop for Directory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+            .mount('C', Mount::open(self.path()).unwrap())
+            .unwrap();
+        machine
     }
 }
 
@@ -100,7 +103,7 @@ fn paused_debugger_steps_through_wait_and_consumes_no_wall_clock_time() {
 fn com_reads_key_then_prints_and_exits() {
     let directory = Directory::new("keyboard");
     fs::write(
-        directory.0.join("KEY.COM"),
+        directory.path().join("KEY.COM"),
         [
             0xb4, 0x00, 0xcd, 0x16, // BIOS read
             0x88, 0xc2, 0xb4, 0x02, 0xcd, 0x21, // echo AL using DOS output
@@ -150,7 +153,7 @@ fn guest_keyboard_irq_waits_for_if_and_pic_and_delivers_make_and_break() {
         0xb0, 0x20, 0xe6, 0x20, // non-specific EOI
         0x5b, 0x58, 0xcf, // pop bx, pop ax, iret
     ]);
-    fs::write(directory.0.join("IRQ.COM"), program).unwrap();
+    fs::write(directory.path().join("IRQ.COM"), program).unwrap();
     let mut machine = directory.machine();
     machine.launch('C', "IRQ.COM", "").unwrap();
     machine.run(4).unwrap();
@@ -192,7 +195,7 @@ fn guest_timer_runs_repeatedly_with_programmed_pit_period() {
         0xb0, 0x20, 0xe6, 0x20, // non-specific EOI
         0x58, 0xcf, // pop ax, iret
     ]);
-    fs::write(directory.0.join("TIMER.COM"), program).unwrap();
+    fs::write(directory.path().join("TIMER.COM"), program).unwrap();
     let mut machine = directory.machine();
     machine.launch('C', "TIMER.COM", "").unwrap();
     machine.pit = crate::pit::Pit::new(0);
@@ -248,7 +251,7 @@ fn mz_relocates_and_displays_vga_memory() {
         mz[offset..offset + 2].copy_from_slice(&(value as u16).to_le_bytes());
     }
     mz.extend(program);
-    fs::write(directory.0.join("VGA.EXE"), mz).unwrap();
+    fs::write(directory.path().join("VGA.EXE"), mz).unwrap();
     let mut machine = directory.machine();
     machine.launch('C', "VGA.EXE", "").unwrap();
     assert_eq!(machine.run(30).unwrap(), RunState::Running);
@@ -271,7 +274,7 @@ fn mz_relocates_and_displays_vga_memory() {
 #[test]
 fn guest_opens_file_relative_to_nested_executable() {
     let directory = Directory::new("files");
-    let nested = directory.0.join("PROGRAMS");
+    let nested = directory.path().join("PROGRAMS");
     fs::create_dir(&nested).unwrap();
     fs::write(nested.join("VALUE.TXT"), b"abc").unwrap();
     let mut program = vec![
@@ -293,7 +296,7 @@ fn guest_opens_file_relative_to_nested_executable() {
 fn cga_graphics_reads_both_interleaved_scanline_banks() {
     let directory = Directory::new("cga");
     fs::write(
-        directory.0.join("CGA.COM"),
+        directory.path().join("CGA.COM"),
         [
             0xb8, 0x06, 0x00, 0xcd, 0x10, // set CGA mode 6
             0xba, 0x00, 0xb8, 0x8e, 0xc2, // ES = video memory
@@ -330,7 +333,7 @@ fn cga_graphics_reads_both_interleaved_scanline_banks() {
 #[test]
 fn chained_default_timer_updates_bda_calls_int1c_and_acknowledges_irq() {
     let directory = Directory::new("chained-timer");
-    fs::write(directory.0.join("TIMER.COM"), [0xeb, 0xfe]).unwrap();
+    fs::write(directory.path().join("TIMER.COM"), [0xeb, 0xfe]).unwrap();
     let mut machine = directory.machine();
     machine.launch('C', "timer.com", "").unwrap();
     let segment = machine.cpu.regs.cs;
@@ -391,7 +394,7 @@ fn chained_default_timer_updates_bda_calls_int1c_and_acknowledges_irq() {
 #[test]
 fn chained_default_keyboard_handler_completes_irq_and_delivers_a_key_once() {
     let directory = Directory::new("chained-keyboard");
-    fs::write(directory.0.join("KEYBOARD.COM"), [0xeb, 0xfe]).unwrap();
+    fs::write(directory.path().join("KEYBOARD.COM"), [0xeb, 0xfe]).unwrap();
     let mut machine = directory.machine();
     machine.launch('C', "keyboard.com", "").unwrap();
     let segment = machine.cpu.regs.cs;
@@ -433,7 +436,7 @@ fn chained_default_keyboard_handler_completes_irq_and_delivers_a_key_once() {
 fn halted_guest_stays_active_and_resumes_only_after_an_enabled_irq() {
     let directory = Directory::new("halt");
     fs::write(
-        directory.0.join("HALT.COM"),
+        directory.path().join("HALT.COM"),
         [0xfa, 0xf4, 0xb8, 7, 0x4c, 0xcd, 0x21], // CLI / HLT / MOV AX,4C07h / INT 21h
     )
     .unwrap();
@@ -459,7 +462,7 @@ fn halted_guest_stays_active_and_resumes_only_after_an_enabled_irq() {
 fn blocking_int16_wait_runs_a_chained_keyboard_irq_before_resuming() {
     let directory = Directory::new("blocked-int16");
     fs::write(
-        directory.0.join("WAIT.COM"),
+        directory.path().join("WAIT.COM"),
         [0x31, 0xc0, 0xcd, 0x16, 0xb4, 0x4c, 0xcd, 0x21],
     )
     .unwrap();
@@ -499,7 +502,7 @@ fn blocking_int16_wait_runs_a_chained_keyboard_irq_before_resuming() {
 fn masked_irq1_leaves_kbc_output_available_for_guest_port_polling() {
     let directory = Directory::new("masked-kbc");
     fs::write(
-        directory.0.join("POLL.COM"),
+        directory.path().join("POLL.COM"),
         [0xe4, 0x60, 0xb4, 0x4c, 0xcd, 0x21], // IN AL,60h / MOV AH,4Ch / INT 21h
     )
     .unwrap();
