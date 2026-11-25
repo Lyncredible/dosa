@@ -15,7 +15,7 @@ The first mounted drive is selected on startup. Type `DIR` to list its contents 
 
 Mount a directory, a single file, or a ZIP. Quote host paths containing spaces.
 
-Use `--mount-fat A=floppy.img`, `fat_image = true` in a profile, or **Drives → Mount FAT image** to read a raw FAT volume or a partitioned MBR image as a DOS drive. Dosa mounts the first primary FAT partition in table order in a 512-byte-sector MBR image. FAT images are read-only.
+Use `--mount-fat A=floppy.img`, `fat_image = true` in a profile, or **Drives → Mount FAT image** to read a raw FAT volume or a partitioned MBR image as a DOS drive. In a 512-byte-sector MBR image, Dosa looks for FAT in primary slots first, followed by logical partitions. Use `--mount-fat C:5=disk.img` or add `fat_partition = 5` to a FAT profile mount to select a partition explicitly. Primary slots are 1–4 and logical partitions start at 5. FAT images are read-only.
 
 Use `--mount-iso D=disc.iso`, `iso_image = true` in a profile, **Drives → Mount ISO image**, or `IMGMOUNT D "path to disc.iso"` at the Dosa prompt for a read-only ISO 9660 data drive. Dosa reads the primary volume with 2,048-byte blocks and single-extent files. DOS programs can use MSCDEX `INT 2Fh` to detect and enumerate optical drives and read data sectors or volume descriptors. Device-driver requests, CD audio, and disc swapping remain planned.
 

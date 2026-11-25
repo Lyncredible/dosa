@@ -138,13 +138,21 @@ impl Mount {
         }
     }
 
-    /// Mount a raw FAT volume or the first primary FAT partition in an MBR image.
+    /// Mount a raw FAT volume or the first primary or logical FAT partition.
     pub fn open_fat_image(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
+        Self::open_fat(path.as_ref(), None)
+    }
+
+    /// Mount a numbered FAT partition. MBR slots are 1–4 and logical partitions begin at 5.
+    pub fn open_fat_partition(path: impl AsRef<Path>, number: u16) -> Result<Self> {
+        Self::open_fat(path.as_ref(), Some(number))
+    }
+
+    fn open_fat(path: &Path, partition: Option<u16>) -> Result<Self> {
         if !fs::metadata(path)?.is_file() {
             return Err(MountError::UnsupportedSource);
         }
-        let image = fat_image::FatImage::open(File::open(path)?)?;
+        let image = fat_image::FatImage::open(File::open(path)?, partition)?;
         Ok(Self {
             source: Source::FatImage(image),
         })

@@ -78,22 +78,26 @@ fn partitioned_image() -> Vec<u8> {
     disk[462 + 4] = 0x06;
     disk[462 + 8..462 + 12].copy_from_slice(&(START as u32).to_le_bytes());
     disk[462 + 12..462 + 16].copy_from_slice(&(LENGTH as u32).to_le_bytes());
-    let mut fat = Cursor::new(&mut disk[START * SECTOR..(START + LENGTH) * SECTOR]);
-    fatfs::format_volume(
-        &mut fat,
-        fatfs::FormatVolumeOptions::new().fat_type(fatfs::FatType::Fat16),
-    )
-    .unwrap();
+    format_test_volume(
+        &mut disk[START * SECTOR..(START + LENGTH) * SECTOR],
+        fatfs::FatType::Fat16,
+        b"Partitioned FAT16\r\n",
+    );
+    disk
+}
+
+fn format_test_volume(bytes: &mut [u8], kind: fatfs::FatType, contents: &[u8]) {
+    let mut fat = Cursor::new(bytes);
+    fatfs::format_volume(&mut fat, fatfs::FormatVolumeOptions::new().fat_type(kind)).unwrap();
     fat.rewind().unwrap();
     let volume = fatfs::FileSystem::new(&mut fat, fatfs::FsOptions::new()).unwrap();
     volume
         .root_dir()
         .create_file("HELLO.TXT")
         .unwrap()
-        .write_all(b"Partitioned FAT16\r\n")
+        .write_all(contents)
         .unwrap();
     volume.unmount().unwrap();
-    disk
 }
 
 #[test]
@@ -162,4 +166,103 @@ fn rejects_partition_and_volume_ranges_that_exceed_their_container() {
         error.to_string().contains("overlapping MBR partitions"),
         "{error}"
     );
+}
+
+const EXTENDED_BASE: usize = 3000;
+const SECOND_EBR: usize = EXTENDED_BASE + 16;
+const THIRD_EBR: usize = EXTENDED_BASE + 48;
+const LOGICAL_LENGTH: usize = 16_384;
+
+fn write_partition(
+    disk: &mut [u8],
+    table: usize,
+    slot: usize,
+    kind: u8,
+    start: usize,
+    sectors: usize,
+) {
+    let base = table * 512;
+    disk[base + 510..base + 512].copy_from_slice(&[0x55, 0xaa]);
+    let entry = &mut disk[base + 446 + slot * 16..][..16];
+    entry[4] = kind;
+    entry[8..12].copy_from_slice(&(start as u32).to_le_bytes());
+    entry[12..16].copy_from_slice(&(sectors as u32).to_le_bytes());
+}
+
+fn logical_image() -> Vec<u8> {
+    let end = THIRD_EBR + 1 + LOGICAL_LENGTH;
+    let mut disk = vec![0; (end + 8) * 512];
+    write_partition(&mut disk, 0, 1, 0x0f, EXTENDED_BASE, end - EXTENDED_BASE);
+    for (table, next) in [(EXTENDED_BASE, SECOND_EBR), (SECOND_EBR, THIRD_EBR)] {
+        write_partition(&mut disk, table, 0, 0x07, 1, 8);
+        write_partition(&mut disk, table, 1, 0x0f, next - EXTENDED_BASE, end - next);
+    }
+    write_partition(&mut disk, THIRD_EBR, 0, 0x06, 1, LOGICAL_LENGTH);
+    format_test_volume(
+        &mut disk[(THIRD_EBR + 1) * 512..end * 512],
+        fatfs::FatType::Fat16,
+        b"Logical FAT16\r\n",
+    );
+    disk
+}
+
+#[test]
+fn walks_ebr_links_and_selects_partitions_from_cli_and_profile() {
+    let scratch = tempfile::tempdir().unwrap();
+    let image = scratch.path().join("mixed image.img");
+    let mut disk = logical_image();
+    std::fs::write(&image, &disk).unwrap();
+    let auto = Mount::open_fat_image(&image).unwrap();
+    assert_eq!(auto.read("HELLO.TXT").unwrap(), b"Logical FAT16\r\n");
+    drop(auto);
+
+    write_partition(&mut disk, 0, 0, 0x01, 1, 2880);
+    format_test_volume(
+        &mut disk[512..2881 * 512],
+        fatfs::FatType::Fat12,
+        b"Primary FAT12\r\n",
+    );
+    std::fs::write(&image, &disk).unwrap();
+    let auto = Mount::open_fat_image(&image).unwrap();
+    assert_eq!(auto.read("HELLO.TXT").unwrap(), b"Primary FAT12\r\n");
+    let primary = Mount::open_fat_partition(&image, 1).unwrap();
+    assert_eq!(primary.read("HELLO.TXT").unwrap(), b"Primary FAT12\r\n");
+    assert!(Mount::open_fat_partition(&image, 6).is_err());
+
+    let profile = scratch.path().join("disk.toml");
+    std::fs::write(&profile, "exec = 'type hello.txt'\n[[mounts]]\ndrive = 'C'\npath = 'mixed image.img'\nfat_image = true\nfat_partition = 7\n").unwrap();
+    for args in [
+        vec![
+            "--mount-fat",
+            &format!("C:7={}", image.display()),
+            "--exec",
+            "type hello.txt",
+        ],
+        vec!["--profile", profile.to_str().unwrap()],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .arg("--headless")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"Logical FAT16\r\n");
+    }
+    assert_eq!(std::fs::read(image).unwrap(), disk);
+}
+
+#[test]
+fn rejects_backward_and_out_of_bounds_extended_partition_links() {
+    let scratch = tempfile::tempdir().unwrap();
+    let image = scratch.path().join("broken.img");
+    let mut disk = logical_image();
+    for (link_lba, expected) in [
+        (SECOND_EBR - EXTENDED_BASE, "backward or overlapping"),
+        (disk.len() / 512, "invalid extended boot record link"),
+    ] {
+        write_partition(&mut disk, SECOND_EBR, 1, 0x0f, link_lba, 1);
+        std::fs::write(&image, &disk).unwrap();
+        let error = Mount::open_fat_image(&image).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
 }
