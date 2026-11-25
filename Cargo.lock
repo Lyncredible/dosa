@@ -584,6 +584,7 @@ dependencies = [
  "dosa-mount",
  "font8x8",
  "oplon",
+ "tempfile",
 ]
 
 [[package]]
