@@ -71,8 +71,19 @@ impl Machine {
     }
 
     pub(crate) fn resume(&mut self, pending: Pending) {
-        if matches!(pending, Pending::Line) {
-            self.read_line();
+        match pending {
+            Pending::Dos { ah, al } => return self.dos(ah, al),
+            Pending::Line => return self.read_line(),
+            _ => {}
+        }
+        if matches!(
+            pending,
+            Pending::Console {
+                check_break: true,
+                ..
+            } | Pending::HandleRead
+        ) && self.check_break(pending)
+        {
             return;
         }
         let Some((ascii, scan)) = self.keys.pop_front() else {
@@ -81,7 +92,7 @@ impl Machine {
         };
         match pending {
             Pending::Bios => self.cpu.regs.ax = u16::from_le_bytes([ascii, scan]),
-            Pending::Console { echo } => {
+            Pending::Console { echo, .. } => {
                 let value = self.console_key(ascii, scan);
                 self.set_al(value);
                 if echo && value != 0 {
@@ -94,8 +105,24 @@ impl Machine {
                 self.cpu.regs.ax = 1;
                 self.success();
             }
-            Pending::Line => unreachable!(),
+            Pending::Line | Pending::Dos { .. } => unreachable!(),
         }
+    }
+
+    fn check_break(&mut self, resume: Pending) -> bool {
+        if !matches!(self.keys.front(), Some((3, _))) {
+            return false;
+        }
+        self.keys.pop_front();
+        self.emit(b"^C\r\n");
+        if self.has_interrupt_handler(0x23) {
+            // DOS resumes the interrupted service when the guest handler returns by IRET.
+            self.pending.push(PendingCall::new(resume, &self.cpu));
+            self.cpu.enter_interrupt(0x23);
+        } else {
+            self.exit(3);
+        }
+        true
     }
 
     fn console_key(&mut self, ascii: u8, scan: u8) -> u8 {
@@ -113,7 +140,11 @@ impl Machine {
     fn read_line(&mut self) {
         let (segment, offset) = (self.cpu.regs.ds, self.cpu.regs.dx);
         let limit = self.cpu.read_u8(segment, offset).saturating_sub(1) as usize;
-        while let Some((ascii, _)) = self.keys.pop_front() {
+        while let Some(&(ascii, _)) = self.keys.front() {
+            if self.check_break(Pending::Line) {
+                return;
+            }
+            self.keys.pop_front();
             match ascii {
                 b'\r' => {
                     self.cpu
@@ -152,9 +183,18 @@ impl Machine {
             self.cpu.regs.es,
         );
         let [dl, _] = dx.to_le_bytes();
+        let console_check =
+            matches!(ah, 2 | 5 | 9 | 0x0b | 0x0c) || (ah == 0x40 && matches!(bx, 1 | 2));
+        let extended_check = self.extended_break() && ah >= 0x0d && ah != 0x33;
+        if (console_check || extended_check) && self.check_break(Pending::Dos { ah, al }) {
+            return;
+        }
         match ah {
             0x00 | 0x31 => self.exit(if ah == 0 { 0 } else { al }),
-            0x01 => self.resume(Pending::Console { echo: true }),
+            0x01 => self.resume(Pending::Console {
+                echo: true,
+                check_break: true,
+            }),
             0x02 => {
                 self.emit(&[dl]);
                 self.set_al(dl);
@@ -174,7 +214,10 @@ impl Machine {
                 self.emit(&[dl]);
                 self.set_al(dl);
             }
-            0x07 | 0x08 => self.resume(Pending::Console { echo: false }),
+            0x07 | 0x08 => self.resume(Pending::Console {
+                echo: false,
+                check_break: ah == 0x08,
+            }),
             0x09 => {
                 let bytes = self.read_until(ds, dx, b'$', 1 << 16);
                 self.emit(&bytes);
@@ -241,11 +284,15 @@ impl Machine {
                 self.cpu.regs.bx = 0xff00;
                 self.cpu.regs.cx = 0;
             }
+            0x33 if al == 0 => {
+                self.cpu.regs.dx = (dx & 0xff00) | u16::from(self.extended_break());
+            }
+            0x33 if al == 1 => self.set_extended_break(dl & 1 != 0),
             0x33 if al == 6 => {
                 self.cpu.regs.bx = u16::from_le_bytes(DOS_VERSION);
                 self.cpu.regs.dx = 0;
             }
-            0x33 => self.cpu.regs.dx &= 0xff00,
+            0x33 => self.set_al(0xff),
             0x34 => {
                 self.cpu.regs.es = 0x50;
                 self.cpu.regs.bx = 0;
