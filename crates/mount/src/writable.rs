@@ -275,11 +275,30 @@ impl Mount {
     }
 
     pub fn remove_file(&self, path: &str) -> Result<()> {
+        self.remove_file_with_name(path, None)
+    }
+
+    /// Remove a listed file only if the guest path still resolves to its original host name.
+    pub fn remove_listed_file(
+        &self,
+        path: &str,
+        parents: &[String],
+        host_name: &str,
+    ) -> Result<()> {
+        self.remove_file_with_name(path, Some((parents, host_name)))
+    }
+
+    fn remove_file_with_name(&self, path: &str, expected: Option<(&[String], &str)>) -> Result<()> {
         let writable = self.writable()?;
         let _guard = lock(&writable.transaction)?;
         let target = resolve_target(&writable.root, path)?;
         let name = target.file_name(path)?;
         writable_file_metadata(&target.parent, &name)?;
+        if expected.is_some_and(|(parents, expected_name)| {
+            parents != target.parents || expected_name != name
+        }) {
+            return Err(MountError::NotFound(path.to_owned()));
+        }
         target.parent.remove_file(name)?;
         Ok(())
     }
