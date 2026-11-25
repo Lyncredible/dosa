@@ -1,6 +1,6 @@
 use crate::{CONVENTIONAL_END, DosError, Machine, PSP, Pending, PendingCall, RunState, ZERO};
 use crate::{DOS_VERSION, DosClock};
-use dosa_mount::Entry;
+use dosa_mount::{Allocation, Entry};
 
 impl Machine {
     pub(crate) fn interrupt(&mut self, vector: u8) -> Result<(), DosError> {
@@ -248,13 +248,17 @@ impl Machine {
                 } else {
                     drive_letter(dl - 1)
                 };
-                if drive.is_some_and(|drive| self.mounts.contains_key(&drive)) {
-                    self.cpu.regs.ax = 1;
-                    self.cpu.regs.bx = 0;
-                    self.cpu.regs.cx = 512;
-                    self.cpu.regs.dx = 0xffff;
-                } else {
-                    self.cpu.regs.ax = 0xffff;
+                match drive.and_then(|drive| self.mounts.get(&drive)) {
+                    Some(mount) => {
+                        let allocation = mount.allocation().ok().flatten();
+                        (
+                            self.cpu.regs.ax,
+                            self.cpu.regs.bx,
+                            self.cpu.regs.cx,
+                            self.cpu.regs.dx,
+                        ) = disk_space_registers(allocation);
+                    }
+                    None => self.cpu.regs.ax = 0xffff,
                 }
             }
             0x38 => self.failure(1),
@@ -534,4 +538,57 @@ impl Machine {
 
 fn drive_letter(number: u8) -> Option<char> {
     (number < 26).then(|| char::from(b'A' + number))
+}
+
+fn disk_space_registers(allocation: Option<Allocation>) -> (u16, u16, u16, u16) {
+    let Some(allocation) = allocation else {
+        return (1, 0, 512, u16::MAX);
+    };
+    let mut sectors = allocation.sectors_per_cluster;
+    let bytes_per_sector = u64::from(allocation.bytes_per_sector);
+    let max_clusters = u64::from(u16::MAX);
+    let total = allocation.total_bytes();
+    let free = allocation.free_bytes();
+    // Widen allocation units as needed, up to the 32 KiB DOS cluster limit.
+    // Any capacity beyond the 16-bit cluster count is outside this view.
+    let mut cluster_bytes = u64::from(sectors) * bytes_per_sector;
+    while total / cluster_bytes > max_clusters && cluster_bytes < 32 * 1024 {
+        sectors *= 2;
+        cluster_bytes *= 2;
+    }
+    let total_clusters = (total / cluster_bytes).min(max_clusters);
+    let free_clusters = (free / cluster_bytes).min(total_clusters);
+    (
+        sectors,
+        free_clusters as u16,
+        allocation.bytes_per_sector,
+        total_clusters as u16,
+    )
+}
+
+#[cfg(test)]
+mod disk_space_tests {
+    use super::*;
+
+    #[test]
+    fn large_volumes_use_larger_units_without_overstating_free_space() {
+        let allocation = Allocation {
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            free_clusters: 99_999,
+            total_clusters: 100_000,
+        };
+        assert_eq!(
+            disk_space_registers(Some(allocation)),
+            (2, 49_999, 512, 50_000)
+        );
+        assert_eq!(
+            disk_space_registers(Some(Allocation {
+                total_clusters: u64::MAX,
+                free_clusters: u64::MAX,
+                ..allocation
+            })),
+            (64, u16::MAX, 512, u16::MAX)
+        );
+    }
 }
