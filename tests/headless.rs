@@ -409,6 +409,61 @@ fn batch_shift_exposes_later_arguments_and_keeps_call_frames_separate() {
 }
 
 #[test]
+fn for_iterates_at_the_prompt_and_expands_batch_file_patterns() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.0.join("FILES")).unwrap();
+    fs::create_dir(fixture.0.join("FILES/SUB.TXT")).unwrap();
+    fs::write(fixture.0.join("FILES/ONE.TXT"), b"one\r\n").unwrap();
+    fs::write(fixture.0.join("FILES/TWO.TXT"), b"two\r\n").unwrap();
+    fs::write(
+        fixture.0.join("SAY.COM"),
+        [
+            0xb4, 0x02, 0xb2, b'!', 0xcd, 0x21, 0xb8, 0, 0x4c, 0xcd, 0x21,
+        ],
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("LOOP.BAT"),
+        b"@echo off\r\nset ITEM=expanded\r\nfor %%A in (%ITEM% \"two words\" %1) do echo [%%A][%%a]\r\n\
+          for %%F in (FILES\\*.TXT MISSING\\*.TXT) do type %%F\r\n\
+          if exist SAY.COM for %%P in (1 2) do SAY\r\necho done\r\n",
+    )
+    .unwrap();
+    fs::write(fixture.0.join("PRINT.BAT"), b"@echo %1\r\n").unwrap();
+    fs::write(
+        fixture.0.join("JUMP.BAT"),
+        b"@echo off\r\nfor %%A in (right missing) do goto %%A\r\necho skipped\r\n:right\r\necho jumped\r\n",
+    )
+    .unwrap();
+    for (command, expected) in [
+        ("JUMP", &b"jumped\r\n"[..]),
+        (
+            "FOR %A IN (one, two; three) DO ECHO %A",
+            &b"one\r\ntwo\r\nthree\r\n"[..],
+        ),
+        ("FOR %A IN (one two) DO PRINT %A", &b"one\r\ntwo\r\n"[..]),
+        (
+            "LOOP argument",
+            &b"[expanded][%a]\r\n[\"two words\"][%a]\r\n[argument][%a]\r\none\r\ntwo\r\n!!done\r\n"
+                [..],
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([
+                "--mount",
+                &format!("C={}", fixture.0.display()),
+                "--headless",
+                "--exec",
+                command,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{command}: {output:?}");
+        assert_eq!(output.stdout, expected, "{command}");
+    }
+}
+
+#[test]
 fn batch_pause_reads_headless_input_and_confirms_cancellation() {
     use std::process::Stdio;
 
