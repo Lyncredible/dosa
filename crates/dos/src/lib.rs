@@ -176,6 +176,17 @@ pub struct ShellIo {
     files: DosFiles,
 }
 
+/// Buffered data passed between two sequential DOS shell commands.
+#[derive(Default)]
+pub struct ShellPipe(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl ShellIo {
+    pub fn attach_pipe(&mut self, pipe: &ShellPipe, writable: bool) {
+        self.files
+            .attach_pipe(std::sync::Arc::clone(&pipe.0), writable);
+    }
+}
+
 pub enum ShellInput {
     Console,
     Eof,
@@ -417,6 +428,18 @@ impl Machine {
         if let Some(parent) = inherited {
             files.inherit_standard_handles(&parent.files);
         }
+        let mut io = ShellIo { files };
+        self.redirect_shell_io(&mut io, input, output)?;
+        Ok(io)
+    }
+
+    pub fn redirect_shell_io(
+        &self,
+        io: &mut ShellIo,
+        input: Option<&str>,
+        output: Option<(&str, bool)>,
+    ) -> Result<(), DosError> {
+        let files = &mut io.files;
         if let Some(path) = input {
             let redirect = (|| {
                 let handle = files.open(&self.mounts, path, 0)?;
@@ -450,7 +473,7 @@ impl Machine {
                 code,
             })?;
         }
-        Ok(ShellIo { files })
+        Ok(())
     }
 
     /// Write builtin output to the redirected handle. Return false for display output.

@@ -517,7 +517,7 @@ impl App for Desktop {
         if !self.running
             && !self.paused
             && !self.exit
-            && self.shell.batch_active()
+            && self.shell.command_active()
             && !self.shell.batch_waiting()
             && !self.shell.input_waiting()
         {
