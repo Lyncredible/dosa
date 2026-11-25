@@ -17,6 +17,8 @@ const MOUNT_HELP: &str = "MOUNT drive [/ISO | /FAT | /RW | /SESSION] host-path\r
     /FAT      Mount a FAT volume or partitioned disk image.\r\n\
     /RW       Mount a writable host directory.\r\n\
     /SESSION  Mount a temporary writable copy of a ZIP.\r\n";
+const MKDIR_HELP: &str = "MKDIR [drive:]path\r\nMD [drive:]path\r\nCreate a directory. The parent directory must exist.\r\n";
+const RMDIR_HELP: &str = "RMDIR [drive:]path\r\nRD [drive:]path\r\nRemove an empty directory. Change out of it first.\r\n";
 
 pub enum Command {
     Print(Vec<u8>),
@@ -176,15 +178,22 @@ impl Shell {
             "ECHO" => format!("{args}\r\n").into_bytes(),
             "REM" => return Ok(Command::Prompt),
             "HELP" if args.eq_ignore_ascii_case("MOUNT") => MOUNT_HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("MD") || args.eq_ignore_ascii_case("MKDIR") => {
+                MKDIR_HELP.as_bytes().to_vec()
+            }
+            "HELP" if args.eq_ignore_ascii_case("RD") || args.eq_ignore_ascii_case("RMDIR") => {
+                RMDIR_HELP.as_bytes().to_vec()
+            }
             "HELP" => b"DIR [path] [/W] [/B] [/L]   List files\r\n\
-                CD [path]    Show or change directory\r\n\
-                TYPE file    Print a file\r\n\
-                MOUNT drive path   Mount a file, directory, ZIP or disk image\r\n\
-                HELP MOUNT   Show mount options\r\n\
-                BOOT A path  Boot a raw floppy image; use C for a hard disk\r\n\
-                C:           Switch drives\r\n\
-                CLS          Clear the screen\r\n\
-                EXIT         Close dosa\r\n\
+                CD [path]                  Show or change directory\r\n\
+                MD path                    Make a directory (MKDIR)\r\n\
+                RD path                    Remove an empty directory (RMDIR)\r\n\
+                TYPE file                  Print a file\r\n\
+                MOUNT drive path           Mount host files or images (see HELP MOUNT)\r\n\
+                BOOT A|C path              Boot a floppy or hard disk image\r\n\
+                C:                         Switch drives\r\n\
+                CLS                        Clear the screen\r\n\
+                EXIT                       Close Dosa\r\n\
                 Enter a COM, EXE, or BAT name and arguments to run it.\r\n"
                 .to_vec(),
             "DIR" => self.directory(args)?,
@@ -206,6 +215,8 @@ impl Shell {
                 let (drive, path) = self.resolve(unquote(args))?;
                 self.drive_mount(drive)?.read(&path)?
             }
+            "MD" | "MKDIR" => return self.change_directory_entry(args, true),
+            "RD" | "RMDIR" => return self.change_directory_entry(args, false),
             "MOUNT" => self.mount_command(args, false)?,
             "IMGMOUNT" => self.mount_command(args, true)?,
             "BOOT" => {
@@ -241,6 +252,41 @@ impl Shell {
             }
         };
         Ok(Command::Print(output))
+    }
+
+    fn change_directory_entry(&self, args: &str, create: bool) -> Result<Command, Box<dyn Error>> {
+        let (path, rest) = split_word(args)?;
+        let help = if create { MKDIR_HELP } else { RMDIR_HELP };
+        if args == "/?" {
+            return Ok(Command::Print(help.as_bytes().to_vec()));
+        }
+        if path.is_empty() || !rest.is_empty() {
+            return Err(if create {
+                "usage: MD [drive:]path"
+            } else {
+                "usage: RD [drive:]path"
+            }
+            .into());
+        }
+        let (drive, path) = self.resolve(path)?;
+        let mount = self.drive_mount(drive)?;
+        if create {
+            mount.create_dir(&path)?;
+        } else {
+            if path.is_empty() {
+                return Err("cannot remove the root directory".into());
+            }
+            let target = mount.canonical_directory(&path)?;
+            let current = self.directories.get(&drive).map_or("", String::as_str);
+            if mount
+                .canonical_directory(current)
+                .is_ok_and(|current| current == target)
+            {
+                return Err("cannot remove the current directory".into());
+            }
+            mount.remove_dir(&path)?;
+        }
+        Ok(Command::Prompt)
     }
 
     fn mount_command(&mut self, args: &str, legacy_iso: bool) -> Result<Vec<u8>, Box<dyn Error>> {

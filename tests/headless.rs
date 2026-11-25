@@ -55,6 +55,61 @@ fn shell_help_lists_one_mount_command_and_keeps_startup_flags_in_cli_help() {
 }
 
 #[test]
+fn shell_directory_commands_work_from_batch_and_prompt() {
+    let fixture = Fixture::new();
+    let path = fixture.0.display();
+    let run = |mount: &str, command: &str| {
+        Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([mount, &format!("C={path}"), "--headless", "--exec", command])
+            .output()
+            .unwrap()
+    };
+    fs::create_dir(fixture.0.join("Long Folder")).unwrap();
+    fs::write(
+        fixture.0.join("TREE.BAT"),
+        "@echo off\r\ncd \"Long Folder\"\r\nmd CHILD\r\ncd CHILD\r\nmkdir INNER\r\nrd INNER\r\ncd ..\r\nrmdir CHILD\r\n",
+    )
+    .unwrap();
+    let output = run("--mount-rw", "TREE");
+    assert!(output.status.success(), "{output:?}");
+    assert!(!fixture.0.join("Long Folder/CHILD").exists());
+
+    let output = run("--mount-rw", "MD C:\\NEW");
+    assert!(output.status.success(), "{output:?}");
+    assert!(fixture.0.join("NEW").is_dir());
+    let output = run("--mount", "RD NEW");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(fixture.0.join("NEW").is_dir());
+    let output = run("--mount-rw", "RD NEW");
+    assert!(output.status.success(), "{output:?}");
+    assert!(!fixture.0.join("NEW").exists());
+
+    fs::write(
+        fixture.0.join("ACTIVE.BAT"),
+        "@echo off\r\ncd \"Long Folder\"\r\nrd C:\\LONGFO~1\r\n",
+    )
+    .unwrap();
+    let output = run("--mount-rw", "ACTIVE");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot remove the current directory")
+    );
+    assert!(fixture.0.join("Long Folder").is_dir());
+
+    for command in ["RD \\", "RD MISSING", "MD MISSING\\CHILD", "MD", "MD A B"] {
+        let output = run("--mount-rw", command);
+        assert!(!output.status.success(), "{command}: {output:?}");
+    }
+    fs::write(fixture.0.join("Long Folder/FILE.TXT"), b"data").unwrap();
+    let output = run("--mount-rw", "RD \"Long Folder\"");
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read(fixture.0.join("Long Folder/FILE.TXT")).unwrap(),
+        b"data"
+    );
+}
+
+#[test]
 fn dir_formats_wide_bare_and_lowercase_listings() {
     let fixture = Fixture::new();
     fs::create_dir(fixture.0.join("AAA")).unwrap();
