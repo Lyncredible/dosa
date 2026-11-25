@@ -13,6 +13,8 @@ use winit::window::{Fullscreen, Theme, Window, WindowId};
 mod audio;
 mod input;
 mod menu;
+#[cfg(windows)]
+mod native_menu;
 mod pointer;
 mod renderer;
 
@@ -45,7 +47,7 @@ pub trait App {
         PointerMode::Host
     }
 
-    /// Controls and current guest settings shown in the desktop toolbar.
+    /// Controls and current guest settings shown by the desktop.
     fn menu(&self) -> MenuState {
         MenuState::default()
     }
@@ -80,6 +82,8 @@ pub fn run(app: impl App + 'static) -> Result<(), Box<dyn Error>> {
         keyboard: input::Keyboard::default(),
         pointer: pointer::Pointer::default(),
         menu: menu::Menu::default(),
+        #[cfg(windows)]
+        native_menu: None,
         menu_keys: HashSet::new(),
         error: None,
         audio: None,
@@ -103,6 +107,8 @@ struct Desktop<A> {
     keyboard: input::Keyboard,
     pointer: pointer::Pointer,
     menu: menu::Menu,
+    #[cfg(windows)]
+    native_menu: Option<native_menu::NativeMenu>,
     menu_keys: HashSet<PhysicalKey>,
     error: Option<Box<dyn Error>>,
 }
@@ -123,6 +129,11 @@ impl<A: App> Desktop<A> {
                 )?,
             ),
         };
+        #[cfg(windows)]
+        if self.native_menu.is_none() {
+            self.native_menu = native_menu::NativeMenu::new(Arc::clone(&window)).ok();
+            self.sync_native_menu(&window);
+        }
         self.renderer = Some(pollster::block_on(Renderer::new(
             Arc::clone(&window),
             event_loop.owned_display_handle(),
@@ -191,6 +202,7 @@ impl<A: App> Desktop<A> {
                 }
             }
             Some(menu::Command::Fullscreen) => {
+                self.menu.close();
                 window.set_fullscreen(if window.fullscreen().is_some() {
                     None
                 } else {
@@ -203,8 +215,33 @@ impl<A: App> Desktop<A> {
         window.request_redraw();
     }
 
+    fn uses_compact_menu(&self, _window: &Window) -> bool {
+        #[cfg(windows)]
+        {
+            self.native_menu.is_none() || _window.fullscreen().is_some()
+        }
+        #[cfg(not(windows))]
+        {
+            true
+        }
+    }
+
+    #[cfg(windows)]
+    fn sync_native_menu(&mut self, window: &Window) {
+        if let Some(native) = &mut self.native_menu
+            && native
+                .sync(&self.app.menu(), window.fullscreen().is_some())
+                .is_err()
+        {
+            self.native_menu = None;
+        }
+    }
+
     fn sync_pointer(&mut self, window: &Window, blocked: bool) {
-        let blocked = blocked || self.menu.blocks_pointer() && self.app.menu().enabled;
+        let blocked = blocked
+            || self.uses_compact_menu(window)
+                && self.menu.blocks_pointer()
+                && self.app.menu().enabled;
         let mode = if blocked {
             PointerMode::Host
         } else {
@@ -306,7 +343,12 @@ impl<A: App> ApplicationHandler for Desktop<A> {
                     let input = self.keyboard.translate(event);
                     let state = self.app.menu();
                     let (handled, command) = if state.enabled {
-                        self.menu.key(&input, &state, window.fullscreen().is_some())
+                        self.menu.key(
+                            &input,
+                            &state,
+                            window.fullscreen().is_some(),
+                            self.uses_compact_menu(&window),
+                        )
                     } else {
                         (false, None)
                     };
@@ -334,7 +376,7 @@ impl<A: App> ApplicationHandler for Desktop<A> {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let menu_state = self.app.menu();
-                let (handled, command) = if menu_state.enabled {
+                let (handled, command) = if menu_state.enabled && self.uses_compact_menu(&window) {
                     self.menu.mouse(
                         state.is_pressed(),
                         button == MouseButton::Left,
@@ -365,22 +407,27 @@ impl<A: App> ApplicationHandler for Desktop<A> {
                 }
             }
             WindowEvent::RedrawRequested => {
+                let compact = self.uses_compact_menu(&window);
                 if let Some(renderer) = &mut self.renderer {
                     let state = self.app.menu();
-                    let overlay = state.enabled.then(|| {
-                        self.menu.paint(
-                            window.inner_size(),
-                            window.scale_factor(),
-                            &state,
-                            window.fullscreen().is_some(),
-                        )
-                    });
+                    let header = state.enabled && compact;
+                    let overlay =
+                        (header || state.enabled && !state.inspection.is_empty()).then(|| {
+                            self.menu.paint(
+                                window.inner_size(),
+                                window.scale_factor(),
+                                &state,
+                                window.fullscreen().is_some(),
+                                header,
+                            )
+                        });
                     if let Err(error) = renderer.draw(
                         &window,
                         self.app.frame(),
                         self.app.display_aspect(),
                         state.scaling,
                         overlay,
+                        header,
                     ) {
                         self.fail(event_loop, error);
                     }
@@ -400,6 +447,12 @@ impl<A: App> ApplicationHandler for Desktop<A> {
             return;
         }
 
+        #[cfg(windows)]
+        if let Some(native) = &mut self.native_menu {
+            for command in native.take_commands() {
+                self.use_menu_command(&window, Some(command));
+            }
+        }
         let now = Instant::now();
         if now >= self.next_tick {
             self.app.tick();
@@ -419,6 +472,8 @@ impl<A: App> ApplicationHandler for Desktop<A> {
                     audio.push(samples, menu.audio_gain());
                 }
             }
+            #[cfg(windows)]
+            self.sync_native_menu(&window);
             self.sync_pointer(&window, false);
             if self.app.should_exit() {
                 event_loop.exit();
