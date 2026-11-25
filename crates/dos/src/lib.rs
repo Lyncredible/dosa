@@ -4,6 +4,7 @@ mod adlib;
 mod audio;
 mod bios;
 mod boot_disk;
+mod clock;
 mod dma;
 mod environment;
 mod files;
@@ -23,6 +24,9 @@ mod video;
 /// Sample rate of the mono PCM samples produced by [Machine::take_audio].
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
 
+/// Major and minor version advertised by the DOS services.
+pub const DOS_VERSION: [u8; 2] = [5, 0];
+
 #[cfg(test)]
 mod tests;
 
@@ -31,6 +35,7 @@ pub use video::{TextFrame, Video};
 
 use bios::{Hook, TIMER_VECTOR};
 pub use boot_disk::BootDrive;
+pub use clock::DosClock;
 use dosa_cpu::{Cpu, CpuError, Step};
 pub use dosa_cpu::{CpuProfile, Registers};
 use dosa_mount::{Mount, MountError};

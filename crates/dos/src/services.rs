@@ -1,6 +1,6 @@
 use crate::{CONVENTIONAL_END, DosError, Machine, PSP, Pending, PendingCall, RunState, ZERO};
+use crate::{DOS_VERSION, DosClock};
 use dosa_mount::Entry;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 impl Machine {
     pub(crate) fn interrupt(&mut self, vector: u8) -> Result<(), DosError> {
@@ -209,31 +209,27 @@ impl Machine {
                 self.cpu.write_u16(0, vector + 2, ds);
             }
             0x2a => {
-                let days = elapsed().as_secs() / 86_400;
-                let (year, month, day) = civil_date(days);
+                let (year, month, day, weekday) = DosClock::now().date();
                 self.cpu.regs.cx = year;
                 self.cpu.regs.dx = u16::from_le_bytes([day, month]);
-                self.set_al(((days + 4) % 7) as u8);
+                self.set_al(weekday);
             }
             0x2c => {
-                let time = elapsed();
-                let seconds = time.as_secs() % 86_400;
-                self.cpu.regs.cx =
-                    u16::from_le_bytes([(seconds / 60 % 60) as u8, (seconds / 3600) as u8]);
-                self.cpu.regs.dx =
-                    u16::from_le_bytes([(time.subsec_millis() / 10) as u8, (seconds % 60) as u8]);
+                let (hour, minute, second, hundredths) = DosClock::now().time();
+                self.cpu.regs.cx = u16::from_le_bytes([minute, hour]);
+                self.cpu.regs.dx = u16::from_le_bytes([hundredths, second]);
             }
             0x2f => {
                 self.cpu.regs.es = self.dta.0;
                 self.cpu.regs.bx = self.dta.1;
             }
             0x30 => {
-                self.cpu.regs.ax = 5;
+                self.cpu.regs.ax = u16::from_le_bytes(DOS_VERSION);
                 self.cpu.regs.bx = 0xff00;
                 self.cpu.regs.cx = 0;
             }
             0x33 if al == 6 => {
-                self.cpu.regs.bx = 5;
+                self.cpu.regs.bx = u16::from_le_bytes(DOS_VERSION);
                 self.cpu.regs.dx = 0;
             }
             0x33 => self.cpu.regs.dx &= 0xff00,
@@ -533,45 +529,4 @@ impl Machine {
 
 fn drive_letter(number: u8) -> Option<char> {
     (number < 26).then(|| char::from(b'A' + number))
-}
-
-fn elapsed() -> std::time::Duration {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-}
-
-fn civil_date(mut days: u64) -> (u16, u8, u8) {
-    let leap = |year| year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let mut year = 1970 + (days / 146_097 * 400) as u16;
-    days %= 146_097;
-    loop {
-        let count = if leap(year) { 366 } else { 365 };
-        if days < count {
-            break;
-        }
-        days -= count;
-        year += 1;
-    }
-    let months = [
-        31,
-        if leap(year) { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    for (month, count) in months.into_iter().enumerate() {
-        if days < count {
-            return (year, month as u8 + 1, days as u8 + 1);
-        }
-        days -= count;
-    }
-    unreachable!()
 }

@@ -7,6 +7,7 @@ use dosa_mount::Mount;
 
 mod batch;
 mod directory;
+mod prompt;
 mod rename;
 mod search_path;
 
@@ -84,11 +85,6 @@ impl Shell {
             self.drive = self.directories.keys().next().copied().unwrap_or('C');
         }
         Ok(())
-    }
-
-    pub fn prompt(&self) -> String {
-        let directory = self.directories.get(&self.drive).map_or("", String::as_str);
-        format!("{}:\\{directory}> ", self.drive)
     }
 
     pub fn current_drive(&self) -> char {
@@ -171,6 +167,9 @@ impl Shell {
         if word.eq_ignore_ascii_case("SET") {
             return self.set_variable(args);
         }
+        if word.eq_ignore_ascii_case("PROMPT") {
+            return self.set_prompt(args);
+        }
         if let Some(path) = line.trim_start().get(4..)
             && word
                 .get(..4)
@@ -196,6 +195,7 @@ impl Shell {
             "HELP" if args.eq_ignore_ascii_case("MOUNT") => MOUNT_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("SET") => SET_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("PATH") => search_path::HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("PROMPT") => prompt::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("MD") || args.eq_ignore_ascii_case("MKDIR") => {
                 MKDIR_HELP.as_bytes().to_vec()
             }
@@ -213,6 +213,7 @@ impl Shell {
                 TYPE file                  Print a file\r\n\
                 SET [variable=[value]]     Display or change environment variables\r\n\
                 PATH [directories]         Set the executable search path\r\n\
+                PROMPT [text]               Customize the DOS prompt\r\n\
                 MOUNT drive path           Mount host files or images (see HELP MOUNT)\r\n\
                 BOOT A|C path              Boot a floppy or hard disk image\r\n\
                 C:                         Switch drives\r\n\
@@ -223,8 +224,7 @@ impl Shell {
             "DIR" => self.directory(args)?,
             "CD" | "CHDIR" => {
                 if args.is_empty() {
-                    let prompt = self.prompt();
-                    format!("{}\r\n", prompt.trim_end_matches("> ")).into_bytes()
+                    format!("{}\r\n", self.current_path()).into_bytes()
                 } else {
                     let (drive, path) = self.resolve(unquote(args))?;
                     if !path.is_empty() && !self.drive_mount(drive)?.metadata(&path)?.is_dir {
