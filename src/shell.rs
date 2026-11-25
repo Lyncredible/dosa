@@ -7,18 +7,18 @@ use dosa_mount::Mount;
 
 mod batch;
 mod condition;
-mod confirmation;
 mod copy;
 mod delete;
 mod directory;
 mod for_loop;
+mod pending_input;
 mod prompt;
 mod rename;
 mod search_path;
 
 use batch::Batch;
 pub use batch::{BatchStep, PAUSE_MESSAGE};
-use confirmation::Confirmation;
+use pending_input::PendingInput;
 
 const MOUNT_HELP: &str = "MOUNT drive [/ISO | /FAT | /RW | /SESSION] host-path\r\n\
     Files, directories, and ZIPs open read-only by default.\r\n\
@@ -36,7 +36,7 @@ pub enum Command {
     Launched,
     Clear,
     Pause,
-    Confirm(Vec<u8>),
+    WaitForInput(Vec<u8>),
     Prompt,
     Exit,
 }
@@ -46,7 +46,7 @@ pub struct Shell {
     drive: char,
     directories: BTreeMap<char, String>,
     batch: Option<Batch>,
-    confirmation: Option<Confirmation>,
+    pending_input: Option<PendingInput>,
     errorlevel: u8,
     quick_launch: Option<QuickLaunch>,
 }
@@ -70,14 +70,14 @@ impl Shell {
             drive: 'C',
             directories: BTreeMap::new(),
             batch: None,
-            confirmation: None,
+            pending_input: None,
             errorlevel: 0,
             quick_launch: None,
         }
     }
 
     pub fn mount(&mut self, drive: char, mount: Mount) -> Result<(), Box<dyn Error>> {
-        if self.confirmation_waiting() {
+        if self.input_waiting() {
             return Err(dosa_dos::DosError::Busy.into());
         }
         let drive = drive.to_ascii_uppercase();
@@ -91,7 +91,7 @@ impl Shell {
     }
 
     pub(crate) fn unmount(&mut self, drive: char) -> Result<(), dosa_dos::DosError> {
-        if self.confirmation_waiting() {
+        if self.input_waiting() {
             return Err(dosa_dos::DosError::Busy);
         }
         let drive = drive.to_ascii_uppercase();
@@ -104,7 +104,7 @@ impl Shell {
     }
 
     pub(crate) fn command_active(&self) -> bool {
-        self.batch_active() || self.confirmation_waiting()
+        self.batch_active() || self.input_waiting()
     }
 
     pub fn current_drive(&self) -> char {
@@ -113,7 +113,7 @@ impl Shell {
 
     pub(crate) fn reset(&mut self) -> Result<(), dosa_dos::DosError> {
         self.batch = None;
-        self.confirmation = None;
+        self.pending_input = None;
         self.errorlevel = 0;
         self.machine.reset();
         self.finish_quick_launch()?;
@@ -184,7 +184,7 @@ impl Shell {
     }
 
     pub fn execute(&mut self, line: &str) -> Result<Command, Box<dyn Error>> {
-        if self.confirmation_waiting() {
+        if self.input_waiting() {
             return Err(dosa_dos::DosError::Busy.into());
         }
         let (word, args) = split_word(line.trim_start())?;
@@ -206,9 +206,7 @@ impl Shell {
         if let Some((command, _)) = word.split_once('/')
             && command.eq_ignore_ascii_case("DIR")
         {
-            return self
-                .directory(&line.trim()[command.len()..])
-                .map(Command::Print);
+            return self.directory(&line.trim()[command.len()..]);
         }
         let output = match word.to_ascii_uppercase().as_str() {
             "" => return Ok(Command::Prompt),
@@ -261,7 +259,7 @@ impl Shell {
                 EXIT                       Close Dosa\r\n\
                 Enter a COM, EXE, or BAT name and arguments to run it.\r\n"
                 .to_vec(),
-            "DIR" => self.directory(args)?,
+            "DIR" => return self.directory(args),
             "CD" | "CHDIR" => {
                 if args.is_empty() {
                     format!("{}\r\n", self.current_path()).into_bytes()

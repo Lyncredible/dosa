@@ -4,7 +4,7 @@ use std::error::Error;
 use dosa_dos::matches_dos_pattern;
 use dosa_mount::{MountError, WritableFile, WriteDisposition};
 
-use super::{Command, Confirmation, Shell, rename::destination_name, split_word};
+use super::{Command, PendingInput, Shell, rename::destination_name, split_word};
 
 const USAGE: &str = "usage: COPY [/Y|/-Y] [/A|/B] source [+ source ...] [destination] [/V]";
 pub(super) const HELP: &str = "COPY [/Y|/-Y] [/A|/B] source [+ source ...] [destination] [/V]\r\n\
@@ -299,8 +299,8 @@ impl CopyOperation {
                     format!("Overwrite {}:\\{} (Y/N)? ", self.drive, job.path).as_bytes(),
                 );
                 self.pending = existing;
-                shell.confirmation = Some(Confirmation::Copy(self));
-                return Ok(Command::Confirm(output));
+                shell.pending_input = Some(PendingInput::Copy(self));
+                return Ok(Command::WaitForInput(output));
             }
             let job = self.jobs.pop_front().expect("a copy job is available");
             self.write(shell, job, existing, &mut output)?;

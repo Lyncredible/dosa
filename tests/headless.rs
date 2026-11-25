@@ -702,6 +702,66 @@ fn dir_formats_wide_bare_and_lowercase_listings() {
 }
 
 #[test]
+fn dir_p_pages_at_the_selected_text_height_and_can_be_cancelled() {
+    use std::process::Stdio;
+
+    let fixture = Fixture::new();
+    for index in 0..52 {
+        fs::write(fixture.0.join(format!("F{index:02}.TXT")), b"x").unwrap();
+    }
+    fs::write(
+        fixture.0.join("PAGES.BAT"),
+        b"@echo off\r\nset DIRCMD=/P\r\ndir /b f*.txt\r\necho after\r\n",
+    )
+    .unwrap();
+    let mount = format!("C={}", fixture.0.display());
+    let run = |rows: &str, command: &str, answers: &[u8]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([
+                "--headless",
+                "--mount",
+                &mount,
+                "--text-rows",
+                rows,
+                "--exec",
+                command,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(answers).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let prompt = "Press any key to continue . . .";
+    for (rows, first_last_file, responses) in
+        [("25", "F23.TXT", &b"xy"[..]), ("50", "F48.TXT", &b"x"[..])]
+    {
+        let output = run(rows, "DIR /B/P F*.TXT", responses);
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(stdout.matches(prompt).count(), responses.len());
+        assert!(
+            stdout
+                .split(prompt)
+                .next()
+                .unwrap()
+                .ends_with(&format!("{first_last_file}\r\n"))
+        );
+        assert!(stdout.ends_with("F51.TXT\r\n"), "{stdout}");
+    }
+    let cancelled = run("25", "PAGES", b"\x1b");
+    assert!(cancelled.status.success(), "{cancelled:?}");
+    let text = String::from_utf8(cancelled.stdout).unwrap();
+    assert!(text.ends_with(&format!("{prompt}\r\nafter\r\n")));
+    assert!(!text.contains("F24.TXT"));
+    let eof = run("25", "DIR /B/P F*.TXT", b"");
+    assert!(!eof.status.success());
+    assert!(String::from_utf8_lossy(&eof.stderr).contains("DIR /P needs a key"));
+}
+
+#[test]
 fn dir_searches_all_subdirectories_and_applies_sorting_and_dircmd() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.0.join("DATA/NESTED")).unwrap();
