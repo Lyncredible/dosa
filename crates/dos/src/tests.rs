@@ -32,6 +32,54 @@ impl Directory {
 }
 
 #[test]
+fn guest_joystick_reads_port_and_bios_with_one_or_no_controllers() {
+    let directory = Directory::new("joystick");
+    directory.write(
+        "JOYCHECK.COM",
+        &[
+            0xba, 1, 2, 0xec, 0xa2, 0, 2, // IN AL,DX; store settled port
+            0xb8, 0, 0x84, 0x31, 0xd2, 0xcd, 0x15, // BIOS buttons
+            0xa3, 2, 2, 0x9c, 0x8f, 6, 0x0c, 2, // Save AX and flags
+            0xb8, 0, 0x84, 0xba, 1, 0, 0xcd, 0x15, // BIOS axes
+            0xa3, 4, 2, 0x89, 0x1e, 6, 2, 0x89, 0x0e, 8, 2, 0x89, 0x16, 0x0a, 2, 0x9c, 0x8f, 6,
+            0x0e, 2, // Save flags
+            0xb8, 0, 0x4c, 0xcd, 0x21,
+        ],
+    );
+    let mut machine = directory.machine();
+    let read = |machine: &mut Machine| {
+        machine.launch('C', "JOYCHECK.COM", "").unwrap();
+        assert_eq!(machine.run(100).unwrap(), RunState::Exited(0));
+        std::array::from_fn::<_, 8, _>(|offset| {
+            machine
+                .cpu
+                .read_u16(machine.cpu.regs.ds, 0x200 + 2 * offset as u16)
+        })
+    };
+    let disconnected = read(&mut machine);
+    assert_eq!(disconnected[0] as u8, 0xff);
+    assert_eq!(disconnected[1], 0xf0);
+    assert_eq!(&disconnected[2..6], &[0, 0, 0, 0]);
+    assert_eq!(disconnected[6] & crate::CARRY, 1);
+    assert_eq!(disconnected[7] & crate::CARRY, 1);
+
+    machine.set_joystick(
+        1,
+        Some(crate::JoystickState {
+            x: 41,
+            y: 203,
+            buttons: [true, false],
+        }),
+    );
+    let connected = read(&mut machine);
+    assert_eq!(connected[0] as u8, 0xb3);
+    assert_eq!(connected[1] as u8, 0xb0);
+    assert_eq!(&connected[2..6], &[0, 0, 41, 203]);
+    assert_eq!(connected[6] & crate::CARRY, 0);
+    assert_eq!(connected[7] & crate::CARRY, 0);
+}
+
+#[test]
 fn guest_display_detection_agrees_with_bios_equipment_word() {
     let directory = Directory::new("equipment-word");
     directory.write(
