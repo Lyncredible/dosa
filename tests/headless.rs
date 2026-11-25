@@ -150,6 +150,69 @@ fn rename_handles_dos_wildcards_without_overwriting_files() {
 }
 
 #[test]
+fn copy_con_reads_edited_lines_and_prints_files() {
+    use std::process::Stdio;
+
+    let fixture = Fixture::new();
+    let mount = format!("C={}", fixture.0.display());
+    fs::write(fixture.0.join("STREAM.DAT"), b"visible\r\n\x1ahidden").unwrap();
+    fs::write(
+        fixture.0.join("RUN.BAT"),
+        b"@echo off\r\ncopy con BATCH.TXT\r\necho done\r\n",
+    )
+    .unwrap();
+    let run = |command: &str, input: &[u8]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args(["--headless", "--mount-rw", &mount, "--exec", command])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    let typed = run("COPY /V CON OUT.TXT", b"one\r\nx\x08two\n\x1a\n");
+    assert!(typed.status.success(), "{typed:?}");
+    assert!(typed.stdout.ends_with(b"^Z\r\n1 file(s) copied.\r\n"));
+    assert_eq!(
+        fs::read(fixture.0.join("OUT.TXT")).unwrap(),
+        b"one\r\ntwo\r\n"
+    );
+
+    let decline = run("COPY /-Y CON OUT.TXT", b"n");
+    assert!(decline.status.success(), "{decline:?}");
+    assert!(decline.stdout.ends_with(b"N\r\n0 file(s) copied.\r\n"));
+    let cancel = run("COPY /-Y CON OUT.TXT", b"ypartial\x03");
+    assert!(!cancel.status.success(), "{cancel:?}");
+    assert!(cancel.stdout.ends_with(b"^C\r\n"));
+    assert_eq!(
+        fs::read(fixture.0.join("OUT.TXT")).unwrap(),
+        b"one\r\ntwo\r\n"
+    );
+
+    let batch = run("RUN", b"batch\x1a\r\n");
+    assert!(batch.status.success(), "{batch:?}");
+    assert!(batch.stdout.ends_with(b"done\r\n"));
+    assert_eq!(fs::read(fixture.0.join("BATCH.TXT")).unwrap(), b"batch");
+
+    let combined = run("COPY CON+CON PAIR.TXT", b"first\x1a\r\nsecond\x1a\r\n");
+    assert!(combined.status.success(), "{combined:?}");
+    assert_eq!(
+        fs::read(fixture.0.join("PAIR.TXT")).unwrap(),
+        b"firstsecond"
+    );
+
+    let text = run("COPY STREAM.DAT CON", b"");
+    assert!(text.status.success(), "{text:?}");
+    assert_eq!(text.stdout, b"visible\r\n1 file(s) copied.\r\n");
+    let binary = run("COPY STREAM.DAT CON /B", b"");
+    assert!(binary.status.success(), "{binary:?}");
+    assert_eq!(binary.stdout, b"visible\r\n\x1ahidden1 file(s) copied.\r\n");
+}
+
+#[test]
 fn copy_accepts_null_sources_and_destinations() {
     let fixture = Fixture::new();
     let writable = fixture.0.join("writable");

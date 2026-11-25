@@ -9,6 +9,7 @@ use super::{Command, PendingInput, Shell, rename::destination_name, split_word};
 const USAGE: &str = "usage: COPY [/Y|/-Y] [/A|/B] source [+ source ...] [destination] [/V]";
 pub(super) const HELP: &str = "COPY [/Y|/-Y] [/A|/B] source [+ source ...] [destination] [/V]\r\n\
     Copy files or combine sources. Use /A for text and /B for binary data.\r\n\
+    CON copies from the keyboard or to the screen. End keyboard input with Ctrl+Z or F6, then Enter.\r\n\
     NUL supplies empty input or discards output.\r\n\
     /Y skips overwrite prompts, /-Y forces them, and /V verifies the write.\r\n";
 
@@ -100,9 +101,26 @@ impl<'a> Request<'a> {
 }
 
 struct Source {
-    file: Option<SourceFile>,
+    data: SourceData,
     name: String,
     mode: Option<Mode>,
+}
+
+enum SourceData {
+    File(SourceFile),
+    Null,
+    ConsolePending,
+    Console(Vec<u8>),
+}
+
+impl SourceData {
+    fn device(&self) -> Option<DosDevice> {
+        match self {
+            Self::File(_) => None,
+            Self::Null => Some(DosDevice::Null),
+            Self::ConsolePending | Self::Console(_) => Some(DosDevice::Console),
+        }
+    }
 }
 
 struct SourceFile {
@@ -114,12 +132,30 @@ struct SourceFile {
 #[derive(Clone, Copy)]
 enum Destination {
     Mounted(char),
-    Null,
+    Device(DosDevice),
 }
 
 struct Job {
     inputs: Vec<Source>,
     path: String,
+}
+
+impl Job {
+    fn console_source(&self) -> Option<usize> {
+        self.inputs
+            .iter()
+            .position(|input| matches!(input.data, SourceData::ConsolePending))
+    }
+}
+
+pub(super) struct CopyText {
+    job: Job,
+    existing: Option<WritableFile>,
+    source: usize,
+    bytes: Vec<u8>,
+    remaining: usize,
+    line_length: usize,
+    eof: bool,
 }
 
 pub(super) struct CopyOperation {
@@ -166,31 +202,45 @@ impl Shell {
             .collect::<Result<Vec<_>, _>>()?;
         let first = &groups[0][0];
         let implicit_append = destination.is_none() && groups.len() > 1;
-        let explicit_null = destination
-            .map(|operand| self.null_copy_operand(operand.path))
-            .transpose()?
-            .unwrap_or(false);
-        if explicit_null || implicit_append && first.file.is_none() {
+        let device = if let Some(operand) = destination {
+            self.copy_device_operand(operand.path)?
+        } else if implicit_append {
+            first.data.device()
+        } else {
+            None
+        };
+        if let Some(device) = device {
+            if device == DosDevice::Console
+                && groups.len() == 1
+                && first.data.device() == Some(device)
+            {
+                return Err("File cannot be copied onto itself".into());
+            }
             return CopyOperation {
-                destination: Destination::Null,
+                destination: Destination::Device(device),
                 jobs: VecDeque::from([Job {
                     inputs: groups.into_iter().flatten().collect(),
-                    path: "NUL".into(),
+                    path: if device == DosDevice::Console {
+                        "CON"
+                    } else {
+                        "NUL"
+                    }
+                    .into(),
                 }]),
                 pending: None,
                 overwrite: true,
                 verify: false,
-                destination_mode: None,
-                default_ascii: false,
+                destination_mode: destination.and_then(|operand| operand.mode),
+                default_ascii: true,
                 copied: 0,
             }
             .advance(self, Vec::new());
         }
 
-        if destination.is_none() && first.file.is_none() {
-            return Err("Specify a destination when copying from NUL".into());
+        if destination.is_none() && first.data.device().is_some() {
+            return Err("Specify a destination when copying from a device".into());
         }
-        let (drive, dest) = if let (true, Some(file)) = (implicit_append, &first.file) {
+        let (drive, dest) = if let (true, SourceData::File(file)) = (implicit_append, &first.data) {
             (file.drive, in_directory(&file.parent, &first.name))
         } else {
             self.resolve(destination.map_or("", |item| item.path))?
@@ -267,23 +317,27 @@ impl Shell {
         .advance(self, Vec::new())
     }
 
-    fn null_copy_operand(&self, operand: &str) -> Result<bool, Box<dyn Error>> {
-        if DosDevice::named(operand) != Some(DosDevice::Null) {
-            return Ok(false);
-        }
+    fn copy_device_operand(&self, operand: &str) -> Result<Option<DosDevice>, Box<dyn Error>> {
+        let Some(device) = DosDevice::named(operand) else {
+            return Ok(None);
+        };
         let (drive, path) = self.resolve(operand)?;
         let (parent, _) = split_path(&path);
         if operand.contains(':') || !parent.is_empty() {
             self.drive_mount(drive)?.canonical_directory(parent)?;
         }
-        Ok(true)
+        Ok(Some(device))
     }
 
     fn copy_sources(&self, operand: Operand<'_>) -> Result<Vec<Source>, Box<dyn Error>> {
-        if self.null_copy_operand(operand.path)? {
+        if let Some(device) = self.copy_device_operand(operand.path)? {
+            let (data, name) = match device {
+                DosDevice::Console => (SourceData::ConsolePending, "CON"),
+                DosDevice::Null => (SourceData::Null, "NUL"),
+            };
             return Ok(vec![Source {
-                file: None,
-                name: "NUL".into(),
+                data,
+                name: name.into(),
                 mode: operand.mode,
             }]);
         }
@@ -315,7 +369,7 @@ impl Shell {
         Ok(entries
             .into_iter()
             .map(|entry| Source {
-                file: Some(SourceFile {
+                data: SourceData::File(SourceFile {
                     drive,
                     parent: parent.clone(),
                     host_name: entry.host_name,
@@ -327,6 +381,86 @@ impl Shell {
     }
 }
 
+impl CopyText {
+    fn new(job: Job, existing: Option<WritableFile>, source: usize) -> Self {
+        Self {
+            job,
+            existing,
+            source,
+            bytes: Vec::new(),
+            remaining: dosa_mount::MAX_FILE_BYTES as usize,
+            line_length: 0,
+            eof: false,
+        }
+    }
+
+    fn wait_for_key(self, copy: CopyOperation, shell: &mut Shell, echo: Vec<u8>) -> Command {
+        shell.pending_input = Some(PendingInput::CopyText(copy, self));
+        Command::WaitForInput(echo)
+    }
+
+    pub(super) fn key(
+        mut self,
+        mut copy: CopyOperation,
+        shell: &mut Shell,
+        key: u8,
+    ) -> Result<Command, Box<dyn Error>> {
+        let echo = match key {
+            3 => {
+                shell.errorlevel = 1;
+                return Ok(Command::Print(b"^C\r\n".to_vec()));
+            }
+            b'\r' | b'\n' if self.eof => {
+                let mut output = b"\r\n".to_vec();
+                let bytes = std::mem::take(&mut self.bytes);
+                self.remaining -= bytes.len();
+                self.job.inputs[self.source].data = SourceData::Console(bytes);
+                if let Some(source) = self.job.console_source() {
+                    self.source = source;
+                    self.line_length = 0;
+                    self.eof = false;
+                    return Ok(self.wait_for_key(copy, shell, output));
+                }
+                copy.write(shell, self.job, self.existing, &mut output)?;
+                return copy.advance(shell, output);
+            }
+            8 if self.eof => {
+                self.eof = false;
+                b"\x08 \x08\x08 \x08".to_vec()
+            }
+            8 if self.line_length > 0 => {
+                self.bytes.pop();
+                self.line_length -= 1;
+                b"\x08 \x08".to_vec()
+            }
+            0x1a if !self.eof => {
+                self.eof = true;
+                b"^Z".to_vec()
+            }
+            b'\r' | b'\n' => {
+                self.extend(b"\r\n")?;
+                self.line_length = 0;
+                b"\r\n".to_vec()
+            }
+            b'\t' | 32..=255 if !self.eof => {
+                self.extend(&[key])?;
+                self.line_length += 1;
+                vec![key]
+            }
+            _ => Vec::new(),
+        };
+        Ok(self.wait_for_key(copy, shell, echo))
+    }
+
+    fn extend(&mut self, bytes: &[u8]) -> Result<(), MountError> {
+        if bytes.len() > self.remaining - self.bytes.len() {
+            return Err(MountError::FileTooLarge);
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+}
+
 impl CopyOperation {
     fn advance(
         mut self,
@@ -334,29 +468,11 @@ impl CopyOperation {
         mut output: Vec<u8>,
     ) -> Result<Command, Box<dyn Error>> {
         while let Some(job) = self.jobs.front() {
-            let Destination::Mounted(drive) = self.destination else {
-                let job = self.jobs.pop_front().expect("a copy job is available");
-                self.write(shell, job, None, &mut output)?;
-                continue;
-            };
-            let mount = shell.drive_mount(drive)?;
-            let existing = match mount.metadata(&job.path) {
-                Ok(entry) => {
-                    let parent = split_path(&job.path).0;
-                    if job.inputs.len() == 1
-                        && job.inputs[0].file.as_ref().is_some_and(|source| {
-                            source.drive == drive && source.parent.eq_ignore_ascii_case(parent)
-                        })
-                        && job.inputs[0].name.eq_ignore_ascii_case(&entry.name)
-                    {
-                        return Err("File cannot be copied onto itself".into());
-                    }
-                    Some(mount.open_writable_file(&job.path, WriteDisposition::OpenExisting)?)
-                }
-                Err(error) if error.is_not_found() => None,
-                Err(error) => return Err(error.into()),
-            };
+            let existing = self.open_destination(shell, job)?;
             if existing.is_some() && !self.overwrite {
+                let Destination::Mounted(drive) = self.destination else {
+                    unreachable!("device targets do not have overwrite confirmation");
+                };
                 output.extend_from_slice(
                     format!("Overwrite {drive}:\\{} (Y/N)? ", job.path).as_bytes(),
                 );
@@ -365,10 +481,43 @@ impl CopyOperation {
                 return Ok(Command::WaitForInput(output));
             }
             let job = self.jobs.pop_front().expect("a copy job is available");
+            if let Some(source) = job.console_source() {
+                let input = CopyText::new(job, existing, source);
+                return Ok(input.wait_for_key(self, shell, output));
+            }
             self.write(shell, job, existing, &mut output)?;
         }
         output.extend_from_slice(format!("{} file(s) copied.\r\n", self.copied).as_bytes());
         Ok(Command::Print(output))
+    }
+
+    fn open_destination(
+        &self,
+        shell: &Shell,
+        job: &Job,
+    ) -> Result<Option<WritableFile>, Box<dyn Error>> {
+        let Destination::Mounted(drive) = self.destination else {
+            return Ok(None);
+        };
+        let mount = shell.drive_mount(drive)?;
+        match mount.metadata(&job.path) {
+            Ok(entry) => {
+                let parent = split_path(&job.path).0;
+                if job.inputs.len() == 1
+                    && matches!(&job.inputs[0].data, SourceData::File(source)
+                        if source.drive == drive && source.parent.eq_ignore_ascii_case(parent))
+                    && job.inputs[0].name.eq_ignore_ascii_case(&entry.name)
+                {
+                    return Err("File cannot be copied onto itself".into());
+                }
+                Ok(Some(mount.open_writable_file(
+                    &job.path,
+                    WriteDisposition::OpenExisting,
+                )?))
+            }
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub(super) fn confirm(
@@ -386,6 +535,10 @@ impl CopyOperation {
             .expect("a copy job is awaiting approval");
         let mut output = Vec::new();
         if approved {
+            if let Some(source) = job.console_source() {
+                let input = CopyText::new(job, Some(pending), source);
+                return Ok(input.wait_for_key(self, shell, output));
+            }
             self.write(shell, job, Some(pending), &mut output)?;
         }
         self.advance(shell, output)
@@ -402,28 +555,37 @@ impl CopyOperation {
         let mut data = Vec::new();
         let mut modified = shell.machine.adjusted_file_time();
         for source in job.inputs {
-            let Some(file) = source.file else {
-                continue;
+            let mut bytes = match source.data {
+                SourceData::Null => continue,
+                SourceData::ConsolePending => {
+                    unreachable!("console input must be collected before writing")
+                }
+                SourceData::Console(bytes) => bytes,
+                SourceData::File(file) => {
+                    let mount = shell.drive_mount(file.drive)?;
+                    let path = in_directory(&file.parent, &file.host_name);
+                    let entry = mount.metadata(&path)?;
+                    if entry.host_name != file.host_name {
+                        return Err(MountError::NotFound(path).into());
+                    }
+                    if !combining
+                        && !self.default_ascii
+                        && let Some(timestamp) = entry.modified
+                    {
+                        modified = Some(timestamp.to_system_time());
+                    }
+                    mount.read(&path)?
+                }
             };
-            let mount = shell.drive_mount(file.drive)?;
-            let path = in_directory(&file.parent, &file.host_name);
-            let entry = mount.metadata(&path)?;
-            if entry.host_name != file.host_name {
-                return Err(MountError::NotFound(path).into());
-            }
-            if !combining
-                && !self.default_ascii
-                && let Some(timestamp) = entry.modified
-            {
-                modified = Some(timestamp.to_system_time());
-            }
-            let mut bytes = mount.read(&path)?;
-            if matches!(self.destination, Destination::Null) {
+            if matches!(self.destination, Destination::Device(DosDevice::Null)) {
                 continue;
             }
+            let default_ascii = (combining || self.default_ascii)
+                && (!matches!(self.destination, Destination::Device(_))
+                    || self.destination_mode != Some(Mode::Binary));
             let ascii = source
                 .mode
-                .map_or(combining || self.default_ascii, |mode| mode == Mode::Ascii);
+                .map_or(default_ascii, |mode| mode == Mode::Ascii);
             if ascii && let Some(eof) = bytes.iter().position(|&byte| byte == 0x1a) {
                 bytes.truncate(eof);
             }
@@ -432,7 +594,9 @@ impl CopyOperation {
             }
             data.extend(bytes);
         }
-        if self.destination_mode == Some(Mode::Ascii) {
+        if matches!(self.destination, Destination::Mounted(_))
+            && self.destination_mode == Some(Mode::Ascii)
+        {
             if data.len() == dosa_mount::MAX_FILE_BYTES as usize {
                 return Err(MountError::FileTooLarge.into());
             }
@@ -456,8 +620,9 @@ impl CopyOperation {
                     output.extend_from_slice(format!("{drive}:\\{}\r\n", job.path).as_bytes());
                 }
             }
-            Destination::Null if trace => output.extend_from_slice(b"NUL\r\n"),
-            Destination::Null => {}
+            Destination::Device(DosDevice::Console) => output.extend(data),
+            Destination::Device(DosDevice::Null) if trace => output.extend_from_slice(b"NUL\r\n"),
+            Destination::Device(DosDevice::Null) => {}
         }
         self.copied += 1;
         Ok(())
