@@ -199,13 +199,11 @@ impl IsoImage {
                     .get(&key)
                     .is_none_or(|(existing, _)| version > *existing)
                 {
-                    entries.insert(
-                        key,
-                        (
-                            version,
-                            Child::new(Entry::new(name.into(), directory, extent.size), extent),
-                        ),
-                    );
+                    let mut entry = Entry::new(name.into(), directory, extent.size);
+                    if data[25] & 1 != 0 {
+                        entry.attributes |= super::attributes::HIDDEN;
+                    }
+                    entries.insert(key, (version, Child::new(entry, extent)));
                 }
                 if entries.len() > MAX_DIRECTORY_ENTRIES {
                     return Err(invalid("ISO 9660 directory entry limit exceeded"));

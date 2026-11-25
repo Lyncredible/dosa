@@ -1,4 +1,4 @@
-use dosa_mount::{Entry, Mount, MountError, WritableFile, WriteDisposition};
+use dosa_mount::{Entry, Mount, MountError, WritableFile, WriteDisposition, attributes};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -244,10 +244,7 @@ impl DosFiles {
     ) -> Result<u16, u16> {
         let (_, mount, path) = self.resolve_mount(mounts, name)?;
         let entry = mount.metadata(&path).map_err(mount_code)?;
-        Ok(u16::from(attributes(
-            &entry,
-            mount.is_readonly(&path).map_err(mount_code)?,
-        )))
+        Ok(u16::from(mount.dos_attributes(&entry)))
     }
 
     pub(crate) fn close(&mut self, handle: u16) -> Result<(), u16> {
@@ -350,35 +347,20 @@ impl DosFiles {
             .list(directory)
             .map_err(|_| 3u16)?
             .into_iter()
-            .filter(|entry| {
-                (!entry.is_dir || mask & 0x10 != 0)
-                    && mask & 0x08 == 0
-                    && matches_dos_pattern(&entry.name, name)
+            .filter_map(|entry| {
+                let special = attributes::DIRECTORY | attributes::HIDDEN | attributes::SYSTEM;
+                let flags = mount.dos_attributes(&entry);
+                (mask & u16::from(attributes::VOLUME_LABEL) == 0
+                    && flags & special & !(mask as u8) == 0
+                    && matches_dos_pattern(&entry.name, name))
+                .then_some((entry, flags))
             })
-            .map(|entry| {
-                let path = if directory.is_empty() {
-                    entry.name.clone()
-                } else {
-                    format!("{directory}\\{}", entry.name)
-                };
-                let readonly = mount.is_readonly(&path).map_err(mount_code)?;
-                let attributes = attributes(&entry, readonly);
-                Ok((entry, attributes))
-            })
-            .collect::<Result<_, u16>>()?;
+            .collect();
         self.next()
     }
 
     pub(crate) fn next(&mut self) -> Result<(Entry, u8), u16> {
         self.search.pop_front().ok_or(18)
-    }
-}
-
-fn attributes(entry: &Entry, read_only: bool) -> u8 {
-    if entry.is_dir {
-        0x10
-    } else {
-        0x20 | u8::from(read_only)
     }
 }
 

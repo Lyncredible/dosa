@@ -23,6 +23,16 @@ use zip_mount::ZipMount;
 pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DEPTH: usize = 64;
 
+/// Attribute bits used in a DOS directory entry.
+pub mod attributes {
+    pub const READ_ONLY: u8 = 0x01;
+    pub const HIDDEN: u8 = 0x02;
+    pub const SYSTEM: u8 = 0x04;
+    pub const VOLUME_LABEL: u8 = 0x08;
+    pub const DIRECTORY: u8 = 0x10;
+    pub const ARCHIVE: u8 = 0x20;
+}
+
 /// A directory entry as it appears from DOS.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Entry {
@@ -32,16 +42,43 @@ pub struct Entry {
     pub host_name: String,
     pub is_dir: bool,
     pub size: u64,
+    /// DOS attributes reported by the backing filesystem.
+    pub attributes: u8,
 }
 
 impl Entry {
     fn new(host_name: String, is_dir: bool, size: u64) -> Self {
+        let mut attributes = if is_dir {
+            attributes::DIRECTORY
+        } else {
+            attributes::ARCHIVE
+        };
+        if host_name.starts_with('.') {
+            attributes |= attributes::HIDDEN;
+        }
         Self {
             name: String::new(),
             host_name,
             is_dir,
             size,
+            attributes,
         }
+    }
+
+    fn from_host(name: String, metadata: &cap_std::fs::Metadata) -> Self {
+        let is_dir = metadata.is_dir();
+        let mut entry = Self::new(name, is_dir, if is_dir { 0 } else { metadata.len() });
+        if metadata.permissions().readonly() && !is_dir {
+            entry.attributes |= attributes::READ_ONLY;
+        }
+        #[cfg(windows)]
+        {
+            use cap_std::fs::MetadataExt;
+            let flags = metadata.file_attributes() as u8;
+            let host_bits = attributes::HIDDEN | attributes::SYSTEM | attributes::ARCHIVE;
+            entry.attributes = (entry.attributes & !attributes::ARCHIVE) | (flags & host_bits);
+        }
+        entry
     }
 
     fn root() -> Self {
@@ -201,6 +238,15 @@ impl Mount {
         Ok(Self { source })
     }
 
+    /// Apply the drive's effective write protection to an entry's DOS flags.
+    pub fn dos_attributes(&self, entry: &Entry) -> u8 {
+        if !entry.is_dir && !self.is_writable() {
+            entry.attributes | attributes::READ_ONLY
+        } else {
+            entry.attributes
+        }
+    }
+
     /// Return the DOS entries directly under a guest directory.
     pub fn list(&self, path: &str) -> Result<Vec<Entry>> {
         let components = guest_components(path)?;
@@ -354,8 +400,7 @@ fn host_children(dir: &Dir) -> Result<Vec<Child<()>>> {
         };
         let ty = metadata.file_type();
         if ty.is_file() || ty.is_dir() {
-            let size = if ty.is_dir() { 0 } else { metadata.len() };
-            children.push(Child::new(Entry::new(name, ty.is_dir(), size), ()));
+            children.push(Child::new(Entry::from_host(name, &metadata), ()));
         }
     }
     assign_aliases(&mut children);
