@@ -351,6 +351,35 @@ impl Desktop {
         }
     }
 
+    fn write_blocked_zip(&self) -> Option<char> {
+        self.shell.machine.denied_write_drive().filter(|&drive| {
+            self.shell
+                .machine
+                .drive(drive)
+                .is_some_and(Mount::is_read_only_zip)
+        })
+    }
+
+    fn use_writable_zip(&mut self, drive: char) -> Result<(), Box<dyn std::error::Error>> {
+        let copy = self
+            .shell
+            .machine
+            .drive(drive)
+            .ok_or(dosa_dos::DosError::UnmountedDrive(drive))?
+            .writable_zip_copy()?;
+        if self.running || self.shell.batch_active() {
+            // The menu explicitly stops the current command. Prepare the copy first
+            // so an extraction failure leaves the guest and original mount intact.
+            self.shell.machine.stop();
+            let _ = self
+                .shell
+                .guest_failed("guest stopped for a writable ZIP copy".into());
+            self.update_guest(Ok(RunState::Exited(3)));
+        }
+        self.shell.machine.mount(drive, copy)?;
+        Ok(())
+    }
+
     fn update_guest(&mut self, result: Result<RunState, dosa_dos::DosError>) {
         match result {
             Ok(state @ (RunState::Idle | RunState::Exited(_))) => {
@@ -509,9 +538,11 @@ impl App for Desktop {
     }
 
     fn menu(&self) -> MenuState {
+        let write_blocked_zip = self.write_blocked_zip();
         MenuState {
             enabled: true,
             active_drive: self.shell.current_drive(),
+            write_blocked_zip,
             drives: ('A'..='Z')
                 .filter_map(|letter| {
                     self.shell
@@ -533,7 +564,12 @@ impl App for Desktop {
             paste_pending: !self.paste.is_empty(),
             paused: self.paused,
             inspection: self.inspection(),
-            status: self.status.clone(),
+            status: match write_blocked_zip {
+                Some(drive) if self.status.is_empty() => {
+                    format!("{drive}: write denied. See Drives.")
+                }
+                _ => self.status.clone(),
+            },
         }
     }
 
@@ -547,6 +583,12 @@ impl App for Desktop {
                 }
             }
             MenuAction::StopPaste => self.paste.clear(),
+            MenuAction::UseWritableZip(drive) if self.write_blocked_zip() == Some(drive) => {
+                self.status = match self.use_writable_zip(drive) {
+                    Ok(()) => format!("{drive}: writable ZIP. Run the program again."),
+                    Err(error) => format!("ZIP copy failed: {error}"),
+                };
+            }
             MenuAction::QuickLaunch(path) if !self.running && !self.shell.batch_active() => {
                 match self.shell.quick_launch(&path) {
                     Ok(command) => {
@@ -1118,6 +1160,50 @@ mod tests {
         desktop.menu_action(MenuAction::SetTextMode(TextMode::WideRows50));
         desktop.tick();
         assert_eq!((desktop.frame().width, desktop.frame().height), (1056, 400));
+    }
+
+    #[test]
+    fn running_guest_can_recover_from_a_read_only_zip_write_denial() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("programs.zip");
+        let mut guest = vec![
+            0xb8, 0x13, 0, 0xcd, 0x10, // VGA mode 13h
+            0xba, 0x20, 1, 0xb8, 2, 0x3d, 0xcd, 0x21, // Open read/write
+            0x73, 2, 0xeb, 0xfe, // Stay on a black screen on carry
+            0xb8, 0, 0x4c, 0xcd, 0x21,
+        ];
+        guest.resize(0x20, 0);
+        guest.extend_from_slice(b"STATE.DAT\0");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("RUN.COM", options).unwrap();
+        zip.write_all(&guest).unwrap();
+        zip.start_file("STATE.DAT", options).unwrap();
+        zip.write_all(b"fixture").unwrap();
+        zip.finish().unwrap();
+        let original = std::fs::read(&path).unwrap();
+
+        let mut shell = Shell::new();
+        shell.mount('C', Mount::open(&path).unwrap()).unwrap();
+        let mut desktop = Desktop::new(shell, Some("run"));
+        desktop.tick();
+        assert!(desktop.guest_graphics_active());
+        assert_eq!(desktop.menu().write_blocked_zip, Some('C'));
+        assert_eq!(desktop.menu().status, "C: write denied. See Drives.");
+        desktop.menu_action(MenuAction::UseWritableZip('C'));
+        assert!(!desktop.menu().running);
+        assert_eq!(desktop.menu().write_blocked_zip, None);
+        assert_eq!(
+            desktop.menu().drives.get(&'C'),
+            Some(&"ZIP copy (session R/W)")
+        );
+        desktop.submit("run");
+        desktop.tick();
+        assert!(!desktop.menu().running);
+        assert_eq!(desktop.menu().write_blocked_zip, None);
+        assert_eq!(std::fs::read(path).unwrap(), original);
     }
 
     #[test]

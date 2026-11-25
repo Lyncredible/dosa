@@ -42,6 +42,8 @@ Create the host directory before mounting it. The guest can create, write, trunc
 
 **Drives → Mount ZIP** and `--mount-session C=programs.zip` put the archive's DOS 8.3 files in a temporary writable directory. Changes last until the mount is replaced or Dosa exits, and the source ZIP stays unchanged. Choose **Mount read-only ZIP** or `--mount C=programs.zip` for a read-only view.
 
+If a guest requests write access to a read-only ZIP, Dosa names the drive in the toolbar. Choose **Drives → Stop and use ZIP copy**, then run the guest again from the writable copy.
+
 Headless execution returns the program's DOS exit code. It reports an error if the guest needs keyboard input or reaches the instruction limit.
 
 ### Batch files

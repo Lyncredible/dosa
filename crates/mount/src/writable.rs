@@ -178,7 +178,16 @@ impl Mount {
 
     /// Mount a writable, temporary copy of the DOS-visible files in a ZIP archive.
     pub fn open_session_zip(path: impl AsRef<Path>) -> Result<Self> {
-        let Source::Zip(zip) = Self::open(path)?.source else {
+        Self::open(path)?.writable_zip_copy()
+    }
+
+    pub fn is_read_only_zip(&self) -> bool {
+        matches!(self.source, Source::Zip(_))
+    }
+
+    /// Copy an already-mounted ZIP into a writable session using its open archive.
+    pub fn writable_zip_copy(&self) -> Result<Self> {
+        let Source::Zip(zip) = &self.source else {
             return Err(MountError::ExpectedZip);
         };
         let session = tempfile::tempdir()?;

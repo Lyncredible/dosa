@@ -223,6 +223,11 @@ impl Machine {
         self.mounts.get(&drive.to_ascii_uppercase())
     }
 
+    /// Last drive that denied a guest write-open or create because of its mount mode.
+    pub fn denied_write_drive(&self) -> Option<char> {
+        self.files.denied_write_drive
+    }
+
     pub fn unmount(&mut self, drive: char) -> Result<(), DosError> {
         if self.state.is_active() {
             return Err(DosError::Busy);
