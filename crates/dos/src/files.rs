@@ -8,18 +8,21 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 
 const MAX_OPEN_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_HANDLES: u16 = 64;
 
 pub(crate) struct DosFiles {
     pub drive: char,
     pub(crate) denied_write_drive: Option<char>,
     directories: BTreeMap<char, String>,
-    handles: BTreeMap<u16, File>,
+    handles: BTreeMap<u16, u16>,
+    open_files: BTreeMap<u16, File>,
     search: VecDeque<(Entry, u8)>,
 }
 
 struct File {
     source: FileSource,
     position: usize,
+    device_info: u16,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -59,6 +62,7 @@ pub(crate) struct DeviceHandle {
 
 enum FileSource {
     Device(DeviceHandle),
+    UnavailableDevice,
     ReadOnly {
         contents: Vec<u8>,
         modified: Option<DosTimestamp>,
@@ -76,17 +80,31 @@ impl DosFiles {
     }
 
     pub(crate) fn with_directories(drive: char, directories: BTreeMap<char, String>) -> Self {
-        Self {
+        let mut files = Self {
             drive,
             denied_write_drive: None,
             directories,
             handles: BTreeMap::new(),
+            open_files: BTreeMap::new(),
             search: VecDeque::new(),
+        };
+        for (handle, info) in [(0, 0x81), (1, 0x82), (2, 0x82)] {
+            let source = FileSource::Device(DeviceHandle {
+                device: DosDevice::Console,
+                readable: handle == 0,
+                writable: handle != 0,
+            });
+            files.insert_handle(handle, source, info);
         }
+        for handle in [3, 4] {
+            files.insert_handle(handle, FileSource::UnavailableDevice, 0x80);
+        }
+        files
     }
 
     pub(crate) fn close_all(&mut self) {
         self.handles.clear();
+        self.open_files.clear();
         self.search.clear();
     }
 
@@ -194,7 +212,7 @@ impl DosFiles {
                 readable: access != 1,
                 writable: access != 0,
             });
-            return Ok(self.insert_handle(handle, source));
+            return Ok(self.insert_handle(handle, source, device.ioctl_info()));
         }
         let (drive, mount, path) = self.resolve_mount(mounts, name)?;
         let source = match access {
@@ -219,7 +237,7 @@ impl DosFiles {
             },
             _ => return Err(12),
         };
-        Ok(self.insert_handle(handle, source))
+        Ok(self.insert_handle(handle, source, u16::from(drive as u8 - b'A')))
     }
 
     pub(crate) fn create(
@@ -235,7 +253,7 @@ impl DosFiles {
                 readable: true,
                 writable: true,
             });
-            return Ok(self.insert_handle(handle, source));
+            return Ok(self.insert_handle(handle, source, device.ioctl_info()));
         }
         let (drive, mount, path) = self.resolve_mount(mounts, name)?;
         self.check_file_not_open_for_writing(mount, &path)?;
@@ -247,18 +265,31 @@ impl DosFiles {
             readable: true,
             writable: true,
         };
-        Ok(self.insert_handle(handle, source))
+        Ok(self.insert_handle(handle, source, u16::from(drive as u8 - b'A')))
     }
 
-    fn insert_handle(&mut self, handle: u16, source: FileSource) -> u16 {
-        self.handles.insert(
-            handle,
+    fn insert_handle(&mut self, handle: u16, source: FileSource, device_info: u16) -> u16 {
+        let slot = (0..MAX_HANDLES)
+            .find(|slot| !self.open_files.contains_key(slot))
+            .expect("an unused handle guarantees room for an open file");
+        self.open_files.insert(
+            slot,
             File {
                 source,
                 position: 0,
+                device_info,
             },
         );
+        self.handles.insert(handle, slot);
         handle
+    }
+
+    fn file(&self, handle: u16) -> Option<&File> {
+        self.open_files.get(self.handles.get(&handle)?)
+    }
+
+    fn file_mut(&mut self, handle: u16) -> Option<&mut File> {
+        self.open_files.get_mut(self.handles.get(&handle)?)
     }
 
     fn write_open_error(&mut self, drive: char, error: MountError) -> u16 {
@@ -290,15 +321,15 @@ impl DosFiles {
     }
 
     fn next_handle(&self) -> Result<u16, u16> {
-        (5..64)
+        (0..MAX_HANDLES)
             .find(|handle| !self.handles.contains_key(handle))
             .ok_or(4)
     }
 
     fn check_file_not_open_for_writing(&self, mount: &Mount, path: &str) -> Result<(), u16> {
-        if self.handles.values().any(|f| matches!(f.source, FileSource::Writable { .. }))
+        if self.open_files.values().any(|f| matches!(f.source, FileSource::Writable { .. }))
             && let Ok(target) = mount.open_writable_file(path, WriteDisposition::OpenExisting)
-            && self.handles.values().any(|open| {
+            && self.open_files.values().any(|open| {
                 matches!(&open.source, FileSource::Writable { file, .. } if file.same_target(&target))
             })
         {
@@ -310,13 +341,15 @@ impl DosFiles {
     fn read_file(&self, mount: &Mount, path: &str, size: u64) -> Result<Vec<u8>, u16> {
         let remaining = MAX_OPEN_BYTES
             - self
-                .handles
+                .open_files
                 .values()
                 .map(|f| match &f.source {
                     FileSource::ReadOnly {
                         contents: bytes, ..
                     } => bytes.len() as u64,
-                    FileSource::Device(_) | FileSource::Writable { .. } => 0,
+                    FileSource::Device(_)
+                    | FileSource::Writable { .. }
+                    | FileSource::UnavailableDevice => 0,
                 })
                 .sum::<u64>();
         if size > remaining {
@@ -340,13 +373,49 @@ impl DosFiles {
     }
 
     pub(crate) fn close(&mut self, handle: u16) -> Result<(), u16> {
-        self.handles.remove(&handle).map(|_| ()).ok_or(6)
+        let slot = self.handles.remove(&handle).ok_or(6u16)?;
+        if !self.handles.values().any(|&open| open == slot) {
+            self.open_files.remove(&slot);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn duplicate(&mut self, handle: u16) -> Result<u16, u16> {
+        let slot = *self.handles.get(&handle).ok_or(6u16)?;
+        let duplicate = self.next_handle()?;
+        self.handles.insert(duplicate, slot);
+        Ok(duplicate)
+    }
+
+    pub(crate) fn duplicate_to(&mut self, handle: u16, target: u16) -> Result<(), u16> {
+        let slot = *self.handles.get(&handle).ok_or(6u16)?;
+        if target >= MAX_HANDLES {
+            return Err(6);
+        }
+        if self.handles.get(&target) != Some(&slot) {
+            let _ = self.close(target);
+            self.handles.insert(target, slot);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn psp_handles(&self) -> [u8; 20] {
+        std::array::from_fn(|handle| {
+            self.handles
+                .get(&(handle as u16))
+                .map_or(0xff, |&slot| slot as u8)
+        })
+    }
+
+    pub(crate) fn ioctl_info(&self, handle: u16) -> Option<u16> {
+        Some(self.file(handle)?.device_info)
     }
 
     pub(crate) fn modified(&self, handle: u16) -> Result<DosTimestamp, u16> {
-        let file = self.handles.get(&handle).ok_or(6u16)?;
+        let file = self.file(handle).ok_or(6u16)?;
         let modified = match &file.source {
             FileSource::Device(_) => return Err(1),
+            FileSource::UnavailableDevice => return Err(6),
             FileSource::ReadOnly { modified, .. } => *modified,
             FileSource::Writable { file, .. } => file.modified().map_err(mount_code)?,
         };
@@ -354,16 +423,9 @@ impl DosFiles {
     }
 
     pub(crate) fn device(&self, handle: u16) -> Option<DeviceHandle> {
-        match handle {
-            0..=2 => Some(DeviceHandle {
-                device: DosDevice::Console,
-                readable: handle == 0,
-                writable: handle != 0,
-            }),
-            _ => match &self.handles.get(&handle)?.source {
-                FileSource::Device(channel) => Some(*channel),
-                _ => None,
-            },
+        match self.file(handle)?.source {
+            FileSource::Device(channel) => Some(channel),
+            _ => None,
         }
     }
 
@@ -372,19 +434,20 @@ impl DosFiles {
     }
 
     pub(crate) fn check_write_handle(&self, handle: u16) -> Result<(), u16> {
-        match self.handles.get(&handle).map(|file| &file.source) {
+        match self.file(handle).map(|file| &file.source) {
             Some(FileSource::Writable { writable: true, .. }) => Ok(()),
             Some(FileSource::Writable {
                 writable: false, ..
             }) => Err(5),
             Some(FileSource::ReadOnly { .. } | FileSource::Device(_)) => Err(5),
-            None => Err(6),
+            None | Some(FileSource::UnavailableDevice) => Err(6),
         }
     }
 
     pub(crate) fn read(&mut self, handle: u16, length: usize) -> Result<Cow<'_, [u8]>, u16> {
-        let file = self.handles.get_mut(&handle).ok_or(6u16)?;
+        let file = self.file_mut(handle).ok_or(6u16)?;
         let data = match &file.source {
+            FileSource::UnavailableDevice => return Err(6),
             FileSource::ReadOnly {
                 contents: bytes, ..
             } => Cow::Borrowed(read_slice(bytes, file.position, length)),
@@ -412,7 +475,7 @@ impl DosFiles {
         data: &[u8],
         write: FileWriteOptions,
     ) -> Result<(), u16> {
-        let file = self.handles.get_mut(&handle).ok_or(6u16)?;
+        let file = self.file_mut(handle).ok_or(6u16)?;
         let FileSource::Writable {
             file: destination,
             writable: true,
@@ -446,12 +509,17 @@ impl DosFiles {
         if self.device(handle).is_some() {
             return if origin <= 2 { Ok(0) } else { Err(1) };
         }
-        let file = self.handles.get_mut(&handle).ok_or(6u16)?;
+        let file = self.file_mut(handle).ok_or(6u16)?;
+        if matches!(file.source, FileSource::UnavailableDevice) {
+            return Err(6);
+        }
         let base = match origin {
             0 => 0,
             1 => file.position,
             2 => match &file.source {
-                FileSource::Device(_) => unreachable!("device handles cannot seek"),
+                FileSource::Device(_) | FileSource::UnavailableDevice => {
+                    unreachable!("device handles cannot seek")
+                }
                 FileSource::ReadOnly {
                     contents: bytes, ..
                 } => bytes.len(),

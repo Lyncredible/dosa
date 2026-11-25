@@ -345,6 +345,7 @@ impl Machine {
                 match result {
                     Ok(handle) => {
                         self.cpu.regs.ax = handle;
+                        self.sync_psp_handles();
                         self.success();
                     }
                     Err(code) => self.failure(code),
@@ -352,6 +353,9 @@ impl Machine {
             }
             0x3e => {
                 let result = self.files.close(bx);
+                if result.is_ok() {
+                    self.sync_psp_handles();
+                }
                 self.result(result);
             }
             0x3f => self.read_handle(bx, cx, ds, dx),
@@ -386,25 +390,13 @@ impl Machine {
                 }
             }
             0x43 => self.failure(5),
-            0x44 if al == 0 && bx <= 4 => {
-                self.cpu.regs.dx = match bx {
-                    0 => 0x81,
-                    1 | 2 => 0x82,
-                    _ => 0x80,
-                };
-                self.success();
-            }
-            0x44 if al == 0
-                && let Some(channel) = self.files.device(bx) =>
-            {
-                self.cpu.regs.dx = channel.device.ioctl_info();
-                self.success();
-            }
-            0x44 if al == 0 && self.files.is_open(bx) => {
-                self.cpu.regs.dx = u16::from(self.files.drive as u8 - b'A');
-                self.success();
-            }
-            0x44 if al == 0 => self.failure(6),
+            0x44 if al == 0 => match self.files.ioctl_info(bx) {
+                Some(info) => {
+                    self.cpu.regs.dx = info;
+                    self.success();
+                }
+                None => self.failure(6),
+            },
             0x44 if matches!(al, 6 | 7)
                 && let Some(channel) = self.files.device(bx) =>
             {
@@ -423,6 +415,21 @@ impl Machine {
                 self.success();
             }
             0x44 => self.failure(1),
+            0x45 => match self.files.duplicate(bx) {
+                Ok(handle) => {
+                    self.cpu.regs.ax = handle;
+                    self.sync_psp_handles();
+                    self.success();
+                }
+                Err(code) => self.failure(code),
+            },
+            0x46 => {
+                let result = self.files.duplicate_to(bx, cx);
+                if result.is_ok() {
+                    self.sync_psp_handles();
+                }
+                self.result(result);
+            }
             0x47 => {
                 let drive = if dl == 0 {
                     Some(self.files.drive)
@@ -495,6 +502,10 @@ impl Machine {
             0x68 => self.failure(6),
             _ => self.failure(1),
         }
+    }
+
+    fn sync_psp_handles(&mut self) {
+        self.cpu.load(PSP, 0x18, &self.files.psp_handles());
     }
 
     fn read_handle(&mut self, handle: u16, count: u16, segment: u16, offset: u16) {
