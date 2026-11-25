@@ -443,19 +443,19 @@ mod tests {
             2.0,
             true,
         );
-        assert_eq!(viewport, [180.0, 252.0, 960.0, 600.0]);
+        assert_eq!(viewport, [180.0, 236.0, 960.0, 600.0]);
         use crate::pointer::normalize;
         use winit::dpi::PhysicalPosition;
         assert_eq!(
-            normalize(PhysicalPosition::new(179.0, 252.0), viewport, false),
+            normalize(PhysicalPosition::new(179.0, 236.0), viewport, false),
             None
         );
         assert_eq!(
-            normalize(PhysicalPosition::new(180.0, 252.0), viewport, false),
+            normalize(PhysicalPosition::new(180.0, 236.0), viewport, false),
             Some((0, 0))
         );
         assert_eq!(
-            normalize(PhysicalPosition::new(1139.0, 851.0), viewport, false),
+            normalize(PhysicalPosition::new(1139.0, 835.0), viewport, false),
             Some((u16::MAX, u16::MAX))
         );
     }
