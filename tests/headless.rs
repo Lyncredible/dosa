@@ -150,6 +150,82 @@ fn rename_handles_dos_wildcards_without_overwriting_files() {
 }
 
 #[test]
+fn guest_duplicates_share_offsets_and_can_redirect_standard_output() {
+    let fixture = Fixture::new();
+    let mut code = Vec::new();
+    for (index, (setup, check, pass)) in [
+        (&[0xbb, 1, 0, 0xb4, 0x45][..], &[][..], 0x73), // save stdout
+        (
+            &[0x89, 0xc7, 0xba, 0, 3, 0x31, 0xc9, 0xb4, 0x3c][..],
+            &[][..],
+            0x73,
+        ), // create OUT.DAT
+        (&[0x89, 0xc6, 0x89, 0xf3, 0xb4, 0x45][..], &[][..], 0x73), // duplicate file
+        (
+            &[0x89, 0xc5, 0x89, 0xf3, 0xb9, 1, 0, 0xb4, 0x46][..],
+            &[][..],
+            0x73,
+        ), // redirect stdout
+        (&[0x89, 0xf3, 0xb4, 0x3e][..], &[][..], 0x73), // close original
+        (&[0xbb, 1, 0, 0xb8, 0, 0x44][..], &[0x83, 0xfa, 2][..], 0x74), // stdout is drive C
+        (
+            &[0xbb, 1, 0, 0xb9, 2, 0, 0xba, 8, 3, 0xb4, 0x40][..],
+            &[0x83, 0xf8, 2][..],
+            0x74,
+        ), // write AB via stdout
+        (
+            &[0x89, 0xeb, 0xb9, 2, 0, 0xba, 10, 3, 0xb4, 0x40][..],
+            &[0x83, 0xf8, 2][..],
+            0x74,
+        ), // append CD via duplicate
+        (
+            &[0xbb, 1, 0, 0x31, 0xc9, 0x31, 0xd2, 0xb8, 0, 0x42][..],
+            &[][..],
+            0x73,
+        ), // rewind stdout
+        (
+            &[0x89, 0xeb, 0xb9, 2, 0, 0xba, 0x20, 3, 0xb4, 0x3f][..],
+            &[0x81, 0x3e, 0x20, 3, b'A', b'B'][..],
+            0x74,
+        ), // read AB via duplicate
+        (
+            &[0xbb, 1, 0, 0xb9, 2, 0, 0xba, 0x20, 3, 0xb4, 0x3f][..],
+            &[0x81, 0x3e, 0x20, 3, b'C', b'D'][..],
+            0x74,
+        ), // read CD via stdout
+        (&[0x89, 0xfb, 0xb9, 1, 0, 0xb4, 0x46][..], &[][..], 0x73), // restore stdout
+        (&[0x89, 0xfb, 0xb4, 0x3e][..], &[][..], 0x73), // close saved handle
+        (
+            &[0xbb, 1, 0, 0xb9, 2, 0, 0xba, 12, 3, 0xb4, 0x40][..],
+            &[0x83, 0xf8, 2][..],
+            0x74,
+        ), // print OK
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        code.extend_from_slice(setup);
+        code.extend([0xcd, 0x21]);
+        code.extend_from_slice(check);
+        code.extend([pass, 5, 0xb8, index as u8 + 1, 0x4c, 0xcd, 0x21]);
+    }
+    code.extend([0xb8, 0, 0x4c, 0xcd, 0x21]);
+    assert!(code.len() <= 0x200);
+    code.resize(0x200, 0);
+    code.extend_from_slice(b"OUT.DAT\0ABCDOK");
+    fs::write(fixture.0.join("DUP.COM"), code).unwrap();
+
+    let mount = format!("C={}", fixture.0.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args(["--headless", "--mount-rw", &mount, "--exec", "DUP"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"OK");
+    assert_eq!(fs::read(fixture.0.join("OUT.DAT")).unwrap(), b"ABCD");
+}
+
+#[test]
 fn copy_con_reads_edited_lines_and_prints_files() {
     use std::process::Stdio;
 

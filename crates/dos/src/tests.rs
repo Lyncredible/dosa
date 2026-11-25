@@ -52,6 +52,35 @@ fn guest_display_detection_agrees_with_bios_equipment_word() {
 }
 
 #[test]
+fn dos_handle_table_closes_and_reuses_numbers_without_closing_aliases() {
+    let directory = Directory::new("handle-table");
+    directory.write("PROBE.COM", &[0xeb, 0xfe]);
+    let mut machine = directory.machine();
+    machine.launch('C', "PROBE.COM", "").unwrap();
+    let mut int21 = |ax, bx, cx| {
+        machine.cpu.regs.ax = ax;
+        machine.cpu.regs.bx = bx;
+        machine.cpu.regs.cx = cx;
+        machine.interrupt(0x21).unwrap();
+        machine.cpu.regs
+    };
+    let state = int21(0x4500, 0, 0);
+    assert_eq!((state.flags & 1, state.ax), (0, 5));
+    assert_eq!(int21(0x3e00, 0, 0).flags & 1, 0);
+    let unknown = int21(0x4600, 0, 5);
+    assert_eq!((unknown.flags & 1, unknown.ax), (1, 6));
+    let restored = int21(0x4500, 5, 0);
+    assert_eq!((restored.flags & 1, restored.ax), (0, 0));
+    assert_eq!(int21(0x4600, 0, 5).flags & 1, 0);
+    let invalid = int21(0x4600, 0, u16::MAX);
+    assert_eq!((invalid.flags & 1, invalid.ax), (1, 6));
+    assert_eq!(int21(0x3e00, 5, 0).flags & 1, 0);
+    assert_eq!(int21(0x4400, 0, 0).dx, 0x81);
+    assert_eq!(machine.cpu.read_u8(crate::PSP, 0x18), 0);
+    assert_eq!(machine.cpu.read_u8(crate::PSP, 0x1d), 0xff);
+}
+
+#[test]
 fn named_null_and_console_handles_support_file_services() {
     let directory = Directory::new("devices");
     directory.write("PROBE.COM", &[0xeb, 0xfe]); // wait in a guest loop
