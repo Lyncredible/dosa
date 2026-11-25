@@ -349,7 +349,7 @@ impl DosFiles {
             .filter(|entry| {
                 (!entry.is_dir || mask & 0x10 != 0)
                     && mask & 0x08 == 0
-                    && matches(&entry.name, name)
+                    && matches_dos_pattern(&entry.name, name)
             })
             .map(|entry| {
                 let path = if directory.is_empty() {
@@ -425,7 +425,8 @@ fn mount_code(error: MountError) -> u16 {
     }
 }
 
-fn matches(name: &str, pattern: &str) -> bool {
+/// Match the stem and extension of a DOS directory name against a search pattern.
+pub fn matches_dos_pattern(name: &str, pattern: &str) -> bool {
     let (stem, extension) = name.split_once('.').unwrap_or((name, ""));
     let (stem_pattern, extension_pattern) = pattern
         .split_once('.')

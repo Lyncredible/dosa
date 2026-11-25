@@ -3,9 +3,10 @@ use std::error::Error;
 use std::path::Path;
 
 use dosa_dos::Machine;
-use dosa_mount::{Entry, Mount};
+use dosa_mount::Mount;
 
 mod batch;
+mod directory;
 
 use batch::Batch;
 pub use batch::BatchStep;
@@ -154,13 +155,20 @@ impl Shell {
 
     pub fn execute(&mut self, line: &str) -> Result<Command, Box<dyn Error>> {
         let (word, args) = split_word(line.trim())?;
+        if let Some((command, _)) = word.split_once('/')
+            && command.eq_ignore_ascii_case("DIR")
+        {
+            return self
+                .directory(&line.trim()[command.len()..])
+                .map(Command::Print);
+        }
         let output = match word.to_ascii_uppercase().as_str() {
             "" => return Ok(Command::Prompt),
             "CLS" => return Ok(Command::Clear),
             "EXIT" => return Ok(Command::Exit),
             "ECHO" => format!("{args}\r\n").into_bytes(),
             "REM" => return Ok(Command::Prompt),
-            "HELP" => b"DIR [path]   List files\r\n\
+            "HELP" => b"DIR [path] [/W] [/B] [/L]   List files\r\n\
                 CD [path]    Show or change directory\r\n\
                 TYPE file    Print a file\r\n\
                 MOUNT C path Mount a host file, folder or ZIP\r\n\
@@ -171,29 +179,7 @@ impl Shell {
                 EXIT         Close dosa\r\n\
                 Enter a COM, EXE, or BAT name and arguments to run it.\r\n"
                 .to_vec(),
-            "DIR" => {
-                let (drive, path) = self.resolve(unquote(args))?;
-                let mount = self.drive_mount(drive)?;
-                let entries = match mount.list(&path) {
-                    Ok(entries) => entries,
-                    Err(error) => match mount.metadata(&path) {
-                        Ok(entry) if !entry.is_dir => vec![entry],
-                        _ => return Err(error.into()),
-                    },
-                };
-                let mut text = format!(" Directory of {drive}:\\{path}\r\n\r\n");
-                for Entry {
-                    name, is_dir, size, ..
-                } in entries
-                {
-                    if is_dir {
-                        text.push_str(&format!("{name:<14} <DIR>\r\n"));
-                    } else {
-                        text.push_str(&format!("{name:<14} {size:>8}\r\n"));
-                    }
-                }
-                text.into_bytes()
-            }
+            "DIR" => self.directory(args)?,
             "CD" | "CHDIR" => {
                 if args.is_empty() {
                     let prompt = self.prompt();

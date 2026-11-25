@@ -5,6 +5,7 @@ mod audio;
 mod bios;
 mod dma;
 mod files;
+pub use files::matches_dos_pattern;
 mod keyboard;
 mod loader;
 mod mouse;
