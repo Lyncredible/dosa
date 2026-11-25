@@ -93,6 +93,8 @@ Use `--ansi-text` or set `ansi_text = true` in a launch profile to display DOS t
 
 Use `--virtual-joystick` or `virtual_joystick = true` in a profile to attach a two-button joystick. While a guest is running, the arrow keys control its axes and the physical Z and X keys control its buttons. Headless mode presents a centered joystick. Use `--no-virtual-joystick` to override a saved setting.
 
+On Windows, Dosa automatically maps up to two XInput controllers to the DOS gameport. Use the left stick or D-pad for the axes and A/B for the triggers. If the keyboard joystick is enabled, it uses connector A and the first physical controller uses connector B.
+
 CPU profiles are `8086`, `286`, and `386`. Text modes have 80 or 132 columns and 25, 43, or 50 rows. Desktop execution speeds are `slow`, `normal`, `fast`, and `maximum` (`max` also works). Headless mode uses the same mounts, CPU, text rows, and command with its fixed instruction limit. Its command can come from `--exec` or the profile's `exec` field.
 
 ## Desktop controls
