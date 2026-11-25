@@ -60,6 +60,13 @@ pub(crate) struct DeviceHandle {
     pub(crate) writable: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum OutputTarget {
+    Console,
+    Null,
+    File(u16),
+}
+
 enum FileSource {
     Device(DeviceHandle),
     UnavailableDevice,
@@ -433,14 +440,15 @@ impl DosFiles {
         self.handles.contains_key(&handle)
     }
 
-    pub(crate) fn check_write_handle(&self, handle: u16) -> Result<(), u16> {
+    pub(crate) fn output_target(&self, handle: u16) -> Result<OutputTarget, u16> {
         match self.file(handle).map(|file| &file.source) {
-            Some(FileSource::Writable { writable: true, .. }) => Ok(()),
-            Some(FileSource::Writable {
-                writable: false, ..
-            }) => Err(5),
-            Some(FileSource::ReadOnly { .. } | FileSource::Device(_)) => Err(5),
-            None | Some(FileSource::UnavailableDevice) => Err(6),
+            Some(FileSource::Device(channel)) if channel.writable => Ok(match channel.device {
+                DosDevice::Console => OutputTarget::Console,
+                DosDevice::Null => OutputTarget::Null,
+            }),
+            Some(FileSource::Writable { writable: true, .. }) => Ok(OutputTarget::File(handle)),
+            Some(FileSource::UnavailableDevice) | None => Err(6),
+            _ => Err(5),
         }
     }
 

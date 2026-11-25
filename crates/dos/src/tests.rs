@@ -52,6 +52,48 @@ fn guest_display_detection_agrees_with_bios_equipment_word() {
 }
 
 #[test]
+fn dos_keyboard_echo_obeys_redirected_stdout() {
+    let directory = Directory::new("redirect-echo");
+    directory.write("ECHO.COM", &[0xeb, 0xfe]);
+    let mut machine = Machine::new();
+    machine
+        .mount(
+            'C',
+            Mount::open_writable_directory(directory.path()).unwrap(),
+        )
+        .unwrap();
+    machine.launch('C', "ECHO.COM", "").unwrap();
+    let handle = machine
+        .files
+        .create(&machine.mounts, "ECHO.DAT", None)
+        .unwrap();
+    machine.files.duplicate_to(handle, 1).unwrap();
+    machine.key(b'A', 0);
+    machine.cpu.regs.ax = 0x0100;
+    machine.interrupt(0x21).unwrap();
+    assert_eq!(machine.cpu.regs.ax as u8, b'A');
+
+    let segment = machine.cpu.regs.ds;
+    machine.cpu.write_u8(segment, 0x200, 8);
+    for key in [b'B', b'C', 8, b'D', b'\r'] {
+        machine.key(key, 0);
+    }
+    machine.cpu.regs.ax = 0x0a00;
+    machine.cpu.regs.dx = 0x200;
+    machine.interrupt(0x21).unwrap();
+    assert_eq!(machine.cpu.read_u8(segment, 0x201), 2);
+    assert_eq!(
+        machine.cpu.read_u16(segment, 0x202),
+        u16::from_le_bytes(*b"BD")
+    );
+    assert!(machine.take_output().is_empty());
+    assert_eq!(
+        fs::read(directory.path().join("ECHO.DAT")).unwrap(),
+        b"ABC\x08 \x08D\r\n"
+    );
+}
+
+#[test]
 fn dos_handle_table_closes_and_reuses_numbers_without_closing_aliases() {
     let directory = Directory::new("handle-table");
     directory.write("PROBE.COM", &[0xeb, 0xfe]);

@@ -150,6 +150,39 @@ fn rename_handles_dos_wildcards_without_overwriting_files() {
 }
 
 #[test]
+fn legacy_character_output_follows_redirected_stdout() {
+    let fixture = Fixture::new();
+    let mut program = vec![
+        0xba, 0, 2, 0x31, 0xc9, 0xb4, 0x3c, 0xcd, 0x21, // create LEGACY.DAT
+        0x73, 5, 0xb8, 1, 0x4c, 0xcd, 0x21, 0x89, 0xc3, 0xb9, 1, 0, 0xb4, 0x46, 0xcd,
+        0x21, // redirect stdout to file
+        0x73, 5, 0xb8, 2, 0x4c, 0xcd, 0x21, 0xb2, b'A', 0xb4, 0x02, 0xcd, 0x21, // AH=02h
+        0xb2, b'B', 0xb4, 0x06, 0xcd, 0x21, // AH=06h, output
+        0xba, 15, 2, 0xb4, 0x09, 0xcd, 0x21, // AH=09h, dollar-terminated
+        0xbb, 1, 0, 0xba, 1, 0, 0x31, 0xc9, 0xb8, 0, 0x42, 0xcd, 0x21, // seek into stdout
+        0xba, 17, 2, 0xb4, 0x09, 0xcd, 0x21, // empty string must not truncate the file
+        0xb0, b'X', 0xcd, 0x29, // unredirected fast console write
+        0xba, 11, 2, 0xb8, 1, 0x3d, 0xcd, 0x21, // open NUL for writing
+        0x73, 5, 0xb8, 3, 0x4c, 0xcd, 0x21, 0x89, 0xc3, 0xb9, 1, 0, 0xb4, 0x46, 0xcd,
+        0x21, // replace stdout with NUL
+        0x73, 5, 0xb8, 4, 0x4c, 0xcd, 0x21, 0xb2, b'Z', 0xb4, 0x02, 0xcd, 0x21, 0xba, 15, 2, 0xb4,
+        0x09, 0xcd, 0x21, 0xb0, b'Y', 0xcd, 0x29, 0xb8, 0, 0x4c, 0xcd, 0x21,
+    ];
+    program.resize(0x100, 0);
+    program.extend_from_slice(b"LEGACY.DAT\0NUL\0C\x9b$");
+    fs::write(fixture.0.join("CHAROUT.COM"), program).unwrap();
+
+    let mount = format!("C={}", fixture.0.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args(["--headless", "--mount-rw", &mount, "--exec", "CHAROUT"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"XY");
+    assert_eq!(fs::read(fixture.0.join("LEGACY.DAT")).unwrap(), b"ABC\x9b");
+}
+
+#[test]
 fn guest_duplicates_share_offsets_and_can_redirect_standard_output() {
     let fixture = Fixture::new();
     let mut code = Vec::new();
