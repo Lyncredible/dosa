@@ -1,5 +1,5 @@
-use crate::DOS_VERSION;
 use crate::{CONVENTIONAL_END, DosError, Machine, PSP, Pending, PendingCall, RunState, ZERO};
+use crate::{CodePage, DOS_VERSION};
 use dosa_mount::{Allocation, Entry};
 
 impl Machine {
@@ -489,6 +489,19 @@ impl Machine {
                 Err(code) => self.failure(code),
             },
             0x5a | 0x5b => self.failure(5),
+            0x66 if al == 1 => {
+                self.cpu.regs.bx = self.code_page().number();
+                self.cpu.regs.dx = CodePage::default().number();
+                self.success();
+            }
+            0x66 if al == 2 => {
+                if let Some(page) = CodePage::from_number(bx) {
+                    self.set_code_page(page);
+                    self.success();
+                } else {
+                    self.failure(2);
+                }
+            }
             // File writes are committed before returning from AH=40h.
             0x68 if self.files.is_open(bx) => self.success(),
             0x68 => self.failure(6),

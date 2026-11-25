@@ -896,6 +896,41 @@ fn date_and_time_share_the_guest_clock_and_reprompt_for_invalid_lines() {
 }
 
 #[test]
+fn chcp_shares_the_active_page_with_guest_programs_and_oem_batch_text() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.0.join("PAGE.COM"),
+        [
+            0xb8, 1, 0x66, 0xcd, 0x21, // Query active and system pages
+            0x73, 5, 0xb8, 1, 0x4c, 0xcd, 0x21, 0x81, 0xfb, 0x52, 3, 0x74, 5, 0xb8, 2, 0x4c, 0xcd,
+            0x21, // BX = 850
+            0x81, 0xfa, 0xb5, 1, 0x74, 5, 0xb8, 3, 0x4c, 0xcd, 0x21, // DX = 437
+            0xbb, 0, 0, 0xb8, 2, 0x66, 0xcd, 0x21, // Reject unprepared page
+            0x72, 5, 0xb8, 4, 0x4c, 0xcd, 0x21, 0xbb, 0xb5, 1, 0xb8, 2, 0x66, 0xcd,
+            0x21, // Switch back to 437
+            0x73, 5, 0xb8, 5, 0x4c, 0xcd, 0x21, 0xb8, 0, 0x4c, 0xcd, 0x21,
+        ],
+    )
+    .unwrap();
+    fs::write(fixture.0.join("OEM.BAT"), b"@echo \x9b\r\n").unwrap();
+    fs::write(
+        fixture.0.join("SETUP.BAT"),
+        b"@echo off\r\nchcp\r\nchcp 850\r\nchcp\r\ncall OEM.BAT\r\nPAGE\r\nif errorlevel 1 exit %errorlevel%\r\nchcp\r\n",
+    )
+    .unwrap();
+    let mount = format!("C={}", fixture.0.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args(["--headless", "--mount", &mount, "--exec", "SETUP"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        output.stdout,
+        b"Active code page: 437\r\nActive code page: 850\r\n\x9b\r\nActive code page: 437\r\n"
+    );
+}
+
+#[test]
 fn break_command_shares_the_guest_ctrl_c_setting() {
     let fixture = Fixture::new();
     fs::write(

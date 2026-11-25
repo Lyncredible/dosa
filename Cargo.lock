@@ -547,7 +547,6 @@ dependencies = [
  "dosa-dos",
  "dosa-mount",
  "fatfs",
- "font8x8",
  "png",
  "serde",
  "tempfile",

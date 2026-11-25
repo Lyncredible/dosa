@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::sync::LazyLock;
 use std::time::Instant;
 
 use dosa_desktop::{
@@ -8,20 +7,10 @@ use dosa_desktop::{
 };
 use dosa_dos::{CpuProfile, MouseCursor, RunState, TextFrame, Video};
 use dosa_mount::Mount;
-use font8x8::{
-    BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, LATIN_FONTS, MISC_FONTS, UnicodeFonts,
-};
 
 use crate::shell::{Command, PAUSE_MESSAGE, Shell};
 use crate::wav::Recording;
 
-const CP437_LOW: &str = "\0☺☻♥♦♣♠•◘○◙♂♀♪♫☼►◄↕‼¶§▬↨↑↓→←∟↔▲▼";
-const CP437_HIGH: &str = concat!(
-    "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒ",
-    "áíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐",
-    "└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀",
-    "αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ "
-);
 const VGA: [[u8; 3]; 16] = [
     [17, 20, 28],
     [65, 103, 193],
@@ -42,20 +31,6 @@ const VGA: [[u8; 3]; 16] = [
 ];
 const BATCH_LINES_PER_TICK: usize = 64;
 const MAX_PASTE_CHARS: usize = 4096;
-
-static GLYPHS: LazyLock<[[u8; 8]; 256]> = LazyLock::new(|| {
-    std::array::from_fn(|index| {
-        let character = decode_cp437(index as u8);
-        BASIC_FONTS
-            .get(character)
-            .or_else(|| LATIN_FONTS.get(character))
-            .or_else(|| BOX_FONTS.get(character))
-            .or_else(|| BLOCK_FONTS.get(character))
-            .or_else(|| GREEK_FONTS.get(character))
-            .or_else(|| MISC_FONTS.get(character))
-            .unwrap_or_else(|| BASIC_FONTS.get('?').unwrap())
-    })
-});
 
 pub struct Desktop {
     shell: Shell,
@@ -158,9 +133,12 @@ impl Desktop {
     }
 
     fn write_prompt(&mut self) {
-        self.shell
+        let prompt = self
+            .shell
             .machine
-            .write_console(self.shell.prompt().as_bytes());
+            .code_page()
+            .encode_text(&self.shell.prompt());
+        self.shell.machine.write_console(&prompt);
     }
 
     fn refresh_prompt(&mut self, previous: &str) {
@@ -172,7 +150,7 @@ impl Desktop {
 
     fn write_input_prompt(&mut self) {
         self.write_prompt();
-        let typed: Vec<_> = self.line.chars().map(encode_cp437).collect();
+        let typed = self.shell.machine.code_page().encode_text(&self.line);
         self.shell.machine.write_console(&typed);
     }
 
@@ -207,7 +185,8 @@ impl Desktop {
     fn paste_text(&mut self, text: &str) {
         let chars = paste_characters(text).take(MAX_PASTE_CHARS);
         if self.running {
-            self.paste = chars.map(encode_cp437).collect();
+            let page = self.shell.machine.code_page();
+            self.paste = chars.map(|character| page.encode(character)).collect();
         } else if !self.shell.command_active() {
             for character in chars {
                 let character = if matches!(character, '\r' | '\t') {
@@ -216,7 +195,8 @@ impl Desktop {
                     character
                 };
                 self.line.push(character);
-                self.shell.machine.write_console(&[encode_cp437(character)]);
+                let byte = self.shell.machine.code_page().encode(character);
+                self.shell.machine.write_console(&[byte]);
             }
         }
     }
@@ -261,7 +241,8 @@ impl Desktop {
             match self.shell.step_batch() {
                 Ok(Some(step)) => {
                     if let Some(echo) = step.echo {
-                        self.shell.machine.write_console(echo.as_bytes());
+                        let echo = self.shell.machine.code_page().encode_text(&echo);
+                        self.shell.machine.write_console(&echo);
                     }
                     self.apply_command(Ok(step.command));
                 }
@@ -330,7 +311,8 @@ impl Desktop {
         self.shell.machine.clear_console();
         self.write_prompt();
         for character in self.line.chars() {
-            self.shell.machine.write_console(&[encode_cp437(character)]);
+            let byte = self.shell.machine.code_page().encode(character);
+            self.shell.machine.write_console(&[byte]);
         }
     }
 
@@ -757,7 +739,9 @@ impl App for Desktop {
                     .text
                     .as_deref()
                     .and_then(|text| text.chars().next())
-                    .map_or(0, encode_cp437),
+                    .map_or(0, |character| {
+                        self.shell.machine.code_page().encode(character)
+                    }),
             };
             self.shell.machine.key(ascii, event.scan_code);
             return;
@@ -766,7 +750,9 @@ impl App for Desktop {
             if event.key != Key::Other && !event.modifiers.logo {
                 let key = match event.key {
                     Key::Character('c' | 'C') if event.modifiers.ctrl => 3,
-                    Key::Character(character) if !event.modifiers.ctrl => encode_cp437(character),
+                    Key::Character(character) if !event.modifiers.ctrl => {
+                        self.shell.machine.code_page().encode(character)
+                    }
                     Key::Enter => 13,
                     Key::Backspace => 8,
                     Key::Escape => 27,
@@ -808,7 +794,8 @@ impl App for Desktop {
                 if let Some(text) = event.text {
                     for ch in text.chars().filter(|ch| !ch.is_control()) {
                         self.line.push(ch);
-                        self.shell.machine.write_console(&[encode_cp437(ch)]);
+                        let byte = self.shell.machine.code_page().encode(ch);
+                        self.shell.machine.write_console(&[byte]);
                     }
                 }
             }
@@ -898,15 +885,6 @@ fn draw_mouse_cursor(pixels: &mut [u8], width: u32, height: u32, cursor: &MouseC
     }
 }
 
-fn decode_cp437(byte: u8) -> char {
-    match byte {
-        0..32 => CP437_LOW.chars().nth(usize::from(byte)).unwrap(),
-        32..127 => char::from(byte),
-        127 => '⌂',
-        _ => CP437_HIGH.chars().nth(usize::from(byte - 128)).unwrap(),
-    }
-}
-
 fn screen_text(frame: TextFrame<'_>) -> String {
     let columns = usize::from(frame.columns);
     let cells = frame.cells.as_chunks::<2>().0;
@@ -918,7 +896,7 @@ fn screen_text(frame: TextFrame<'_>) -> String {
                 if cell[0] == 0 {
                     ' '
                 } else {
-                    decode_cp437(cell[0])
+                    frame.code_page.character(cell[0])
                 }
             })
             .collect();
@@ -944,23 +922,14 @@ fn paste_characters(text: &str) -> impl Iterator<Item = char> + '_ {
     })
 }
 
-fn encode_cp437(character: char) -> u8 {
-    if character.is_ascii() {
-        return character as u8;
-    }
-    CP437_HIGH
-        .chars()
-        .position(|ch| ch == character)
-        .map_or(b'?', |index| index as u8 + 128)
-}
-
 fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: bool) {
     let columns = usize::from(frame.columns);
     let height = usize::from(frame.character_height);
+    let glyphs = frame.code_page.glyphs();
     for (cell, data) in frame.cells.as_chunks::<2>().0.iter().enumerate() {
         let (column, row) = (cell % columns, cell / columns);
         let cursor = blink && frame.cursor == Some((column as u16, row as u16));
-        let glyph = GLYPHS[usize::from(data[0])];
+        let glyph = glyphs[usize::from(data[0])];
         let color = VGA[usize::from(data[1] & 0x0f)];
         let background = VGA[usize::from(data[1] >> 4 & 0x07)];
         let visible = data[1] & 0x80 == 0 || blink;
@@ -1005,6 +974,31 @@ mod tests {
         desktop.paste_text("echo ok\r\nexit\t\u{1b}");
         assert_eq!(desktop.line, "echo ok exit ");
         assert!(!desktop.exit);
+    }
+
+    #[test]
+    fn chcp_changes_text_rendering_and_paste_encoding() {
+        let mut desktop = Desktop::new(Shell::new(), None);
+        desktop.shell.machine.clear_console();
+        desktop.shell.machine.write_console(&[0x9b]);
+        let rendered = |desktop: &Desktop, expected: &str| {
+            let Video::Text(frame) = desktop.shell.machine.video() else {
+                panic!("expected text mode")
+            };
+            assert_eq!(screen_text(frame), expected);
+            let width = usize::from(frame.columns) * 8;
+            let mut pixels = vec![0; width * usize::from(frame.rows * frame.character_height) * 4];
+            render_text(frame, width, &mut pixels, false);
+            pixels
+        };
+
+        let original = rendered(&desktop, "\u{a2}");
+        desktop.shell.execute("CHCP 850").unwrap();
+        let switched = rendered(&desktop, "\u{f8}");
+        assert_ne!(switched, original);
+        desktop.running = true;
+        desktop.paste_text("\u{f8}");
+        assert_eq!(desktop.paste.pop_front(), Some(0x9b));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
 
-use dosa_dos::{BootDrive, DOS_VERSION, Machine};
+use dosa_dos::{BootDrive, CodePage, DOS_VERSION, Machine};
 use dosa_mount::Mount;
 
 mod batch;
@@ -33,6 +33,7 @@ const RMDIR_HELP: &str = "RMDIR [drive:]path\r\nRD [drive:]path\r\nRemove an emp
 const SET_HELP: &str =
     "SET [variable=[value]]\r\nList, set, or clear DOS environment variables.\r\n";
 
+const CHCP_HELP: &str = "CHCP [number]\r\nShow or change the DOS console code page. Available pages are 437 and 850.\r\n";
 const BREAK_HELP: &str = "BREAK [ON | OFF]\r\nShow or set extended Ctrl+C checking.\r\n";
 const VER_HELP: &str = "VER\r\nDisplay the DOS version reported to programs.\r\n";
 const VERIFY_HELP: &str =
@@ -219,7 +220,7 @@ impl Shell {
             "" => return Ok(Command::Prompt),
             "CLS" => return Ok(Command::Clear),
             "EXIT" => return Ok(Command::Exit),
-            "ECHO" => format!("{args}\r\n").into_bytes(),
+            "ECHO" => self.machine.code_page().encode_text(&format!("{args}\r\n")),
             "REM" => return Ok(Command::Prompt),
             "IF" if args == "/?" => condition::HELP.as_bytes().to_vec(),
             "FOR" if args == "/?" => for_loop::HELP.as_bytes().to_vec(),
@@ -242,6 +243,7 @@ impl Shell {
             }
             "HELP" if args.eq_ignore_ascii_case("DATE") => clock::DATE_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("TIME") => clock::TIME_HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("CHCP") => CHCP_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("BREAK") => BREAK_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("VER") => VER_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("VERIFY") => VERIFY_HELP.as_bytes().to_vec(),
@@ -270,6 +272,7 @@ impl Shell {
                 DATE [mm-dd-yy]            Show or set the DOS date\r\n\
                 TIME [hh:mm]               Show or set the DOS time\r\n\
                 VER                        Display the DOS version\r\n\
+                CHCP [number]              Show or change the DOS code page\r\n\
                 BREAK [ON|OFF]             Show or set extended Ctrl+C checking\r\n\
                 VERIFY [ON|OFF]            Show or set file write verification\r\n\
                 VOL [drive:]               Display a drive volume label\r\n\
@@ -289,6 +292,23 @@ impl Shell {
                     format!("Dosa DOS version {major}.{minor:02}\r\n").into_bytes()
                 }
                 _ => return Err("usage: VER".into()),
+            },
+            "CHCP" => match args {
+                "/?" => CHCP_HELP.as_bytes().to_vec(),
+                "" => format!(
+                    "Active code page: {}\r\n",
+                    self.machine.code_page().number()
+                )
+                .into_bytes(),
+                value => {
+                    let page = value
+                        .parse()
+                        .ok()
+                        .and_then(CodePage::from_number)
+                        .ok_or("Invalid code page")?;
+                    self.machine.set_code_page(page);
+                    return Ok(Command::Prompt);
+                }
             },
             "BREAK" => match args.to_ascii_uppercase().as_str() {
                 "/?" => BREAK_HELP.as_bytes().to_vec(),
