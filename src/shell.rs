@@ -235,6 +235,7 @@ impl Shell {
             "HELP" if args.eq_ignore_ascii_case("RD") || args.eq_ignore_ascii_case("RMDIR") => {
                 RMDIR_HELP.as_bytes().to_vec()
             }
+            "HELP" if args.eq_ignore_ascii_case("DIR") => directory::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("COPY") => copy::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("DEL") || args.eq_ignore_ascii_case("ERASE") => {
                 delete::HELP.as_bytes().to_vec()
@@ -242,7 +243,7 @@ impl Shell {
             "HELP" if args.eq_ignore_ascii_case("REN") || args.eq_ignore_ascii_case("RENAME") => {
                 rename::HELP.as_bytes().to_vec()
             }
-            "HELP" => b"DIR [path] [/W] [/B] [/L]   List files\r\n\
+            "HELP" => b"DIR [path]                 List files (see HELP DIR)\r\n\
                 CD [path]                  Show or change directory\r\n\
                 MD path                    Make a directory (MKDIR)\r\n\
                 RD path                    Remove an empty directory (RMDIR)\r\n\
