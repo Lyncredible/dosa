@@ -125,6 +125,14 @@ fn primary_fat_partition_mounts_through_cli_profile_and_desktop() {
         assert!(output.status.success(), "{output:?}");
         assert_eq!(output.stdout, b"Partitioned FAT16\r\n");
     }
+    let mut shell = Shell::new();
+    shell
+        .execute(&format!("MOUNT C /FAT \"{}\"", path.display()))
+        .unwrap();
+    assert_eq!(
+        shell.machine.drive('C').unwrap().read("hello.txt").unwrap(),
+        b"Partitioned FAT16\r\n"
+    );
     let mut desktop = Desktop::new(Shell::new(), None);
     desktop.menu_action(MenuAction::Mount {
         drive: 'C',

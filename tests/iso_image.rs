@@ -117,14 +117,16 @@ fn mounts_generated_iso_via_cli_profile_shell_and_desktop() {
     assert!(result.status.success(), "{result:?}");
     assert_eq!(result.stdout, b"ISO works\r\n");
 
-    let mut shell = Shell::new();
-    shell
-        .execute(&format!("IMGMOUNT D \"{}\"", image.display()))
-        .unwrap();
-    let ShellCommand::Print(text) = shell.execute("TYPE NOTES.TXT").unwrap() else {
-        panic!("expected file text")
-    };
-    assert_eq!(text, b"ISO works\r\n");
+    for command in ["MOUNT D /ISO", "IMGMOUNT D"] {
+        let mut shell = Shell::new();
+        shell
+            .execute(&format!("{command} \"{}\"", image.display()))
+            .unwrap();
+        let ShellCommand::Print(text) = shell.execute("TYPE NOTES.TXT").unwrap() else {
+            panic!("expected file text")
+        };
+        assert_eq!(text, b"ISO works\r\n");
+    }
 
     let mut desktop = Desktop::new(Shell::new(), None);
     desktop.menu_action(MenuAction::Mount {

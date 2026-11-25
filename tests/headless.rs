@@ -26,6 +26,35 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn shell_help_lists_one_mount_command_and_keeps_startup_flags_in_cli_help() {
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let shell = run(&["--headless", "--exec", "HELP"]);
+    assert!(shell.status.success(), "{shell:?}");
+    let text = String::from_utf8(shell.stdout).unwrap();
+    assert!(text.contains("MOUNT drive path"));
+    assert!(!text.contains("IMGMOUNT"));
+    assert!(!text.contains("--mount-rw"));
+
+    let options = run(&["--headless", "--exec", "HELP MOUNT"]);
+    assert!(options.status.success(), "{options:?}");
+    let text = String::from_utf8(options.stdout).unwrap();
+    for flag in ["/FAT", "/ISO", "/RW", "/SESSION"] {
+        assert!(text.contains(flag));
+    }
+    let cli = run(&["--help"]);
+    assert!(
+        String::from_utf8(cli.stdout)
+            .unwrap()
+            .contains("--mount-rw")
+    );
+}
+
+#[test]
 fn dir_formats_wide_bare_and_lowercase_listings() {
     let fixture = Fixture::new();
     fs::create_dir(fixture.0.join("AAA")).unwrap();
