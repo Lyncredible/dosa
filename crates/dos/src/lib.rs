@@ -408,11 +408,15 @@ impl Machine {
         &self,
         current_drive: char,
         directories: &BTreeMap<char, String>,
+        inherited: Option<&ShellIo>,
         input: Option<&str>,
         output: Option<(&str, bool)>,
     ) -> Result<ShellIo, DosError> {
         let mut files =
             DosFiles::with_directories(normalize_drive(current_drive)?, directories.clone());
+        if let Some(parent) = inherited {
+            files.inherit_standard_handles(&parent.files);
+        }
         if let Some(path) = input {
             let redirect = (|| {
                 let handle = files.open(&self.mounts, path, 0)?;

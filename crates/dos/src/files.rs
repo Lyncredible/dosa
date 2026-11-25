@@ -6,6 +6,7 @@ use dosa_mount::{
 };
 use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 const MAX_OPEN_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_HANDLES: u16 = 64;
@@ -15,13 +16,13 @@ pub(crate) struct DosFiles {
     pub(crate) denied_write_drive: Option<char>,
     directories: BTreeMap<char, String>,
     handles: BTreeMap<u16, u16>,
-    open_files: BTreeMap<u16, File>,
+    open_files: BTreeMap<u16, Arc<File>>,
     search: VecDeque<(Entry, u8)>,
 }
 
 struct File {
     source: FileSource,
-    position: usize,
+    position: Mutex<usize>,
     device_info: u16,
 }
 
@@ -281,22 +282,39 @@ impl DosFiles {
             .expect("an unused handle guarantees room for an open file");
         self.open_files.insert(
             slot,
-            File {
+            Arc::new(File {
                 source,
-                position: 0,
+                position: Mutex::new(0),
                 device_info,
-            },
+            }),
         );
         self.handles.insert(handle, slot);
         handle
     }
 
     fn file(&self, handle: u16) -> Option<&File> {
-        self.open_files.get(self.handles.get(&handle)?)
+        self.open_files
+            .get(self.handles.get(&handle)?)
+            .map(Arc::as_ref)
     }
 
-    fn file_mut(&mut self, handle: u16) -> Option<&mut File> {
-        self.open_files.get_mut(self.handles.get(&handle)?)
+    /// Inherit the parent console and file streams without sharing handle assignments.
+    pub(crate) fn inherit_standard_handles(&mut self, parent: &Self) {
+        let mut inherited = BTreeMap::new();
+        for handle in 0..5 {
+            let _ = self.close(handle);
+            if let Some(&parent_slot) = parent.handles.get(&handle) {
+                let slot = *inherited.entry(parent_slot).or_insert_with(|| {
+                    let slot = (0..MAX_HANDLES)
+                        .find(|slot| !self.open_files.contains_key(slot))
+                        .expect("there is room for an inherited standard handle");
+                    self.open_files
+                        .insert(slot, Arc::clone(&parent.open_files[&parent_slot]));
+                    slot
+                });
+                self.handles.insert(handle, slot);
+            }
+        }
     }
 
     fn write_open_error(&mut self, drive: char, error: MountError) -> u16 {
@@ -458,6 +476,9 @@ impl DosFiles {
         let Some(file) = self.file(handle) else {
             return false;
         };
+        let Ok(position) = file.position.lock() else {
+            return false;
+        };
         let length = match &file.source {
             FileSource::ReadOnly { contents, .. } => contents.len() as u64,
             FileSource::Writable {
@@ -467,7 +488,7 @@ impl DosFiles {
             } => file.length().unwrap_or(0),
             _ => return false,
         };
-        (file.position as u64) < length
+        (*position as u64) < length
     }
 
     pub(crate) fn output_target(&self, handle: u16) -> Result<HandleTarget, u16> {
@@ -493,19 +514,20 @@ impl DosFiles {
         length: usize,
         stop: Option<impl FnMut(u8) -> bool>,
     ) -> Result<Cow<'_, [u8]>, u16> {
-        let file = self.file_mut(handle).ok_or(6u16)?;
+        let file = self.file(handle).ok_or(6u16)?;
+        let mut position = file.position.lock().map_err(|_| 5u16)?;
         let data = match &file.source {
             FileSource::UnavailableDevice => return Err(6),
             FileSource::ReadOnly {
                 contents: bytes, ..
-            } => Cow::Borrowed(read_slice(bytes, file.position, length)),
+            } => Cow::Borrowed(read_slice(bytes, *position, length)),
             FileSource::Writable {
                 file: source,
                 readable: true,
                 ..
             } => Cow::Owned(
                 source
-                    .read_at(file.position as u64, length)
+                    .read_at(*position as u64, length)
                     .map_err(mount_code)?,
             ),
             FileSource::Device(_)
@@ -516,7 +538,7 @@ impl DosFiles {
         let used = stop
             .and_then(|predicate| data.iter().copied().position(predicate))
             .map_or(data.len(), |index| index + 1);
-        file.position += used;
+        *position += used;
         Ok(match data {
             Cow::Borrowed(bytes) => Cow::Borrowed(&bytes[..used]),
             Cow::Owned(mut bytes) => {
@@ -532,7 +554,7 @@ impl DosFiles {
         data: &[u8],
         write: FileWriteOptions,
     ) -> Result<(), u16> {
-        let file = self.file_mut(handle).ok_or(6u16)?;
+        let file = self.file(handle).ok_or(6u16)?;
         let FileSource::Writable {
             file: destination,
             writable: true,
@@ -541,8 +563,8 @@ impl DosFiles {
         else {
             return Err(5);
         };
-        let end = file
-            .position
+        let mut position = file.position.lock().map_err(|_| 5u16)?;
+        let end = position
             .checked_add(data.len())
             .filter(|&end| end as u64 <= MAX_OPEN_BYTES)
             .ok_or(112u16)?;
@@ -553,12 +575,12 @@ impl DosFiles {
             if end > bytes.len() {
                 bytes.resize(end, 0);
             }
-            bytes[file.position..end].copy_from_slice(data);
+            bytes[*position..end].copy_from_slice(data);
         }
         destination
             .replace_with(&bytes, write)
             .map_err(mount_code)?;
-        file.position = end;
+        *position = end;
         Ok(())
     }
 
@@ -566,13 +588,14 @@ impl DosFiles {
         if self.device(handle).is_some() {
             return if origin <= 2 { Ok(0) } else { Err(1) };
         }
-        let file = self.file_mut(handle).ok_or(6u16)?;
+        let file = self.file(handle).ok_or(6u16)?;
         if matches!(file.source, FileSource::UnavailableDevice) {
             return Err(6);
         }
+        let mut cursor = file.position.lock().map_err(|_| 5u16)?;
         let base = match origin {
             0 => 0,
-            1 => file.position,
+            1 => *cursor,
             2 => match &file.source {
                 FileSource::Device(_) | FileSource::UnavailableDevice => {
                     unreachable!("device handles cannot seek")
@@ -587,7 +610,7 @@ impl DosFiles {
             _ => return Err(1),
         };
         let position = u32::try_from(base as i64 + i64::from(offset)).map_err(|_| 1u16)?;
-        file.position = position as usize;
+        *cursor = position as usize;
         Ok(position)
     }
 

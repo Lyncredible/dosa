@@ -14,6 +14,7 @@ pub(super) enum PendingInput {
     CopyText(CopyOperation, CopyText),
     Page(Pager),
     Clock(ClockInput),
+    BatchPause,
 }
 
 impl Shell {
@@ -35,6 +36,7 @@ impl Shell {
     pub fn pending_input_requirement(&self) -> &'static str {
         match self.pending_input {
             Some(PendingInput::Page(_)) => "DIR /P needs a key",
+            Some(PendingInput::BatchPause) => "PAUSE needs a key",
             Some(PendingInput::Clock(_)) => "DATE or TIME needs a line",
             Some(PendingInput::CopyText(..)) => "COPY CON needs input ending with Ctrl+Z and Enter",
             _ => "confirmation needs Y or N",
@@ -64,6 +66,14 @@ impl Shell {
         };
         let pending = match pending {
             PendingInput::Clock(clock) => return Ok(clock.key(self, key)),
+            PendingInput::BatchPause => {
+                let response = self.resume_batch(key).map(<[u8]>::to_vec);
+                if self.batch_waiting() {
+                    self.pending_input = Some(PendingInput::BatchPause);
+                    return Ok(response.map(Command::WaitForInput));
+                }
+                return Ok(response.map(Command::Print));
+            }
             PendingInput::CopyText(copy, input) => {
                 return input
                     .key(copy, self, key)

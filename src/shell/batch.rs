@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::sync::Arc;
 
+use dosa_dos::ShellIo;
+
 use super::for_loop::ForLoop;
 use super::{Command, Shell, split_word};
 
@@ -71,6 +73,7 @@ struct Frame {
     args: VecDeque<String>,
     tail: String,
     for_loop: Option<(ForLoop, bool)>,
+    io: Option<ShellIo>,
 }
 
 impl Frame {
@@ -79,6 +82,7 @@ impl Frame {
         next_line: usize,
         command: &str,
         args: &str,
+        io: Option<ShellIo>,
     ) -> Result<Self, Box<dyn Error>> {
         if args.len() > MAX_COMMAND_BYTES {
             return Err(command_length_error().into());
@@ -99,6 +103,7 @@ impl Frame {
             args: parameters,
             tail: args.to_owned(),
             for_loop: None,
+            io,
         })
     }
 
@@ -255,7 +260,7 @@ impl Shell {
     pub(super) fn start_prompt_loop(&mut self, args: &str) -> Result<Command, Box<dyn Error>> {
         let for_loop = ForLoop::parse(self, args, MAX_BATCH_LINES)?;
         let script = Arc::new(Script::new("FOR".to_owned(), "")?);
-        let mut frame = Frame::new(script, 0, "FOR", "")?;
+        let mut frame = Frame::new(script, 0, "FOR", "", None)?;
         frame.for_loop = Some((for_loop, false));
         let mut batch = Batch::new(frame);
         batch.prompt_loop = true;
@@ -267,6 +272,10 @@ impl Shell {
         self.batch
             .as_ref()
             .is_some_and(|batch| !batch.prompt_loop || batch.frames.len() > 1)
+    }
+
+    pub(super) fn batch_io(&self) -> Option<&ShellIo> {
+        self.batch.as_ref()?.frames.last()?.io.as_ref()
     }
 
     pub fn batch_active(&self) -> bool {
@@ -340,10 +349,31 @@ impl Shell {
             self.batch = None;
             return Ok(None);
         };
-        let echo = line
+        let mut echo = line
             .echo
             .then(|| format!("{}{}\r\n", self.prompt(), line.command));
-        let command = self.execute_batch_command(&line.command, line.echo)?;
+        let mut io = self
+            .batch_io()
+            .map(|parent| {
+                self.machine.prepare_shell_io(
+                    self.drive,
+                    &self.directories,
+                    Some(parent),
+                    None,
+                    None,
+                )
+            })
+            .transpose()?;
+        if let (Some(text), Some(streams)) = (&echo, &mut io) {
+            let bytes = self.machine.code_page().encode_text(text);
+            if self.machine.write_shell_stdout(streams, &bytes)? {
+                echo = None;
+            }
+        }
+        let mut command = self.execute_batch_command(&line.command, line.echo, &mut io)?;
+        if let Some(streams) = io {
+            command = self.apply_redirection(streams, command)?;
+        }
         Ok(Some(BatchStep { echo, command }))
     }
 
@@ -351,6 +381,7 @@ impl Shell {
         &mut self,
         mut line: &str,
         echo: bool,
+        io: &mut Option<ShellIo>,
     ) -> Result<Command, Box<dyn Error>> {
         // Reject shell operators that the batch interpreter cannot execute.
         let mut quoted = false;
@@ -369,10 +400,11 @@ impl Shell {
                 && !word.eq_ignore_ascii_case("FOR")
                 && let Some(request) = super::redirection::parse(line)?
             {
+                io.take(); // This line prepares its own overlay and routes its output.
                 return self.execute_redirected(request, true);
             }
             match word.to_ascii_uppercase().as_str() {
-                "IF" | "PAUSE" | "FOR" if args == "/?" => return self.execute(line),
+                "IF" | "PAUSE" | "FOR" if args == "/?" => return self.execute_command(line, io),
                 "IF" => {
                     let (matched, command) = self.test_condition(args)?;
                     if !matched {
@@ -380,17 +412,11 @@ impl Shell {
                     }
                     line = command;
                 }
-                "CALL" => return self.call_batch(args),
+                "CALL" => return self.call_batch(args, io.take()),
                 "GOTO" => return self.goto_batch(args),
                 "GOTO:EOF" if args.is_empty() => return self.goto_batch(":EOF"),
-                "PAUSE" => {
-                    if !args.is_empty() {
-                        return Err("usage: PAUSE".into());
-                    }
-                    self.batch.as_mut().expect("executing a batch command").pause = Some(Pause::Key);
-                    return Ok(Command::Pause);
-                }
-                "SHIFT" if args == "/?" => return self.execute(line),
+                "PAUSE" => return self.pause_batch(args),
+                "SHIFT" if args == "/?" => return self.execute_command(line, io),
                 "SHIFT" => {
                     if !args.is_empty() {
                         return Err("usage: SHIFT".into());
@@ -422,9 +448,20 @@ impl Shell {
                 "SETLOCAL" | "ENDLOCAL" | "CHOICE" => {
                     return Err(format!("batch command {word} is unsupported").into());
                 }
-                _ => return self.execute(line),
+                _ => return self.execute_command(line, io),
             }
         }
+    }
+
+    pub(super) fn pause_batch(&mut self, args: &str) -> Result<Command, Box<dyn Error>> {
+        if !args.is_empty() {
+            return Err("usage: PAUSE".into());
+        }
+        self.batch
+            .as_mut()
+            .expect("executing a batch command")
+            .pause = Some(Pause::Key);
+        Ok(Command::Pause)
     }
 
     pub(super) fn echo_batch(&mut self, args: &str) -> Command {
@@ -472,7 +509,11 @@ impl Shell {
         Ok(Command::Prompt)
     }
 
-    fn call_batch(&mut self, args: &str) -> Result<Command, Box<dyn Error>> {
+    pub(super) fn call_batch(
+        &mut self,
+        args: &str,
+        io: Option<ShellIo>,
+    ) -> Result<Command, Box<dyn Error>> {
         let (word, tail) = split_word(args)?;
         if word.is_empty() {
             return Err("usage: CALL filename.BAT [arguments] or CALL :label [arguments]".into());
@@ -481,14 +522,14 @@ impl Shell {
             let batch = self.batch.as_mut().expect("executing a batch command");
             let script = Arc::clone(&batch.frame().script);
             let target = script.label(label)?;
-            batch.push(Frame::new(script, target, word, tail)?)?;
+            batch.push(Frame::new(script, target, word, tail, io)?)?;
         } else {
             let name = word.rsplit(['\\', '/', ':']).next().unwrap_or("");
             if name.contains('.') && !is_batch(name) {
                 return Err("CALL requires a .BAT file or a batch label".into());
             }
             let (drive, path) = self.find_program(word, &["BAT"])?;
-            self.launch_batch(drive, &path, word, tail, true)?;
+            self.launch_batch(drive, &path, word, tail, true, io)?;
         }
         Ok(Command::Prompt)
     }
@@ -500,6 +541,7 @@ impl Shell {
         word: &str,
         args: &str,
         call: bool,
+        io: Option<ShellIo>,
     ) -> Result<(), Box<dyn Error>> {
         let mount = self.drive_mount(drive)?;
         let name = format!("{drive}:\\{path}");
@@ -515,7 +557,7 @@ impl Shell {
             Ok(text) => std::borrow::Cow::Borrowed(text),
             Err(_) => std::borrow::Cow::Owned(self.machine.code_page().decode_text(bytes)),
         };
-        let frame = Frame::new(Arc::new(Script::new(name, &source)?), 0, word, args)?;
+        let frame = Frame::new(Arc::new(Script::new(name, &source)?), 0, word, args, io)?;
         match self.batch.as_mut() {
             Some(batch) if call || batch.prompt_loop && batch.frames.len() == 1 => {
                 batch.push(frame)?
