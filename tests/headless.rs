@@ -818,6 +818,66 @@ fn dir_reports_allocatable_space_for_writable_host_mounts() {
 }
 
 #[test]
+fn date_and_time_share_the_guest_clock_and_reprompt_for_invalid_lines() {
+    use std::process::Stdio;
+
+    let fixture = Fixture::new();
+    let mut probe = vec![
+        0xb4, 0x2a, 0xcd, 0x21, // get date
+        0x81, 0xf9, 0xd0, 7, 0x74, 5, // year 2000
+        0xb8, 1, 0x4c, 0xcd, 0x21, 0x81, 0xfa, 0x1d, 2, 0x74, 5, // February 29
+        0xb8, 2, 0x4c, 0xcd, 0x21, 0x3c, 2, 0x74, 5, 0xb8, 3, 0x4c, 0xcd, 0x21, // Tuesday
+        0xb4, 0x2c, 0xcd, 0x21, 0x81, 0xf9, 36, 13, 0x74, 5, 0xb8, 4, 0x4c, 0xcd,
+        0x21, // 13:36
+    ];
+    for (service, cx, dx, status) in [
+        (0x2b, [0xd4, 7], [29, 2], 0),   // 2004-02-29
+        (0x2b, [0xd4, 7], [30, 2], 255), // invalid day
+        (0x2d, [15, 10], [0, 0], 0),     // 10:15
+        (0x2d, [0, 24], [0, 0], 255),    // invalid hour
+    ] {
+        probe.extend([
+            0xb9, cx[0], cx[1], 0xba, dx[0], dx[1], 0xb4, service, 0xcd, 0x21, 0x3c, status, 0x74,
+            5, 0xb8, 5, 0x4c, 0xcd, 0x21,
+        ]);
+    }
+    probe.extend([0xb8, 0, 0x4c, 0xcd, 0x21]);
+    fs::write(fixture.0.join("CLOCK.COM"), probe).unwrap();
+    fs::write(
+        fixture.0.join("SETUP.BAT"),
+        b"@echo off\r\ndate\r\npause\r\ntime\r\nclock\r\nprompt $D $T $G\r\necho on\r\ndate /t\r\ntime /t\r\n",
+    )
+    .unwrap();
+    let mount = format!("C={}", fixture.0.display());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args(["--headless", "--mount", &mount, "--exec", "SETUP"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"02/30/2000\r\n02/29/2000\r\nx1:36p\r\n")
+        .unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(result.status.success(), "{result:?}");
+    let output = String::from_utf8(result.stdout).unwrap();
+    assert!(
+        output.contains("Invalid date\r\nEnter new date"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Current date is Sun 02-29-2004"),
+        "{output}"
+    );
+    assert!(output.contains("Current time is 10:15:"), "{output}");
+    assert!(output.contains("Sun 02-29-2004 10:15:"), "{output}");
+}
+
+#[test]
 fn dir_p_pages_at_the_selected_text_height_and_can_be_cancelled() {
     use std::process::Stdio;
 

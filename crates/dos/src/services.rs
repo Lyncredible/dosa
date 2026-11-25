@@ -1,5 +1,5 @@
+use crate::DOS_VERSION;
 use crate::{CONVENTIONAL_END, DosError, Machine, PSP, Pending, PendingCall, RunState, ZERO};
-use crate::{DOS_VERSION, DosClock};
 use dosa_mount::{Allocation, Entry};
 
 impl Machine {
@@ -209,15 +209,26 @@ impl Machine {
                 self.cpu.write_u16(0, vector + 2, ds);
             }
             0x2a => {
-                let (year, month, day, weekday) = DosClock::now().date();
+                let (year, month, day, weekday) = self.clock_snapshot().date();
                 self.cpu.regs.cx = year;
                 self.cpu.regs.dx = u16::from_le_bytes([day, month]);
                 self.set_al(weekday);
             }
+            0x2b => {
+                let [day, month] = dx.to_le_bytes();
+                let ok = self.set_date(cx, month, day);
+                self.set_al(if ok { 0 } else { 0xff });
+            }
             0x2c => {
-                let (hour, minute, second, hundredths) = DosClock::now().time();
+                let (hour, minute, second, hundredths) = self.clock_snapshot().time();
                 self.cpu.regs.cx = u16::from_le_bytes([minute, hour]);
                 self.cpu.regs.dx = u16::from_le_bytes([hundredths, second]);
+            }
+            0x2d => {
+                let [minute, hour] = cx.to_le_bytes();
+                let [hundredths, second] = dx.to_le_bytes();
+                let ok = self.set_time(hour, minute, second, hundredths);
+                self.set_al(if ok { 0 } else { 0xff });
             }
             0x2f => {
                 self.cpu.regs.es = self.dta.0;

@@ -1,6 +1,6 @@
 use std::{cell::OnceCell, error::Error, fmt::Write};
 
-use dosa_dos::{DOS_VERSION, DosClock};
+use dosa_dos::DOS_VERSION;
 
 use super::{Command, Shell};
 
@@ -48,14 +48,15 @@ impl Shell {
                     let _ = write!(output, "MS-DOS Version {major}.{minor:02}");
                 }
                 Some('D') => {
-                    let (year, month, day, weekday) = clock.get_or_init(DosClock::now).date();
+                    let (year, month, day, weekday) =
+                        clock.get_or_init(|| self.machine.clock_snapshot()).date();
                     let day_name =
                         ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][usize::from(weekday)];
                     let _ = write!(output, "{day_name} {month:02}-{day:02}-{year:04}");
                 }
                 Some('T') => {
                     let (hour, minute, second, hundredths) =
-                        clock.get_or_init(DosClock::now).time();
+                        clock.get_or_init(|| self.machine.clock_snapshot()).time();
                     let _ = write!(output, "{hour:02}:{minute:02}:{second:02}.{hundredths:02}");
                 }
                 Some('G') => output.push('>'),

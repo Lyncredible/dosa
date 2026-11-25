@@ -1,11 +1,14 @@
 use std::error::Error;
 
-use super::{Command, Shell, copy::CopyOperation, delete::Deletion, directory::Pager};
+use super::{
+    Command, Shell, clock::ClockInput, copy::CopyOperation, delete::Deletion, directory::Pager,
+};
 
 pub(super) enum PendingInput {
     Delete(Deletion),
     Copy(CopyOperation),
     Page(Pager),
+    Clock(ClockInput),
 }
 
 impl Shell {
@@ -13,9 +16,14 @@ impl Shell {
         self.pending_input.is_some()
     }
 
+    pub fn line_input_waiting(&self) -> bool {
+        matches!(self.pending_input, Some(PendingInput::Clock(_)))
+    }
+
     pub fn pending_input_requirement(&self) -> &'static str {
         match self.pending_input {
             Some(PendingInput::Page(_)) => "DIR /P needs a key",
+            Some(PendingInput::Clock(_)) => "DATE or TIME needs a line",
             _ => "confirmation needs Y or N",
         }
     }
@@ -24,6 +32,9 @@ impl Shell {
         let Some(pending) = self.pending_input.take() else {
             return Ok(None);
         };
+        if let PendingInput::Clock(clock) = pending {
+            return Ok(clock.key(self, key));
+        }
         let key = key.to_ascii_uppercase();
         let approved = key == b'Y';
         let result = match (pending, key) {

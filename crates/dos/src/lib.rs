@@ -184,6 +184,7 @@ pub struct Machine {
     locks: u8,
     output: Vec<u8>,
     clock: Instant,
+    session_clock: clock::SessionClock,
     paused_since: Option<Instant>,
     dta: (u16, u16),
     blocks: BTreeMap<u16, u16>,
@@ -223,6 +224,7 @@ impl Machine {
             locks: 0,
             output: Vec::new(),
             clock: Instant::now(),
+            session_clock: clock::SessionClock::default(),
             paused_since: None,
             dta: (PSP, 0x80),
             blocks: BTreeMap::new(),
@@ -244,8 +246,23 @@ impl Machine {
             mounts: std::mem::take(&mut self.mounts),
             environment: std::mem::take(&mut self.environment),
             cpu_profile: self.cpu_profile,
+            session_clock: self.session_clock,
             ..Self::new()
         };
+    }
+
+    /// Read the current session date and time without changing the host clock.
+    pub fn clock_snapshot(&self) -> DosClock {
+        self.session_clock.now()
+    }
+
+    pub fn set_date(&mut self, year: u16, month: u8, day: u8) -> bool {
+        self.session_clock.set_date(year, month, day)
+    }
+
+    pub fn set_time(&mut self, hour: u8, minute: u8, second: u8, hundredths: u8) -> bool {
+        self.session_clock
+            .set_time(hour, minute, second, hundredths)
     }
 
     pub fn environment(&self) -> &Environment {
