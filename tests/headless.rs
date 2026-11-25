@@ -150,6 +150,71 @@ fn rename_handles_dos_wildcards_without_overwriting_files() {
 }
 
 #[test]
+fn copy_accepts_null_sources_and_destinations() {
+    let fixture = Fixture::new();
+    let writable = fixture.0.join("writable");
+    let readonly = fixture.0.join("readonly");
+    fs::create_dir(&writable).unwrap();
+    fs::create_dir(&readonly).unwrap();
+    fs::create_dir(readonly.join("SUB")).unwrap();
+    fs::write(readonly.join("SOURCE.DAT"), b"data\x1amore").unwrap();
+    fs::write(writable.join("EMPTY.DAT"), b"replace me").unwrap();
+    let c = format!("C={}", writable.display());
+    let d = format!("D={}", readonly.display());
+    let run = |command: &str| {
+        Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([
+                "--headless",
+                "--mount-rw",
+                &c,
+                "--mount",
+                &d,
+                "--exec",
+                command,
+            ])
+            .output()
+            .unwrap()
+    };
+
+    for command in [
+        "COPY /-Y D:SOURCE.DAT NUL",
+        "COPY D:SOURCE.DAT D:\\SUB\\NUL.TXT /V",
+        "COPY /Y D:\\SUB\\NUL EMPTY.DAT",
+        "COPY /B NUL+D:SOURCE.DAT+NUL SAME.DAT",
+        "COPY D:SOURCE.DAT+NUL TEXT.DAT",
+    ] {
+        let result = run(command);
+        assert!(result.status.success(), "{command}: {result:?}");
+        assert!(
+            result.stdout.ends_with(b"1 file(s) copied.\r\n"),
+            "{command}: {result:?}"
+        );
+    }
+    assert_eq!(fs::read(writable.join("EMPTY.DAT")).unwrap(), b"");
+    assert_eq!(
+        fs::read(writable.join("SAME.DAT")).unwrap(),
+        b"data\x1amore"
+    );
+    assert_eq!(fs::read(writable.join("TEXT.DAT")).unwrap(), b"data");
+    assert_eq!(fs::read_dir(&writable).unwrap().count(), 3);
+    assert_eq!(
+        fs::read(readonly.join("SOURCE.DAT")).unwrap(),
+        b"data\x1amore"
+    );
+    assert!(fs::read_dir(readonly.join("SUB")).unwrap().next().is_none());
+
+    for command in [
+        "COPY D:MISSING.DAT NUL",
+        "COPY D:SOURCE.DAT D:\\MISSING\\NUL",
+        "COPY NUL D:WRITE.DAT",
+        "COPY NUL",
+    ] {
+        let result = run(command);
+        assert!(!result.status.success(), "{command}: {result:?}");
+    }
+}
+
+#[test]
 fn copy_from_zip_combines_sources_and_follows_overwrite_rules() {
     use std::process::Stdio;
     use zip::write::SimpleFileOptions;

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 
-use dosa_dos::matches_dos_pattern;
+use dosa_dos::{DosDevice, matches_dos_pattern};
 use dosa_mount::{FileWriteOptions, MountError, WritableFile, WriteDisposition};
 
 use super::{Command, PendingInput, Shell, rename::destination_name, split_word};
@@ -9,6 +9,7 @@ use super::{Command, PendingInput, Shell, rename::destination_name, split_word};
 const USAGE: &str = "usage: COPY [/Y|/-Y] [/A|/B] source [+ source ...] [destination] [/V]";
 pub(super) const HELP: &str = "COPY [/Y|/-Y] [/A|/B] source [+ source ...] [destination] [/V]\r\n\
     Copy files or combine sources. Use /A for text and /B for binary data.\r\n\
+    NUL supplies empty input or discards output.\r\n\
     /Y skips overwrite prompts, /-Y forces them, and /V verifies the write.\r\n";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -99,11 +100,21 @@ impl<'a> Request<'a> {
 }
 
 struct Source {
+    file: Option<SourceFile>,
+    name: String,
+    mode: Option<Mode>,
+}
+
+struct SourceFile {
     drive: char,
     parent: String,
-    name: String,
     host_name: String,
-    mode: Option<Mode>,
+}
+
+#[derive(Clone, Copy)]
+enum Destination {
+    Mounted(char),
+    Null,
 }
 
 struct Job {
@@ -112,7 +123,7 @@ struct Job {
 }
 
 pub(super) struct CopyOperation {
-    drive: char,
+    destination: Destination,
     jobs: VecDeque<Job>,
     pending: Option<WritableFile>,
     overwrite: bool,
@@ -155,8 +166,32 @@ impl Shell {
             .collect::<Result<Vec<_>, _>>()?;
         let first = &groups[0][0];
         let implicit_append = destination.is_none() && groups.len() > 1;
-        let (drive, dest) = if implicit_append {
-            (first.drive, in_directory(&first.parent, &first.name))
+        let explicit_null = destination
+            .map(|operand| self.null_copy_operand(operand.path))
+            .transpose()?
+            .unwrap_or(false);
+        if explicit_null || implicit_append && first.file.is_none() {
+            return CopyOperation {
+                destination: Destination::Null,
+                jobs: VecDeque::from([Job {
+                    inputs: groups.into_iter().flatten().collect(),
+                    path: "NUL".into(),
+                }]),
+                pending: None,
+                overwrite: true,
+                verify: false,
+                destination_mode: None,
+                default_ascii: false,
+                copied: 0,
+            }
+            .advance(self, Vec::new());
+        }
+
+        if destination.is_none() && first.file.is_none() {
+            return Err("Specify a destination when copying from NUL".into());
+        }
+        let (drive, dest) = if let (true, Some(file)) = (implicit_append, &first.file) {
+            (file.drive, in_directory(&file.parent, &first.name))
         } else {
             self.resolve(destination.map_or("", |item| item.path))?
         };
@@ -220,7 +255,7 @@ impl Shell {
                 .collect()
         };
         CopyOperation {
-            drive,
+            destination: Destination::Mounted(drive),
             jobs,
             pending: None,
             overwrite,
@@ -232,7 +267,26 @@ impl Shell {
         .advance(self, Vec::new())
     }
 
+    fn null_copy_operand(&self, operand: &str) -> Result<bool, Box<dyn Error>> {
+        if DosDevice::named(operand) != Some(DosDevice::Null) {
+            return Ok(false);
+        }
+        let (drive, path) = self.resolve(operand)?;
+        let (parent, _) = split_path(&path);
+        if operand.contains(':') || !parent.is_empty() {
+            self.drive_mount(drive)?.canonical_directory(parent)?;
+        }
+        Ok(true)
+    }
+
     fn copy_sources(&self, operand: Operand<'_>) -> Result<Vec<Source>, Box<dyn Error>> {
+        if self.null_copy_operand(operand.path)? {
+            return Ok(vec![Source {
+                file: None,
+                name: "NUL".into(),
+                mode: operand.mode,
+            }]);
+        }
         let (drive, path) = self.resolve(operand.path)?;
         let mount = self.drive_mount(drive)?;
         let (parent, pattern, single) = if path.contains(['*', '?']) {
@@ -261,10 +315,12 @@ impl Shell {
         Ok(entries
             .into_iter()
             .map(|entry| Source {
-                drive,
-                parent: parent.clone(),
+                file: Some(SourceFile {
+                    drive,
+                    parent: parent.clone(),
+                    host_name: entry.host_name,
+                }),
                 name: entry.name,
-                host_name: entry.host_name,
                 mode: operand.mode,
             })
             .collect())
@@ -278,13 +334,19 @@ impl CopyOperation {
         mut output: Vec<u8>,
     ) -> Result<Command, Box<dyn Error>> {
         while let Some(job) = self.jobs.front() {
-            let mount = shell.drive_mount(self.drive)?;
+            let Destination::Mounted(drive) = self.destination else {
+                let job = self.jobs.pop_front().expect("a copy job is available");
+                self.write(shell, job, None, &mut output)?;
+                continue;
+            };
+            let mount = shell.drive_mount(drive)?;
             let existing = match mount.metadata(&job.path) {
                 Ok(entry) => {
                     let parent = split_path(&job.path).0;
                     if job.inputs.len() == 1
-                        && job.inputs[0].drive == self.drive
-                        && job.inputs[0].parent.eq_ignore_ascii_case(parent)
+                        && job.inputs[0].file.as_ref().is_some_and(|source| {
+                            source.drive == drive && source.parent.eq_ignore_ascii_case(parent)
+                        })
                         && job.inputs[0].name.eq_ignore_ascii_case(&entry.name)
                     {
                         return Err("File cannot be copied onto itself".into());
@@ -296,7 +358,7 @@ impl CopyOperation {
             };
             if existing.is_some() && !self.overwrite {
                 output.extend_from_slice(
-                    format!("Overwrite {}:\\{} (Y/N)? ", self.drive, job.path).as_bytes(),
+                    format!("Overwrite {drive}:\\{} (Y/N)? ", job.path).as_bytes(),
                 );
                 self.pending = existing;
                 shell.pending_input = Some(PendingInput::Copy(self));
@@ -340,10 +402,13 @@ impl CopyOperation {
         let mut data = Vec::new();
         let mut modified = shell.machine.adjusted_file_time();
         for source in job.inputs {
-            let mount = shell.drive_mount(source.drive)?;
-            let path = in_directory(&source.parent, &source.host_name);
+            let Some(file) = source.file else {
+                continue;
+            };
+            let mount = shell.drive_mount(file.drive)?;
+            let path = in_directory(&file.parent, &file.host_name);
             let entry = mount.metadata(&path)?;
-            if entry.host_name != source.host_name {
+            if entry.host_name != file.host_name {
                 return Err(MountError::NotFound(path).into());
             }
             if !combining
@@ -353,6 +418,9 @@ impl CopyOperation {
                 modified = Some(timestamp.to_system_time());
             }
             let mut bytes = mount.read(&path)?;
+            if matches!(self.destination, Destination::Null) {
+                continue;
+            }
             let ascii = source
                 .mode
                 .map_or(combining || self.default_ascii, |mode| mode == Mode::Ascii);
@@ -370,18 +438,26 @@ impl CopyOperation {
             }
             data.push(0x1a);
         }
-        let mount = shell.drive_mount(self.drive)?;
-        let write = FileWriteOptions {
-            modified,
-            verify: self.verify || shell.machine.verify_writes(),
-        };
-        if let Some(file) = existing {
-            file.replace_with(&data, write)?;
-        } else {
-            mount.write_new_file_with(&job.path, &data, write)?;
-        }
-        if combining || !self.jobs.is_empty() || self.copied != 0 {
-            output.extend_from_slice(format!("{}:\\{}\r\n", self.drive, job.path).as_bytes());
+        let trace = combining || !self.jobs.is_empty() || self.copied != 0;
+        match self.destination {
+            Destination::Mounted(drive) => {
+                let write = FileWriteOptions {
+                    modified,
+                    verify: self.verify || shell.machine.verify_writes(),
+                };
+                if let Some(file) = existing {
+                    file.replace_with(&data, write)?;
+                } else {
+                    shell
+                        .drive_mount(drive)?
+                        .write_new_file_with(&job.path, &data, write)?;
+                }
+                if trace {
+                    output.extend_from_slice(format!("{drive}:\\{}\r\n", job.path).as_bytes());
+                }
+            }
+            Destination::Null if trace => output.extend_from_slice(b"NUL\r\n"),
+            Destination::Null => {}
         }
         self.copied += 1;
         Ok(())
