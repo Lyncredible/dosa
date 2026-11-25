@@ -115,6 +115,7 @@ impl<A: App> Desktop<A> {
                 event_loop.create_window(
                     Window::default_attributes()
                         .with_title("Dosa")
+                        .with_window_icon(window_icon())
                         .with_theme(Some(Theme::Dark))
                         .with_inner_size(LogicalSize::new(928, 624))
                         .with_min_inner_size(LogicalSize::new(384, 360))
@@ -218,6 +219,24 @@ impl<A: App> Desktop<A> {
             self.app.pointer(event);
         }
     }
+}
+
+fn window_icon() -> Option<winit::window::Icon> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!("../assets/dosa.png")));
+    let mut reader = decoder.read_info().ok()?;
+    let mut pixels = vec![0; reader.output_buffer_size()?];
+    let frame = reader.next_frame(&mut pixels).ok()?;
+    if frame.color_type != png::ColorType::Rgba || frame.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    pixels.truncate(frame.buffer_size());
+    winit::window::Icon::from_rgba(pixels, frame.width, frame.height).ok()
+}
+
+#[cfg(test)]
+#[test]
+fn bundled_window_icon_decodes_as_rgba() {
+    assert!(window_icon().is_some());
 }
 
 impl<A: App> ApplicationHandler for Desktop<A> {
