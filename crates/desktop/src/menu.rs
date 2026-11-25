@@ -70,6 +70,7 @@ pub enum MountKind {
     File,
     Folder,
     Zip,
+    Fat,
     Iso,
     SessionZip,
 }
@@ -543,7 +544,7 @@ fn row_rect(left: u32, index: usize) -> Rect {
     }
 }
 
-const DRIVE_ACTION_ROWS: u32 = 7;
+const DRIVE_ACTION_ROWS: u32 = 8;
 
 fn drive_rect(left: u32, index: u32) -> Rect {
     Rect {
@@ -596,6 +597,7 @@ fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool) -> Vec<It
             ("Mount ZIP...", MountKind::SessionZip),
             ("Mount read-only ZIP...", MountKind::Zip),
             ("Mount ISO image...", MountKind::Iso),
+            ("Mount FAT image...", MountKind::Fat),
         ]
         .into_iter()
         .map(|(label, kind)| item(label, Command::Mount(kind, drive), can_change_mounts, false))
@@ -779,6 +781,10 @@ pub(crate) fn pick_path(window: &Window, kind: MountKind) -> Option<PathBuf> {
         MountKind::Iso => dialog
             .set_title("Mount an ISO 9660 image")
             .add_filter("ISO image", &["iso"])
+            .pick_file(),
+        MountKind::Fat => dialog
+            .set_title("Mount a FAT disk image")
+            .add_filter("Raw disk image", &["img", "ima", "dsk"])
             .pick_file(),
         MountKind::SessionZip => dialog
             .set_title("Mount a temporary writable ZIP copy")

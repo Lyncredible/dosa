@@ -9,54 +9,61 @@ use super::{Entry, MAX_FILE_BYTES, MountError, Result, lock, read_bounded, valid
 const READ_BUDGET: u64 = MAX_FILE_BYTES * 2;
 const READ_OPERATIONS: usize = 2_000_000;
 const MAX_DIRECTORY_ENTRIES: usize = 65_536;
+const MBR_SECTOR_BYTES: u64 = 512;
 
 #[derive(Debug)]
-pub(super) struct FatImage(Mutex<File>);
+pub(super) struct FatImage {
+    file: Mutex<File>,
+    region: Region,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Region {
+    start: u64,
+    bytes: u64,
+}
 
 impl FatImage {
     pub fn open(mut file: File) -> Result<Self> {
         let length = file.metadata()?.len();
         let mut header = [0; 512];
         file.read_exact(&mut header)?;
-        let bytes_per_sector = u16::from_le_bytes([header[11], header[12]]);
-        let sectors16 = u16::from_le_bytes([header[19], header[20]]);
-        let sectors = if sectors16 == 0 {
-            u32::from_le_bytes(header[32..36].try_into().unwrap())
-        } else {
-            u32::from(sectors16)
+
+        // A volume image can contain executable boot code in the area where an
+        // MBR stores entries. Try a valid filesystem at sector zero first.
+        let raw = volume_bytes(&header, length).and_then(|bytes| {
+            let region = Region { start: 0, bytes };
+            open_volume(&mut file, region)?.unmount()?;
+            Ok(region)
+        });
+        let region = match raw {
+            Ok(region) => region,
+            Err(raw_error) => {
+                let Some(mut region) = primary_fat_partition(&header, length)? else {
+                    return Err(raw_error.into());
+                };
+                file.seek(SeekFrom::Start(region.start))?;
+                file.read_exact(&mut header)?;
+                region.bytes = volume_bytes(&header, region.bytes)?;
+                open_volume(&mut file, region)?.unmount()?;
+                region
+            }
         };
-        if !matches!(bytes_per_sector, 512 | 1024 | 2048 | 4096)
-            || sectors == 0
-            || u64::from(bytes_per_sector) * u64::from(sectors) > length
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid or truncated FAT volume geometry",
-            )
-            .into());
-        }
-        let image = Self(Mutex::new(file));
-        image.with_volume(|_| Ok(()))?;
-        Ok(image)
+        Ok(Self {
+            file: Mutex::new(file),
+            region,
+        })
     }
 
     fn with_volume<T>(
         &self,
         operation: impl FnOnce(Dir<'_, ImageReader<'_>>) -> Result<T>,
     ) -> Result<T> {
-        let mut file = lock(&self.0)?;
+        let mut file = lock(&self.file)?;
         if !file.metadata()?.is_file() {
             return Err(MountError::UnsupportedSource);
         }
-        file.rewind()?;
-        let volume = FileSystem::new(
-            ImageReader {
-                file: &mut file,
-                remaining: READ_BUDGET,
-                operations: READ_OPERATIONS,
-            },
-            FsOptions::new().update_accessed_date(false),
-        )?;
+        let volume = open_volume(&mut file, self.region)?;
         operation(volume.root_dir())
     }
 
@@ -103,6 +110,71 @@ impl FatImage {
             read_bounded(entry.to_file(), entry.len())
         })
     }
+}
+
+fn volume_bytes(header: &[u8; 512], capacity: u64) -> io::Result<u64> {
+    let bytes_per_sector = u16::from_le_bytes([header[11], header[12]]);
+    let sectors16 = u16::from_le_bytes([header[19], header[20]]);
+    let sectors = if sectors16 == 0 {
+        u32::from_le_bytes(header[32..36].try_into().unwrap())
+    } else {
+        u32::from(sectors16)
+    };
+    let bytes = u64::from(bytes_per_sector) * u64::from(sectors);
+    if !matches!(bytes_per_sector, 512 | 1024 | 2048 | 4096) || bytes == 0 || bytes > capacity {
+        return Err(invalid_data("invalid or truncated FAT volume geometry"));
+    }
+    Ok(bytes)
+}
+
+fn primary_fat_partition(header: &[u8; 512], length: u64) -> io::Result<Option<Region>> {
+    if header[510..] != [0x55, 0xaa] {
+        return Ok(None);
+    }
+    let mut regions = Vec::<Region>::new();
+    let mut fat = None;
+    for entry in header[446..510].as_chunks::<16>().0 {
+        if entry[4] == 0 {
+            continue;
+        }
+        let address = |field: &[u8]| u64::from(u32::from_le_bytes(field.try_into().unwrap()));
+        let start = address(&entry[8..12]) * MBR_SECTOR_BYTES;
+        let bytes = address(&entry[12..16]) * MBR_SECTOR_BYTES;
+        let end = start + bytes;
+        if !matches!(entry[0], 0 | 0x80) || start == 0 || bytes == 0 || end > length {
+            return Err(invalid_data("invalid or truncated MBR partition"));
+        }
+        if regions
+            .iter()
+            .any(|region| start < region.start + region.bytes && region.start < end)
+        {
+            return Err(invalid_data("overlapping MBR partitions"));
+        }
+        let region = Region { start, bytes };
+        regions.push(region);
+        if matches!(entry[4], 0x01 | 0x04 | 0x06 | 0x0b | 0x0c | 0x0e) {
+            fat.get_or_insert(region);
+        }
+    }
+    Ok(fat)
+}
+
+fn open_volume(file: &mut File, region: Region) -> io::Result<FileSystem<ImageReader<'_>>> {
+    file.seek(SeekFrom::Start(region.start))?;
+    FileSystem::new(
+        ImageReader {
+            file,
+            region,
+            position: 0,
+            remaining: READ_BUDGET,
+            operations: READ_OPERATIONS,
+        },
+        FsOptions::new().update_accessed_date(false),
+    )
+}
+
+fn invalid_data(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
 fn open_entry<'a, 'b>(
@@ -160,13 +232,15 @@ fn info(entry: &DirEntry<'_, ImageReader<'_>>) -> Option<Entry> {
 
 struct ImageReader<'a> {
     file: &'a mut File,
+    region: Region,
+    position: u64,
     remaining: u64,
     operations: usize,
 }
 
 impl Read for ImageReader<'_> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        if bytes.is_empty() {
+        if bytes.is_empty() || self.position == self.region.bytes {
             return Ok(0);
         }
         if self.remaining == 0 || self.operations == 0 {
@@ -176,16 +250,28 @@ impl Read for ImageReader<'_> {
             ));
         }
         self.operations -= 1;
-        let limit = bytes.len().min(self.remaining as usize);
+        let available = self.remaining.min(self.region.bytes - self.position);
+        let limit = (bytes.len() as u64).min(available) as usize;
         let read = self.file.read(&mut bytes[..limit])?;
         self.remaining -= read as u64;
+        self.position += read as u64;
         Ok(read)
     }
 }
 
 impl Seek for ImageReader<'_> {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
-        self.file.seek(position)
+        let offset = match position {
+            SeekFrom::Start(offset) => Some(offset),
+            SeekFrom::Current(delta) => self.position.checked_add_signed(delta),
+            SeekFrom::End(delta) => self.region.bytes.checked_add_signed(delta),
+        }
+        .filter(|&offset| offset <= self.region.bytes)
+        .ok_or_else(|| invalid_data("FAT seek leaves the mounted volume"))?;
+        self.file
+            .seek(SeekFrom::Start(self.region.start + offset))?;
+        self.position = offset;
+        Ok(offset)
     }
 }
 
@@ -196,5 +282,40 @@ impl Write for ImageReader<'_> {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_reader_cannot_seek_or_read_beyond_the_volume() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"xxFATtail").unwrap();
+        file.seek(SeekFrom::Start(2)).unwrap();
+        let mut reader = ImageReader {
+            file: &mut file,
+            region: Region { start: 2, bytes: 3 },
+            position: 0,
+            remaining: READ_BUDGET,
+            operations: READ_OPERATIONS,
+        };
+        assert!(reader.seek(SeekFrom::Current(-1)).is_err());
+        assert_eq!(reader.seek(SeekFrom::End(-1)).unwrap(), 2);
+        let mut tail = Vec::new();
+        reader.read_to_end(&mut tail).unwrap();
+        assert_eq!(tail, b"T");
+        assert!(reader.seek(SeekFrom::End(1)).is_err());
+        assert_eq!(
+            reader
+                .rewind()
+                .and_then(|()| reader.stream_position())
+                .unwrap(),
+            0
+        );
+        let mut contents = Vec::new();
+        reader.read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, b"FAT");
     }
 }
