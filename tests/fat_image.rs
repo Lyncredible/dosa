@@ -96,6 +96,33 @@ fn reads_a_generated_fat12_volume_through_dos() {
         free_bytes,
         "{directory}"
     );
+    // Query the mounted FAT drive and an invalid drive from a DOS COM program.
+    let clusters = data_sectors / sectors_per_cluster;
+    let mut probe = vec![0xb2, 1, 0xb4, 0x36, 0xcd, 0x21];
+    let regs = [
+        (0xf8, sectors_per_cluster),
+        (0xfb, clusters - 2),
+        (0xf9, bytes_per_sector),
+        (0xfa, clusters),
+    ];
+    for (instruction, expected) in regs {
+        probe.extend_from_slice(&[0x81, instruction]);
+        probe.extend_from_slice(&u16::try_from(expected).unwrap().to_le_bytes());
+        probe.extend_from_slice(&[0x74, 5, 0xb8, 1, 0x4c, 0xcd, 0x21]);
+    }
+    probe.extend_from_slice(&[
+        0xb2, 27, 0xb4, 0x36, 0xcd, 0x21, 0x3d, 0xff, 0xff, 0x74, 5, 0xb8, 2, 0x4c, 0xcd, 0x21,
+        0xb8, 0, 0x4c, 0xcd, 0x21,
+    ]);
+    std::fs::write(scratch.path().join("SPACE.COM"), probe).unwrap();
+    let host = format!("C={}", scratch.path().display());
+    let result = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args(["--headless", "--mount-fat"])
+        .arg(&drive)
+        .args(["--mount", &host, "--exec", "C:\\SPACE.COM"])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
     assert_eq!(std::fs::read(image).unwrap(), before);
 }
 

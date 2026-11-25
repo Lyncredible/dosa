@@ -5,8 +5,8 @@ use std::sync::Mutex;
 use fatfs::{Dir, DirEntry, FileSystem, FsOptions};
 
 use super::{
-    DosTimestamp, Entry, MAX_FILE_BYTES, MountError, Result, VolumeIdentity, lock, read_bounded,
-    valid_component,
+    Allocation, DosTimestamp, Entry, MAX_FILE_BYTES, MountError, Result, VolumeIdentity, lock,
+    read_bounded, valid_component,
 };
 
 const READ_BUDGET: u64 = MAX_FILE_BYTES * 2;
@@ -19,6 +19,7 @@ const MAX_LOGICAL_PARTITIONS: u16 = 128;
 pub(super) struct FatImage {
     file: Mutex<File>,
     region: Region,
+    bytes_per_sector: u16,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -63,6 +64,7 @@ impl FatImage {
         };
         Ok(Self {
             file: Mutex::new(file),
+            bytes_per_sector: u16::from_le_bytes([header[11], header[12]]),
             region,
         })
     }
@@ -89,10 +91,16 @@ impl FatImage {
         })
     }
 
-    pub fn free_bytes(&self) -> Result<u64> {
+    pub fn allocation(&self) -> Result<Allocation> {
         self.with_volume(|volume| {
             let stats = volume.stats()?;
-            Ok(u64::from(stats.cluster_size()) * u64::from(stats.free_clusters()))
+            Ok(Allocation {
+                bytes_per_sector: self.bytes_per_sector,
+                sectors_per_cluster: (stats.cluster_size() / u32::from(self.bytes_per_sector))
+                    as u16,
+                free_clusters: u64::from(stats.free_clusters()),
+                total_clusters: u64::from(stats.total_clusters()),
+            })
         })
     }
 

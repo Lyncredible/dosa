@@ -7,7 +7,7 @@ mod names;
 mod timestamp;
 pub use timestamp::DosTimestamp;
 mod volume;
-pub use volume::VolumeIdentity;
+pub use volume::{Allocation, VolumeIdentity};
 mod writable;
 mod zip_mount;
 
@@ -261,11 +261,30 @@ impl Mount {
 
     /// Bytes available on a writable host mount or in the FAT allocation table.
     pub fn free_bytes(&self) -> Result<Option<u64>> {
-        match &self.source {
-            Source::FatImage(image) => image.free_bytes().map(Some),
-            Source::WritableDirectory(directory) => Ok(volume::available_space(&directory.root)),
-            _ => Ok(Some(0)),
-        }
+        Ok(self.allocation()?.map(Allocation::free_bytes))
+    }
+
+    /// Allocation data for DOS services and for the shell.
+    pub fn allocation(&self) -> Result<Option<Allocation>> {
+        let allocation = match &self.source {
+            Source::FatImage(image) => image.allocation()?,
+            Source::WritableDirectory(directory) => {
+                return Ok(volume::host_space(&directory.root));
+            }
+            Source::IsoImage(image) => Allocation {
+                bytes_per_sector: ISO_SECTOR_BYTES as u16,
+                sectors_per_cluster: 1,
+                free_clusters: 0,
+                total_clusters: u64::from(image.sector_count()),
+            },
+            _ => Allocation {
+                bytes_per_sector: 512,
+                sectors_per_cluster: 1,
+                free_clusters: 0,
+                total_clusters: u64::from(u16::MAX),
+            },
+        };
+        Ok(Some(allocation))
     }
 
     /// Apply the drive's effective write protection to an entry's DOS flags.

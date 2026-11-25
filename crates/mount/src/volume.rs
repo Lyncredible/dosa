@@ -20,14 +20,49 @@ impl VolumeIdentity {
     }
 }
 
+/// Allocation geometry and counts reported by a mounted volume.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Allocation {
+    pub bytes_per_sector: u16,
+    pub sectors_per_cluster: u16,
+    pub free_clusters: u64,
+    pub total_clusters: u64,
+}
+
+impl Allocation {
+    pub const fn free_bytes(self) -> u64 {
+        self.free_clusters.saturating_mul(self.cluster_bytes())
+    }
+
+    pub const fn total_bytes(self) -> u64 {
+        self.total_clusters.saturating_mul(self.cluster_bytes())
+    }
+
+    const fn cluster_bytes(self) -> u64 {
+        self.bytes_per_sector as u64 * self.sectors_per_cluster as u64
+    }
+
+    fn host(free: u64, capacity: u64) -> Self {
+        Self {
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            free_clusters: free.min(capacity) / 512,
+            total_clusters: capacity / 512,
+        }
+    }
+}
+
 #[cfg(unix)]
-pub(crate) fn available_space(root: &Dir) -> Option<u64> {
+pub(crate) fn host_space(root: &Dir) -> Option<Allocation> {
     let stat = rustix::fs::fstatvfs(root).ok()?;
-    Some(stat.f_bavail.saturating_mul(stat.f_frsize))
+    Some(Allocation::host(
+        stat.f_bavail.saturating_mul(stat.f_frsize),
+        stat.f_blocks.saturating_mul(stat.f_frsize),
+    ))
 }
 
 #[cfg(windows)]
-pub(crate) fn available_space(root: &Dir) -> Option<u64> {
+pub(crate) fn host_space(root: &Dir) -> Option<Allocation> {
     use std::{os::windows::io::AsRawHandle, ptr::null_mut};
 
     use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetFinalPathNameByHandleW};
@@ -53,12 +88,14 @@ pub(crate) fn available_space(root: &Dir) -> Option<u64> {
     }
     path.push(0);
     let mut free = 0;
-    // The path is NUL-terminated and the only requested output points to a u64.
-    let result = unsafe { GetDiskFreeSpaceExW(path.as_ptr(), &mut free, null_mut(), null_mut()) };
-    (result != 0).then_some(free)
+    let mut capacity = 0;
+    // The path is NUL-terminated and the requested outputs point to writable u64 values.
+    let result =
+        unsafe { GetDiskFreeSpaceExW(path.as_ptr(), &mut free, &mut capacity, null_mut()) };
+    (result != 0).then(|| Allocation::host(free, capacity))
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(crate) fn available_space(_: &Dir) -> Option<u64> {
+pub(crate) fn host_space(_: &Dir) -> Option<Allocation> {
     None
 }
