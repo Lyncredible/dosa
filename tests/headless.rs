@@ -702,6 +702,60 @@ fn dir_formats_wide_bare_and_lowercase_listings() {
 }
 
 #[test]
+fn dir_searches_all_subdirectories_and_applies_sorting_and_dircmd() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.0.join("DATA/NESTED")).unwrap();
+    fs::create_dir(fixture.0.join("ZDIR")).unwrap();
+    for (path, data) in [
+        ("DATA/NESTED/Match.txt", &b"nested"[..]),
+        ("DATA/A.BIN", &b"bin"[..]),
+        ("B.TXT", &b"b"[..]),
+        ("C.TXT", &b"more"[..]),
+        ("D.BIN", &b"medium"[..]),
+        ("ZDIR/A.TXT", &b"z"[..]),
+    ] {
+        fs::write(fixture.0.join(path), data).unwrap();
+    }
+    fs::write(
+        fixture.0.join("DEFAULTS.BAT"),
+        b"@echo off\r\nset DIRCMD=/B/L/S/O:-N C:\\DATA\r\ndir\r\ndir /-s/-l/-o C:\\ZDIR\r\n",
+    )
+    .unwrap();
+    let mount = format!("C={}", fixture.0.display());
+    let run = |command| {
+        Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args(["--headless", "--mount", &mount, "--exec", command])
+            .output()
+            .unwrap()
+    };
+    for (command, expected) in [
+        (
+            "DIR *.TXT /S/B/O:-S",
+            &b"C:\\C.TXT\r\nC:\\B.TXT\r\nC:\\DATA\\NESTED\\MATCH.TXT\r\nC:\\ZDIR\\A.TXT\r\n"[..],
+        ),
+        (
+            "DIR MATCH.TXT /S/B/L",
+            &b"C:\\data\\nested\\match.txt\r\n"[..],
+        ),
+        (
+            "DIR /B/O:GE-N",
+            &b"ZDIR\r\nDATA\r\nDEFAULTS.BAT\r\nD.BIN\r\nC.TXT\r\nB.TXT\r\n"[..],
+        ),
+        (
+            "DEFAULTS",
+            &b"C:\\data\\nested\r\nC:\\data\\a.bin\r\nC:\\data\\nested\\match.txt\r\nA.TXT\r\n"[..],
+        ),
+    ] {
+        let result = run(command);
+        assert!(result.status.success(), "{command}: {result:?}");
+        assert_eq!(result.stdout, expected, "{command}");
+    }
+    let missing = run("DIR MISSING.TXT /S/B");
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("File not found"));
+}
+
+#[test]
 fn runs_a_dos_program_from_file_directory_and_zip_mounts() {
     let dir = Fixture::new();
     let file = dir.0.join("DEMO.COM");
