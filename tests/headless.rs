@@ -277,6 +277,60 @@ fn path_search_preserves_the_shell_drive_and_directories() {
 }
 
 #[test]
+fn prompt_formats_batch_echo_and_cd_still_reports_the_directory() {
+    use dosa::shell::{Command as ShellCommand, Shell};
+
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.0.join("WORK")).unwrap();
+    fs::write(
+        fixture.0.join("PROMPT.BAT"),
+        b"@cd WORK\r\n@prompt [$p]$g \r\necho one\r\n@SET PROMPT=$N$Q$L$B$$ \r\necho two\r\n@prompt\r\necho three\r\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args([
+            "--mount",
+            &format!("C={}", fixture.0.display()),
+            "--headless",
+            "--exec",
+            "PROMPT.BAT",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        output.stdout,
+        b"[C:\\WORK]> echo one\r\none\r\nC=<|$ echo two\r\ntwo\r\nC:\\WORK> echo three\r\nthree\r\n"
+    );
+
+    let mut shell = Shell::new();
+    shell
+        .mount('C', dosa_mount::Mount::open(&fixture.0).unwrap())
+        .unwrap();
+    shell.execute("CD WORK").unwrap();
+    shell.execute("PROMPT $V$_$E$H").unwrap();
+    assert_eq!(shell.prompt(), "MS-DOS Version 5.00\r\n\x1b\x08");
+    let ShellCommand::Print(directory) = shell.execute("CD").unwrap() else {
+        panic!("CD did not report the current directory");
+    };
+    assert_eq!(directory, b"C:\\WORK\r\n");
+    shell.execute("PROMPT $D $T").unwrap();
+    let prompt = shell.prompt();
+    assert_eq!(prompt.len(), 26);
+    for (index, character) in [
+        (3, b' '),
+        (6, b'-'),
+        (9, b'-'),
+        (14, b' '),
+        (17, b':'),
+        (20, b':'),
+        (23, b'.'),
+    ] {
+        assert_eq!(prompt.as_bytes()[index], character, "{prompt}");
+    }
+}
+
+#[test]
 fn dir_formats_wide_bare_and_lowercase_listings() {
     let fixture = Fixture::new();
     fs::create_dir(fixture.0.join("AAA")).unwrap();
