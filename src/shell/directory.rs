@@ -1,15 +1,16 @@
 use std::{cmp::Ordering, error::Error, fmt::Write};
 
-use dosa_dos::matches_dos_pattern;
+use dosa_dos::{Video, matches_dos_pattern};
 use dosa_mount::Entry;
 
-use super::{Shell, split_word};
+use super::{Command, PAUSE_MESSAGE, PendingInput, Shell, split_word};
 
-pub(super) const HELP: &str = "DIR [drive:][path][pattern] [/W] [/B] [/L] [/S] [/O[:order]]\r\n\
+pub(super) const HELP: &str = "DIR [drive:][path][pattern] [/W] [/B] [/L] [/S] [/P] [/O[:order]]\r\n\
     /W  List five names per row.\r\n\
     /B  List names only. With /S, list full paths.\r\n\
     /L  Show names in lowercase.\r\n\
     /S  Search subdirectories.\r\n\
+    /P  Pause after each screen.\r\n\
     /O  Sort by name (N), extension (E), size (S), or directory group (G).\r\n\
         Prefix a sort letter with - to reverse it.\r\n\
     Set DIRCMD for defaults. Use /-switch to cancel a default.\r\n";
@@ -21,6 +22,7 @@ struct Options {
     bare: bool,
     lowercase: bool,
     recursive: bool,
+    paging: bool,
     order: Vec<SortKey>,
     help: bool,
 }
@@ -59,6 +61,7 @@ impl Options {
             "B" => self.bare = enable,
             "L" => self.lowercase = enable,
             "S" => self.recursive = enable,
+            "P" => self.paging = enable,
             "?" if enable => self.help = true,
             "O" if !enable => self.order.clear(),
             order if enable && order.starts_with('O') => {
@@ -139,18 +142,18 @@ fn extension(entry: &Entry) -> (u8, &str) {
 }
 
 impl Shell {
-    pub(super) fn directory(&self, args: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    pub(super) fn directory(&mut self, args: &str) -> Result<Command, Box<dyn Error>> {
         let mut options = Options::default();
         // Help remains available even if a session's DIRCMD contains a typo.
         if args == "/?" {
-            return Ok(HELP.as_bytes().to_owned());
+            return Ok(Command::Print(HELP.as_bytes().to_owned()));
         }
         if let Some(defaults) = self.machine.environment().get("DIRCMD") {
             options.parse(defaults.trim())?;
         }
         options.parse(args)?;
         if options.help {
-            return Ok(HELP.as_bytes().to_owned());
+            return Ok(Command::Print(HELP.as_bytes().to_owned()));
         }
         let (drive, path) = self.resolve(&options.path)?;
         let mount = self.drive_mount(drive)?;
@@ -164,7 +167,7 @@ impl Shell {
                     let parent = mount.canonical_directory(parent)?;
                     let mut text = String::new();
                     format_listing(&mut text, drive, &parent, vec![entry], &options);
-                    return Ok(text.into_bytes());
+                    return Ok(self.listing_output(text.into_bytes(), options.paging));
                 }
                 Ok(_) => (parent, Some(name)),
                 Err(error) if options.recursive && error.is_not_found() => (parent, Some(name)),
@@ -206,7 +209,60 @@ impl Shell {
         if text.is_empty() && pattern.is_some() {
             return Err("File not found".into());
         }
-        Ok(text.into_bytes())
+        Ok(self.listing_output(text.into_bytes(), options.paging))
+    }
+}
+
+impl Shell {
+    fn listing_output(&mut self, bytes: Vec<u8>, paging: bool) -> Command {
+        if paging {
+            Pager { bytes, offset: 0 }.next(self, Vec::new())
+        } else {
+            Command::Print(bytes)
+        }
+    }
+}
+
+pub(super) struct Pager {
+    bytes: Vec<u8>,
+    offset: usize,
+}
+
+impl Pager {
+    pub(super) fn next(mut self, shell: &mut Shell, mut output: Vec<u8>) -> Command {
+        let (columns, rows) = match shell.machine.video() {
+            Video::Text(frame) => (usize::from(frame.columns), usize::from(frame.rows)),
+            Video::Graphics { .. } => (80, 25),
+        };
+        let content_rows = rows - 1;
+        let mut column = 0;
+        let mut used_rows = 0;
+        let start = self.offset;
+        for &byte in &self.bytes[start..] {
+            self.offset += 1;
+            match byte {
+                b'\r' => column = 0,
+                b'\n' => used_rows += 1,
+                _ => {
+                    column += 1;
+                    if column == columns {
+                        column = 0;
+                        used_rows += 1;
+                    }
+                }
+            }
+            if used_rows == content_rows {
+                break;
+            }
+        }
+        output.extend_from_slice(&self.bytes[start..self.offset]);
+        if self.offset == self.bytes.len() {
+            Command::Print(output)
+        } else {
+            output.extend_from_slice(PAUSE_MESSAGE);
+            shell.pending_input = Some(PendingInput::Page(self));
+            Command::WaitForInput(output)
+        }
     }
 }
 

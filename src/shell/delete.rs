@@ -4,7 +4,7 @@ use std::error::Error;
 use dosa_dos::matches_dos_pattern;
 use dosa_mount::{Entry, MountError};
 
-use super::{Command, Confirmation, Shell, split_word};
+use super::{Command, PendingInput, Shell, split_word};
 
 const USAGE: &str = "usage: DEL [drive:][path]filename [/P]";
 pub(super) const HELP: &str = "DEL [drive:][path]filename [/P]\r\n\
@@ -90,8 +90,8 @@ impl Shell {
         }
         if matches!(pattern, "*" | "*.*") {
             let label = deleting.display_path("");
-            self.confirmation = Some(Confirmation::Delete(deleting));
-            return Ok(Command::Confirm(
+            self.pending_input = Some(PendingInput::Delete(deleting));
+            return Ok(Command::WaitForInput(
                 format!("Delete all files in {label} (Y/N)? ").into_bytes(),
             ));
         }
@@ -104,8 +104,8 @@ impl Shell {
             return Command::Prompt;
         };
         let path = deleting.display_path(&entry.name);
-        self.confirmation = Some(Confirmation::Delete(deleting));
-        Command::Confirm(format!("Delete {path} (Y/N)? ").into_bytes())
+        self.pending_input = Some(PendingInput::Delete(deleting));
+        Command::WaitForInput(format!("Delete {path} (Y/N)? ").into_bytes())
     }
 }
 

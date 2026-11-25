@@ -240,7 +240,7 @@ impl Desktop {
             }
             Ok(Command::Clear) => self.shell.machine.clear_console(),
             Ok(Command::Pause) => self.shell.machine.write_console(PAUSE_MESSAGE),
-            Ok(Command::Confirm(prompt)) => self.shell.machine.write_console(&prompt),
+            Ok(Command::WaitForInput(prompt)) => self.shell.machine.write_console(&prompt),
             Ok(Command::Prompt) => {}
             Ok(Command::Exit) => {
                 self.exit = true;
@@ -275,10 +275,7 @@ impl Desktop {
                     break;
                 }
             }
-            if self.running
-                || self.exit
-                || self.shell.batch_waiting()
-                || self.shell.confirmation_waiting()
+            if self.running || self.exit || self.shell.batch_waiting() || self.shell.input_waiting()
             {
                 break;
             }
@@ -540,7 +537,7 @@ impl App for Desktop {
             && !self.exit
             && self.shell.batch_active()
             && !self.shell.batch_waiting()
-            && !self.shell.confirmation_waiting()
+            && !self.shell.input_waiting()
         {
             if self.recording.is_some() {
                 // Capture the last samples before the next guest resets the audio devices.
@@ -773,8 +770,8 @@ impl App for Desktop {
                     Key::Escape => 27,
                     _ => 0,
                 };
-                if self.shell.confirmation_waiting() {
-                    let result = self.shell.resume_confirmation(key);
+                if self.shell.input_waiting() {
+                    let result = self.shell.resume_input(key);
                     match result {
                         Ok(None) => return,
                         Ok(Some(command)) => self.apply_command(Ok(command)),
@@ -1392,6 +1389,41 @@ mod tests {
     }
 
     #[test]
+    fn desktop_dir_p_waits_for_a_key_then_returns_to_the_prompt() {
+        let scratch = tempfile::tempdir().unwrap();
+        for index in 0..30 {
+            std::fs::write(scratch.path().join(format!("F{index:02}.TXT")), b"x").unwrap();
+        }
+        let mut shell = Shell::new();
+        shell
+            .mount('C', Mount::open(scratch.path()).unwrap())
+            .unwrap();
+        let mut desktop = Desktop::new(shell, Some("DIR/P/B"));
+        desktop.tick();
+        assert!(desktop.shell.input_waiting());
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected the text console");
+        };
+        let text = screen_text(frame);
+        assert!(text.contains("Press any key to continue"));
+        assert!(!text.contains("F24.TXT"));
+        desktop.input(Input {
+            key: Key::Enter,
+            pressed: true,
+            text: None,
+            modifiers: Default::default(),
+            scan_code: 0x1c,
+        });
+        assert!(!desktop.shell.input_waiting());
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected the text console");
+        };
+        let text = screen_text(frame);
+        assert!(text.contains("F29.TXT"));
+        assert!(text.trim_end().ends_with("C:\\>"));
+    }
+
+    #[test]
     fn desktop_delete_confirmation_waits_for_input_and_returns_to_the_prompt() {
         let scratch = tempfile::tempdir().unwrap();
         let file = scratch.path().join("TEST.TXT");
@@ -1402,7 +1434,7 @@ mod tests {
             .unwrap();
         let mut desktop = Desktop::new(shell, Some("del TEST.TXT /p"));
         desktop.tick();
-        assert!(desktop.shell.confirmation_waiting());
+        assert!(desktop.shell.input_waiting());
         assert!(file.exists());
         desktop.input(Input {
             key: Key::Character('y'),
@@ -1411,7 +1443,7 @@ mod tests {
             modifiers: Default::default(),
             scan_code: 0x15,
         });
-        assert!(!desktop.shell.confirmation_waiting());
+        assert!(!desktop.shell.input_waiting());
         assert!(!file.exists());
         let Video::Text(frame) = desktop.shell.machine.video() else {
             panic!("expected the text console");

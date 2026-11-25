@@ -223,18 +223,17 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
                     }
                 }
             }
-            Command::Confirm(prompt) => {
+            Command::WaitForInput(prompt) => {
                 output.write_all(&prompt)?;
                 output.flush()?;
                 let mut input = io::stdin().lock();
                 command = loop {
                     let mut key = [0];
                     input.read_exact(&mut key).map_err(|error| {
-                        shell.guest_failed(
-                            format!("confirmation needs Y or N from stdin: {error}").into(),
-                        )
+                        let requirement = shell.pending_input_requirement();
+                        shell.guest_failed(format!("{requirement} from stdin: {error}").into())
                     })?;
-                    if let Some(next) = shell.resume_confirmation(key[0])? {
+                    if let Some(next) = shell.resume_input(key[0])? {
                         break next;
                     }
                 };
