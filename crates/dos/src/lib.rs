@@ -140,6 +140,30 @@ impl PausedGuest<'_> {
         self.cpu.regs
     }
 
+    pub fn instruction_pointer(&self) -> u32 {
+        self.cpu.instruction_pointer()
+    }
+
+    pub fn stack_pointer(&self) -> u32 {
+        self.cpu.stack_pointer()
+    }
+
+    pub fn source_pointer(&self) -> u32 {
+        self.cpu.source_pointer()
+    }
+
+    pub fn peek_data(&self, relative: u8) -> Option<u8> {
+        self.cpu.peek_data_byte(relative)
+    }
+
+    pub fn peek_code(&self, relative: u8) -> Option<u8> {
+        self.cpu.peek_code_byte(relative)
+    }
+
+    pub fn peek_stack(&self, relative: u8) -> Option<u8> {
+        self.cpu.peek_stack_byte(relative)
+    }
+
     pub fn peek(&self, segment: u16, offset: u16) -> Option<u8> {
         self.cpu.peek_u8(segment, offset)
     }

@@ -65,6 +65,7 @@ impl Default for Registers {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RegisterSnapshot {
     registers: Registers,
+    ip_high: u16,
     segments: [Option<Segment>; 6],
     high: [u16; 8],
     fs: u16,
@@ -101,7 +102,7 @@ pub enum CpuErrorKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CpuError {
     pub cs: u16,
-    pub ip: u16,
+    pub ip: u32,
     pub mnemonic: Mnemonic,
     pub kind: CpuErrorKind,
 }
@@ -156,6 +157,7 @@ pub struct Cpu {
     mapping: Option<MemoryMapping>,
     profile: CpuProfile,
     control: Control,
+    ip_high: u16,
     high: [u16; 8],
     fs: u16,
     gs: u16,
@@ -173,6 +175,7 @@ impl Cpu {
     pub fn save_registers(&self) -> RegisterSnapshot {
         RegisterSnapshot {
             registers: self.regs,
+            ip_high: self.ip_high,
             segments: self.control.segments,
             high: self.high,
             fs: self.fs,
@@ -184,6 +187,7 @@ impl Cpu {
 
     pub fn restore_registers(&mut self, snapshot: RegisterSnapshot) {
         self.regs = snapshot.registers;
+        self.ip_high = snapshot.ip_high;
         self.control.segments = snapshot.segments;
         self.high = snapshot.high;
         self.fs = snapshot.fs;
@@ -206,6 +210,7 @@ impl Cpu {
             mapping: None,
             profile,
             control: Control::new(profile),
+            ip_high: 0,
             high: [0; 8],
             fs: 0,
             gs: 0,
@@ -274,41 +279,61 @@ impl Cpu {
         }
     }
 
+    /// Full instruction pointer, including the high word of a 386 code offset.
+    pub fn instruction_pointer(&self) -> u32 {
+        u32::from(self.ip_high) << 16 | u32::from(self.regs.ip)
+    }
+
+    fn set_ip(&mut self, ip: u32) {
+        self.regs.ip = ip as u16;
+        self.ip_high = (ip >> 16) as u16;
+    }
+
     pub fn step(&mut self) -> Result<Step, CpuError> {
         if self.halted {
             return Ok(Step::Halt);
         }
         let cs = self.regs.cs;
-        let ip = self.regs.ip;
+        let ip = self.instruction_pointer();
+        let code_segment = self.control.segments[Register::CS.number()];
+        let bitness = if code_segment.is_some_and(|segment| segment.wide) {
+            32
+        } else {
+            16
+        };
         let fetch_error = CpuError {
             cs,
             ip,
             mnemonic: Mnemonic::INVALID,
             kind: CpuErrorKind::InstructionFetch,
         };
-        let address = self.code_address(ip.into(), 1).ok_or(fetch_error)?;
-        let unwrapped_ip = usize::from(ip) + 15 <= 1 << 16;
+        let address = self.code_address(ip, 1).ok_or(fetch_error)?;
+        let unwrapped_ip = code_segment.is_some() || ip <= 0x10000 - 15;
         let ram_only = self
             .mapping
             .as_ref()
             .is_none_or(|map| address >= map.end || address + 15 <= map.start);
         let tail: [u8; 15];
-        let readable_window = self.code_address(ip.into(), 15).is_some();
+        let readable_window = self.code_address(ip, 15).is_some();
         let code = if unwrapped_ip && ram_only && readable_window && address + 15 <= MEMORY_SIZE {
             &self.memory[address..address + 15]
         } else {
             tail = std::array::from_fn(|index| {
-                self.code_address(ip.wrapping_add(index as u16).into(), 1)
+                let offset = ip.wrapping_add(index as u32);
+                let offset = if code_segment.is_none() {
+                    offset & 0xffff
+                } else {
+                    offset
+                };
+                self.code_address(offset, 1)
                     .map_or(0, |address| self.read_byte(address))
             });
             &tail
         };
         // Prior to SSE2, the PAUSE encoding was a REP NOP.
         let instruction =
-            Decoder::with_ip(16, code, u64::from(ip), DecoderOptions::NO_PAUSE).decode();
-        if self.control.segments[Register::CS.number()].is_some()
-            && self.code_address(ip.into(), instruction.len()).is_none()
-        {
+            Decoder::with_ip(bitness, code, u64::from(ip), DecoderOptions::NO_PAUSE).decode();
+        if code_segment.is_some() && self.code_address(ip, instruction.len()).is_none() {
             return Err(fetch_error);
         }
         if !instruction.is_invalid()
@@ -334,9 +359,14 @@ impl Cpu {
                 }
                 _ => false,
             };
-        self.regs.ip = instruction.next_ip16();
+        let next = if code_segment.is_some() {
+            instruction.next_ip32()
+        } else {
+            u32::from(instruction.next_ip16())
+        };
+        self.set_ip(next);
         let step = self.execute(&instruction, ip).ok_or_else(|| {
-            self.regs.ip = ip;
+            self.set_ip(ip);
             CpuError {
                 cs,
                 ip,
@@ -350,28 +380,38 @@ impl Cpu {
     }
 
     pub fn enter_interrupt(&mut self, vector: u8) -> Option<()> {
-        let (target_ip, target_cs, descriptor, disable_irq) = if self.protected_mode() {
-            let (ip, cs, descriptor, disable_irq) = self.interrupt_gate(vector)?;
-            (ip, cs, Some(descriptor), disable_irq)
+        let (target_ip, target_cs, descriptor, width, disable_irq) = if self.protected_mode() {
+            let gate = self.interrupt_gate(vector)?;
+            (
+                gate.offset,
+                gate.selector,
+                Some(gate.code),
+                gate.width,
+                gate.disable_irq,
+            )
         } else {
             let offset = u16::from(vector) * 4;
             (
-                self.read_u16(0, offset),
+                u32::from(self.read_u16(0, offset)),
                 self.read_u16(0, offset + 2),
                 None,
+                2,
                 true,
             )
         };
-        self.check_stack_push(2, 3)?;
-        self.push(2, u32::from(self.profile.normalize_flags(self.regs.flags)))?;
-        self.push(2, u32::from(self.regs.cs))?;
-        self.push(2, u32::from(self.regs.ip))?;
+        self.check_stack_push(width, 3)?;
+        self.push(
+            width,
+            u32::from(self.profile.normalize_flags(self.regs.flags)),
+        )?;
+        self.push(width, u32::from(self.regs.cs))?;
+        self.push(width, self.instruction_pointer())?;
         self.regs.flags &= !(TF | if disable_irq { IF } else { 0 });
         self.interrupt_shadow = false;
         self.halted = false;
         self.regs.cs = target_cs;
         self.control.segments[Register::CS.number()] = descriptor;
-        self.regs.ip = target_ip;
+        self.set_ip(target_ip);
         Some(())
     }
 
@@ -404,8 +444,47 @@ impl Cpu {
         }
     }
 
+    /// Inspect the current code stream using the cached code segment, when loaded.
+    pub fn peek_code_byte(&self, relative: u8) -> Option<u8> {
+        let mut offset = self.instruction_pointer().wrapping_add(u32::from(relative));
+        if self.control.segments[Register::CS.number()].is_none() {
+            offset &= 0xffff;
+        }
+        self.peek_byte(self.code_address(offset, 1)?)
+    }
+
+    /// Inspect the stack without changing SP, ESP or mapped device state.
+    pub fn peek_stack_byte(&self, relative: u8) -> Option<u8> {
+        self.peek_byte(self.segment_address(
+            Register::SS,
+            self.stack_offset(relative.into()),
+            1,
+            false,
+        )?)
+    }
+
+    /// The source index in the active code segment's default address size.
+    pub fn source_pointer(&self) -> u32 {
+        if self.control.segments[Register::CS.number()].is_some_and(|segment| segment.wide) {
+            u32::from(self.high[6]) << 16 | u32::from(self.regs.si)
+        } else {
+            u32::from(self.regs.si)
+        }
+    }
+
+    pub fn peek_data_byte(&self, relative: u8) -> Option<u8> {
+        let mut offset = self.source_pointer().wrapping_add(u32::from(relative));
+        if self.control.segments[Register::DS.number()].is_none() {
+            offset &= 0xffff;
+        }
+        self.peek_byte(self.segment_address(Register::DS, offset, 1, false)?)
+    }
+
     pub fn peek_u8(&self, segment: u16, offset: u16) -> Option<u8> {
-        let address = Self::linear(segment, offset.into());
+        self.peek_byte(Self::linear(segment, offset.into()))
+    }
+
+    fn peek_byte(&self, address: usize) -> Option<u8> {
         if let Some(map) = &self.mapping
             && (map.start..map.end).contains(&address)
         {
@@ -606,36 +685,68 @@ impl Cpu {
         Some(())
     }
 
-    fn check_stack_push(&self, width: u8, count: u16) -> Option<()> {
+    fn wide_stack(&self) -> bool {
+        self.control.segments[Register::SS.number()].is_some_and(|segment| segment.wide)
+    }
+
+    /// Address of the top of stack using the active stack segment width.
+    pub fn stack_pointer(&self) -> u32 {
+        let high = if self.wide_stack() {
+            u32::from(self.high[4]) << 16
+        } else {
+            0
+        };
+        high | u32::from(self.regs.sp)
+    }
+
+    fn set_stack_pointer(&mut self, pointer: u32) {
+        if self.wide_stack() {
+            self.high[4] = (pointer >> 16) as u16;
+        }
+        self.regs.sp = pointer as u16;
+    }
+
+    fn stack_offset(&self, change: u32) -> u32 {
+        let pointer = self.stack_pointer().wrapping_add(change);
+        if self.wide_stack() {
+            pointer
+        } else {
+            pointer & 0xffff
+        }
+    }
+
+    fn adjust_stack(&mut self, change: u32) {
+        self.set_stack_pointer(self.stack_offset(change));
+    }
+
+    fn check_stack_push(&self, width: u8, count: u8) -> Option<()> {
         if self.control.segments[Register::SS.number()].is_none() {
             return Some(());
         }
         for word in 1..=count {
-            let offset = self.regs.sp.wrapping_sub(word * u16::from(width));
-            self.segment_address(Register::SS, offset.into(), usize::from(width), true)?;
+            let offset = self.stack_offset(0u32.wrapping_sub(u32::from(word) * u32::from(width)));
+            self.segment_address(Register::SS, offset, usize::from(width), true)?;
         }
         Some(())
     }
 
     fn push(&mut self, width: u8, value: u32) -> Option<()> {
-        let offset = self.regs.sp.wrapping_sub(width.into());
-        let address =
-            self.segment_address(Register::SS, offset.into(), usize::from(width), true)?;
+        let offset = self.stack_offset(0u32.wrapping_sub(width.into()));
+        let address = self.segment_address(Register::SS, offset, usize::from(width), true)?;
         self.write_mem(address, width, value);
-        self.regs.sp = offset;
+        self.set_stack_pointer(offset);
         Some(())
     }
 
-    fn peek_stack(&self, width: u8, relative: u16) -> Option<u32> {
-        let offset = self.regs.sp.wrapping_add(relative);
-        let address =
-            self.segment_address(Register::SS, offset.into(), usize::from(width), false)?;
+    fn peek_stack(&self, width: u8, relative: u32) -> Option<u32> {
+        let offset = self.stack_offset(relative);
+        let address = self.segment_address(Register::SS, offset, usize::from(width), false)?;
         Some(self.read_mem(address, width))
     }
 
     fn pop(&mut self, width: u8) -> Option<u32> {
         let value = self.peek_stack(width, 0)?;
-        self.regs.sp = self.regs.sp.wrapping_add(width.into());
+        self.adjust_stack(width.into());
         Some(value)
     }
 

@@ -478,11 +478,13 @@ impl Desktop {
             return Vec::new();
         };
         let r = guest.registers();
-        let memory = |label, segment, offset: u16| {
+        let ip = guest.instruction_pointer();
+        let sp = guest.stack_pointer();
+        let memory = |label, segment, offset: u32, peek: &dyn Fn(u8) -> Option<u8>| {
             use std::fmt::Write;
             let mut line = format!("{label} {segment:04X}:{offset:04X}");
             for index in 0..8 {
-                match guest.peek(segment, offset.wrapping_add(index)) {
+                match peek(index) {
                     Some(byte) => write!(line, " {byte:02X}").unwrap(),
                     None => line.push_str(" ??"),
                 }
@@ -502,16 +504,18 @@ impl Desktop {
             ),
             format!(
                 "SI {:04X}  DI {:04X}  BP {:04X}  SP {:04X}",
-                r.si, r.di, r.bp, r.sp
+                r.si, r.di, r.bp, sp
             ),
             format!(
                 "CS {:04X}  DS {:04X}  ES {:04X}  SS {:04X}",
                 r.cs, r.ds, r.es, r.ss
             ),
-            format!("IP {:04X}  FLAGS {:04X}", r.ip, r.flags),
-            memory("Code ", r.cs, r.ip),
-            memory("Data ", r.ds, r.si),
-            memory("Stack", r.ss, r.sp),
+            format!("IP {:04X}  FLAGS {:04X}", ip, r.flags),
+            memory("Code ", r.cs, ip, &|index| guest.peek_code(index)),
+            memory("Data ", r.ds, guest.source_pointer(), &|index| {
+                guest.peek_data(index)
+            }),
+            memory("Stack", r.ss, sp, &|index| guest.peek_stack(index)),
         ]
     }
 }
