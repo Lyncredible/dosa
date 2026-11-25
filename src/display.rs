@@ -12,7 +12,7 @@ use font8x8::{
     BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, LATIN_FONTS, MISC_FONTS, UnicodeFonts,
 };
 
-use crate::shell::{Command, Shell};
+use crate::shell::{Command, PAUSE_MESSAGE, Shell};
 use crate::wav::Recording;
 
 const CP437_LOW: &str = "\0☺☻♥♦♣♠•◘○◙♂♀♪♫☼►◄↕‼¶§▬↨↑↓→←∟↔▲▼";
@@ -239,6 +239,7 @@ impl Desktop {
                 }
             }
             Ok(Command::Clear) => self.shell.machine.clear_console(),
+            Ok(Command::Pause) => self.shell.machine.write_console(PAUSE_MESSAGE),
             Ok(Command::Prompt) => {}
             Ok(Command::Exit) => {
                 self.exit = true;
@@ -273,7 +274,7 @@ impl Desktop {
                     break;
                 }
             }
-            if self.running || self.exit {
+            if self.running || self.exit || self.shell.batch_waiting() {
                 break;
             }
         }
@@ -529,7 +530,12 @@ impl App for Desktop {
                 .run(instructions_per_tick(self.settings.speed));
             self.update_guest(result);
         }
-        if !self.running && !self.paused && !self.exit && self.shell.batch_active() {
+        if !self.running
+            && !self.paused
+            && !self.exit
+            && self.shell.batch_active()
+            && !self.shell.batch_waiting()
+        {
             if self.recording.is_some() {
                 // Capture the last samples before the next guest resets the audio devices.
                 self.audio();
@@ -754,6 +760,19 @@ impl App for Desktop {
             return;
         }
         if self.shell.batch_active() {
+            if self.shell.batch_waiting() && event.key != Key::Other && !event.modifiers.logo {
+                let key = match event.key {
+                    Key::Character('c' | 'C') if event.modifiers.ctrl => 3,
+                    Key::Character(character) if !event.modifiers.ctrl => encode_cp437(character),
+                    _ => 0,
+                };
+                if let Some(response) = self.shell.resume_batch(key) {
+                    self.shell.machine.write_console(response);
+                    if !self.shell.batch_active() {
+                        self.finish_command();
+                    }
+                }
+            }
             return;
         }
         match event.key {
@@ -1350,6 +1369,42 @@ mod tests {
         cursor.cursor_mask[1] = 0x4000;
         draw_mouse_cursor(&mut pixels, 2, 1, &cursor);
         assert_eq!(pixels, [245, 235, 225, 255, 40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn desktop_batch_pause_waits_across_ticks_before_resuming() {
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(
+            scratch.path().join("WAIT.BAT"),
+            b"@echo off\r\npause\r\necho resumed\r\n",
+        )
+        .unwrap();
+        let mut shell = Shell::new();
+        shell
+            .mount('C', Mount::open(scratch.path()).unwrap())
+            .unwrap();
+        let mut desktop = Desktop::new(shell, Some("wait"));
+        desktop.tick();
+        desktop.tick();
+        assert!(desktop.shell.batch_waiting());
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected the text console");
+        };
+        assert!(screen_text(frame).contains("Press any key to continue"));
+        assert!(!screen_text(frame).contains("resumed"));
+        desktop.input(Input {
+            key: Key::Enter,
+            pressed: true,
+            text: None,
+            modifiers: Default::default(),
+            scan_code: 0x1c,
+        });
+        desktop.tick();
+        assert!(!desktop.shell.batch_active());
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected the text console");
+        };
+        assert!(screen_text(frame).contains("resumed"));
     }
 
     #[test]

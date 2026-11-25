@@ -2,13 +2,13 @@ mod profile;
 
 use std::env;
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use dosa::display::Desktop;
-use dosa::shell::{Command, Shell};
+use dosa::shell::{Command, PAUSE_MESSAGE, Shell};
 use dosa_dos::RunState;
 use dosa_mount::Mount;
 
@@ -209,6 +209,20 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
     loop {
         match command {
             Command::Print(text) => output.write_all(&text)?,
+            Command::Pause => {
+                output.write_all(PAUSE_MESSAGE)?;
+                let mut input = io::stdin().lock();
+                while shell.batch_waiting() {
+                    output.flush()?;
+                    let mut key = [0];
+                    input.read_exact(&mut key).map_err(|error| {
+                        shell.guest_failed(format!("PAUSE needs a key from stdin: {error}").into())
+                    })?;
+                    if let Some(response) = shell.resume_batch(key[0]) {
+                        output.write_all(response)?;
+                    }
+                }
+            }
             Command::Launched => {
                 let mut halted_since = None;
                 loop {

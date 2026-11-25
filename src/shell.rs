@@ -13,7 +13,7 @@ mod rename;
 mod search_path;
 
 use batch::Batch;
-pub use batch::BatchStep;
+pub use batch::{BatchStep, PAUSE_MESSAGE};
 
 const MOUNT_HELP: &str = "MOUNT drive [/ISO | /FAT | /RW | /SESSION] host-path\r\n\
     Files, directories, and ZIPs open read-only by default.\r\n\
@@ -30,6 +30,7 @@ pub enum Command {
     Print(Vec<u8>),
     Launched,
     Clear,
+    Pause,
     Prompt,
     Exit,
 }
@@ -195,11 +196,13 @@ impl Shell {
             "REM" => return Ok(Command::Prompt),
             "IF" if args == "/?" => condition::HELP.as_bytes().to_vec(),
             "SHIFT" if args == "/?" => batch::SHIFT_HELP.as_bytes().to_vec(),
+            "PAUSE" if args == "/?" => batch::PAUSE_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("MOUNT") => MOUNT_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("SET") => SET_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("PATH") => search_path::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("IF") => condition::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("SHIFT") => batch::SHIFT_HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("PAUSE") => batch::PAUSE_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("PROMPT") => prompt::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("MD") || args.eq_ignore_ascii_case("MKDIR") => {
                 MKDIR_HELP.as_bytes().to_vec()
