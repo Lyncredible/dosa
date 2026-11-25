@@ -322,6 +322,7 @@ fn info(entry: &DirEntry<'_, ImageReader<'_>>) -> Option<Entry> {
         host_name,
         is_dir: entry.is_dir(),
         size: entry.len(),
+        attributes: entry.attributes().bits(),
     })
 }
 

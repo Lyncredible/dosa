@@ -60,6 +60,88 @@ fn reads_a_generated_fat12_volume_through_dos() {
 }
 
 #[test]
+fn fat_attributes_match_dir_filters_and_guest_find() {
+    use dosa_mount::attributes;
+
+    let scratch = tempfile::tempdir().unwrap();
+    let mut image = vec![0; 1_474_560];
+    {
+        let mut handle = Cursor::new(&mut image);
+        fatfs::format_volume(
+            &mut handle,
+            fatfs::FormatVolumeOptions::new().fat_type(fatfs::FatType::Fat12),
+        )
+        .unwrap();
+        handle.rewind().unwrap();
+        let volume = fatfs::FileSystem::new(handle, fatfs::FsOptions::new()).unwrap();
+        let root = volume.root_dir();
+        for name in ["NORMAL.TXT", "MASKED.DAT"] {
+            root.create_file(name).unwrap().write_all(b"x").unwrap();
+        }
+        root.create_dir("NOTES").unwrap();
+    }
+    let word = |at| u16::from_le_bytes([image[at], image[at + 1]]) as usize;
+    let start = (word(14) + usize::from(image[16]) * word(22)) * word(11);
+    let root_len = word(17) * 32;
+    let masked = image[start..start + root_len]
+        .as_chunks_mut::<32>()
+        .0
+        .iter_mut()
+        .find(|entry| &entry[..11] == b"MASKED  DAT")
+        .unwrap();
+    masked[11] = attributes::HIDDEN | attributes::SYSTEM;
+    let path = scratch.path().join("attribute fixture.img");
+    std::fs::write(&path, image).unwrap();
+
+    // FindFirst hides the entry for CX=0, returns it for CX=6, and puts both
+    // flags in the default DTA. Get Attributes returns the same bits in CX.
+    let mut probe = vec![
+        0xba, 0, 2, 0x31, 0xc9, 0xb4, 0x4e, 0xcd, 0x21, 0x72, 5, 0xb8, 1, 0x4c, 0xcd, 0x21, 0xba,
+        0, 2, 0xb9, 6, 0, 0xb4, 0x4e, 0xcd, 0x21, 0x73, 5, 0xb8, 2, 0x4c, 0xcd, 0x21, 0xa0, 0x95,
+        0, 0x24, 6, 0x3c, 6, 0x74, 5, 0xb8, 3, 0x4c, 0xcd, 0x21, 0xba, 0, 2, 0xb8, 0, 0x43, 0xcd,
+        0x21, 0x73, 5, 0xb8, 4, 0x4c, 0xcd, 0x21, 0x80, 0xe1, 6, 0x80, 0xf9, 6, 0x74, 5, 0xb8, 5,
+        0x4c, 0xcd, 0x21, 0xb8, 0, 0x4c, 0xcd, 0x21,
+    ];
+    probe.resize(0x100, 0);
+    probe.extend_from_slice(b"A:\\MASKED.DAT\0");
+    std::fs::write(scratch.path().join("PROBE.COM"), probe).unwrap();
+
+    let a = format!("A={}", path.display());
+    let c = format!("C={}", scratch.path().display());
+    for (command, expected) in [
+        ("DIR A:\\ /B/O:N", &b"NORMAL.TXT\r\nNOTES\r\n"[..]),
+        (
+            "DIR A:\\ /B/A",
+            &b"NORMAL.TXT\r\nMASKED.DAT\r\nNOTES\r\n"[..],
+        ),
+        ("DIR A:\\ /B/A:HS-R", &b""[..]),
+        ("DIR A:\\ /B/A:HSA", &b""[..]),
+        ("DIR A:\\ /B/A:HS-AD", &b""[..]),
+        ("DIR A:\\ /B/A:HS-A-D", &b"MASKED.DAT\r\n"[..]),
+        (
+            "DIR A:\\ /B/A:R-D/O:N",
+            &b"MASKED.DAT\r\nNORMAL.TXT\r\n"[..],
+        ),
+        ("C:\\PROBE.COM", &b""[..]),
+    ] {
+        let result = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([
+                "--headless",
+                "--mount-fat",
+                &a,
+                "--mount",
+                &c,
+                "--exec",
+                command,
+            ])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{command}: {result:?}");
+        assert_eq!(result.stdout, expected, "{command}");
+    }
+}
+
+#[test]
 fn rejects_a_truncated_image() {
     let file = tempfile::NamedTempFile::new().unwrap();
     assert!(dosa_mount::Mount::open_fat_image(file.path()).is_err());

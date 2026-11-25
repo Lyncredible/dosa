@@ -1,11 +1,11 @@
 use std::{cmp::Ordering, error::Error, fmt::Write};
 
 use dosa_dos::{Video, matches_dos_pattern};
-use dosa_mount::Entry;
+use dosa_mount::{Entry, attributes};
 
 use super::{Command, PAUSE_MESSAGE, PendingInput, Shell, split_word};
 
-pub(super) const HELP: &str = "DIR [drive:][path][pattern] [/W] [/B] [/L] [/S] [/P] [/O[:order]]\r\n\
+pub(super) const HELP: &str = "DIR [drive:][path][pattern] [/W] [/B] [/L] [/S] [/P] [/O[:order]] [/A[:attributes]]\r\n\
     /W  List five names per row.\r\n\
     /B  List names only. With /S, list full paths.\r\n\
     /L  Show names in lowercase.\r\n\
@@ -13,6 +13,8 @@ pub(super) const HELP: &str = "DIR [drive:][path][pattern] [/W] [/B] [/L] [/S] [
     /P  Pause after each screen.\r\n\
     /O  Sort by name (N), extension (E), size (S), or directory group (G).\r\n\
         Prefix a sort letter with - to reverse it.\r\n\
+    /A  Include hidden and system entries, or filter by H, S, D, A, or R.\r\n\
+        Prefix an attribute with - to exclude it.\r\n\
     Set DIRCMD for defaults. Use /-switch to cancel a default.\r\n";
 
 #[derive(Default)]
@@ -24,6 +26,7 @@ struct Options {
     recursive: bool,
     paging: bool,
     order: Vec<SortKey>,
+    attributes: AttributeFilter,
     help: bool,
 }
 
@@ -64,6 +67,10 @@ impl Options {
             "P" => self.paging = enable,
             "?" if enable => self.help = true,
             "O" if !enable => self.order.clear(),
+            "A" if !enable => self.attributes = AttributeFilter::default(),
+            filter if enable && filter.starts_with('A') => {
+                self.attributes = AttributeFilter::parse(filter[1..].trim_start_matches(':'))?;
+            }
             order if enable && order.starts_with('O') => {
                 self.order = SortKey::parse(order[1..].trim_start_matches(':'))?;
             }
@@ -82,6 +89,54 @@ impl Options {
                     .unwrap_or(Ordering::Equal)
             });
         }
+    }
+}
+
+struct AttributeFilter {
+    required: u8,
+    excluded: u8,
+}
+
+impl Default for AttributeFilter {
+    fn default() -> Self {
+        Self {
+            required: 0,
+            excluded: attributes::HIDDEN | attributes::SYSTEM,
+        }
+    }
+}
+
+impl AttributeFilter {
+    fn parse(filter: &str) -> Result<Self, Box<dyn Error>> {
+        let mut required = 0;
+        let mut excluded = 0;
+        let mut chars = filter.chars();
+        while let Some(key) = chars.next() {
+            let negate = key == '-';
+            let bit = match if negate { chars.next() } else { Some(key) } {
+                Some('H') => attributes::HIDDEN,
+                Some('S') => attributes::SYSTEM,
+                Some('D') => attributes::DIRECTORY,
+                Some('A') => attributes::ARCHIVE,
+                Some('R') => attributes::READ_ONLY,
+                _ => return Err(format!("invalid DIR attribute filter {filter}").into()),
+            };
+            if negate {
+                excluded |= bit;
+            } else {
+                required |= bit;
+            }
+        }
+        Ok(Self { required, excluded })
+    }
+
+    fn matches(&self, flags: u8) -> bool {
+        flags & self.required == self.required && flags & self.excluded == 0
+    }
+
+    fn visits(&self, entry: &Entry) -> bool {
+        entry.is_dir
+            && entry.attributes & self.excluded & (attributes::HIDDEN | attributes::SYSTEM) == 0
     }
 }
 
@@ -164,6 +219,9 @@ impl Shell {
             match mount.metadata(&path) {
                 Ok(entry) if entry.is_dir => (path.as_str(), None),
                 Ok(entry) if !options.recursive => {
+                    if !options.attributes.matches(mount.dos_attributes(&entry)) {
+                        return Err("File not found".into());
+                    }
                     let parent = mount.canonical_directory(parent)?;
                     let mut text = String::new();
                     format_listing(&mut text, drive, &parent, vec![entry], &options);
@@ -187,10 +245,11 @@ impl Shell {
                     entries
                         .iter()
                         .rev()
-                        .filter(|entry| entry.is_dir)
+                        .filter(|entry| options.attributes.visits(entry))
                         .map(|entry| join_path(&directory, &entry.name)),
                 );
             }
+            entries.retain(|entry| options.attributes.matches(mount.dos_attributes(entry)));
             if let Some(pattern) = pattern {
                 entries.retain(|entry| {
                     if pattern.contains(['*', '?']) {
