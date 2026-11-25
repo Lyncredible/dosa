@@ -61,7 +61,7 @@ pub(crate) struct DeviceHandle {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum OutputTarget {
+pub(crate) enum HandleTarget {
     Console,
     Null,
     File(u16),
@@ -440,19 +440,59 @@ impl DosFiles {
         self.handles.contains_key(&handle)
     }
 
-    pub(crate) fn output_target(&self, handle: u16) -> Result<OutputTarget, u16> {
+    pub(crate) fn input_target(&self, handle: u16) -> Result<HandleTarget, u16> {
+        match self.file(handle).map(|file| &file.source) {
+            Some(FileSource::Device(channel)) if channel.readable => Ok(match channel.device {
+                DosDevice::Console => HandleTarget::Console,
+                DosDevice::Null => HandleTarget::Null,
+            }),
+            Some(FileSource::ReadOnly { .. } | FileSource::Writable { readable: true, .. }) => {
+                Ok(HandleTarget::File(handle))
+            }
+            Some(FileSource::UnavailableDevice) | None => Err(6),
+            _ => Err(5),
+        }
+    }
+
+    pub(crate) fn available(&self, handle: u16) -> bool {
+        let Some(file) = self.file(handle) else {
+            return false;
+        };
+        let length = match &file.source {
+            FileSource::ReadOnly { contents, .. } => contents.len() as u64,
+            FileSource::Writable {
+                file,
+                readable: true,
+                ..
+            } => file.length().unwrap_or(0),
+            _ => return false,
+        };
+        (file.position as u64) < length
+    }
+
+    pub(crate) fn output_target(&self, handle: u16) -> Result<HandleTarget, u16> {
         match self.file(handle).map(|file| &file.source) {
             Some(FileSource::Device(channel)) if channel.writable => Ok(match channel.device {
-                DosDevice::Console => OutputTarget::Console,
-                DosDevice::Null => OutputTarget::Null,
+                DosDevice::Console => HandleTarget::Console,
+                DosDevice::Null => HandleTarget::Null,
             }),
-            Some(FileSource::Writable { writable: true, .. }) => Ok(OutputTarget::File(handle)),
+            Some(FileSource::Writable { writable: true, .. }) => Ok(HandleTarget::File(handle)),
             Some(FileSource::UnavailableDevice) | None => Err(6),
             _ => Err(5),
         }
     }
 
     pub(crate) fn read(&mut self, handle: u16, length: usize) -> Result<Cow<'_, [u8]>, u16> {
+        self.read_through(handle, length, None::<fn(u8) -> bool>)
+    }
+
+    /// Read at most length bytes, advancing the handle only through the matching byte.
+    pub(crate) fn read_through(
+        &mut self,
+        handle: u16,
+        length: usize,
+        stop: Option<impl FnMut(u8) -> bool>,
+    ) -> Result<Cow<'_, [u8]>, u16> {
         let file = self.file_mut(handle).ok_or(6u16)?;
         let data = match &file.source {
             FileSource::UnavailableDevice => return Err(6),
@@ -473,8 +513,17 @@ impl DosFiles {
                 readable: false, ..
             } => return Err(5),
         };
-        file.position += data.len();
-        Ok(data)
+        let used = stop
+            .and_then(|predicate| data.iter().copied().position(predicate))
+            .map_or(data.len(), |index| index + 1);
+        file.position += used;
+        Ok(match data {
+            Cow::Borrowed(bytes) => Cow::Borrowed(&bytes[..used]),
+            Cow::Owned(mut bytes) => {
+                bytes.truncate(used);
+                Cow::Owned(bytes)
+            }
+        })
     }
 
     pub(crate) fn write(
