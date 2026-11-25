@@ -338,12 +338,19 @@ impl CopyOperation {
     ) -> Result<(), Box<dyn Error>> {
         let combining = job.inputs.len() > 1;
         let mut data = Vec::new();
+        let mut modified = shell.machine.adjusted_file_time();
         for source in job.inputs {
             let mount = shell.drive_mount(source.drive)?;
             let path = in_directory(&source.parent, &source.host_name);
             let entry = mount.metadata(&path)?;
             if entry.host_name != source.host_name {
                 return Err(MountError::NotFound(path).into());
+            }
+            if !combining
+                && !self.default_ascii
+                && let Some(timestamp) = entry.modified
+            {
+                modified = Some(timestamp.to_system_time());
             }
             let mut bytes = mount.read(&path)?;
             let ascii = source
@@ -365,12 +372,12 @@ impl CopyOperation {
         }
         let mount = shell.drive_mount(self.drive)?;
         if let Some(file) = existing {
-            file.replace(&data)?;
+            file.replace_at(&data, modified)?;
             if self.verify && file.read()? != data {
                 return Err("COPY verification failed".into());
             }
         } else {
-            mount.write_new_file(&job.path, &data)?;
+            mount.write_new_file_at(&job.path, &data, modified)?;
             if self.verify && mount.read(&job.path)? != data {
                 return Err("COPY verification failed".into());
             }

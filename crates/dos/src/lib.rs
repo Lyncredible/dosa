@@ -256,6 +256,11 @@ impl Machine {
         self.session_clock.now()
     }
 
+    /// Return the DOS time for a mounted file when the session clock was adjusted.
+    pub fn adjusted_file_time(&self) -> Option<std::time::SystemTime> {
+        self.session_clock.adjusted_file_time()
+    }
+
     pub fn set_date(&mut self, year: u16, month: u8, day: u8) -> bool {
         self.session_clock.set_date(year, month, day)
     }

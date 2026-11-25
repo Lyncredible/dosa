@@ -1,4 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A DOS-compatible modification date and time, with two-second precision.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -84,6 +84,23 @@ impl DosTimestamp {
             (self.time >> 5 & 63) as u8,
             ((self.time & 31) * 2) as u8,
         )
+    }
+
+    /// Convert the DOS calendar to the UTC representation used for host file times.
+    pub fn to_system_time(self) -> SystemTime {
+        let (year, month, day) = self.date();
+        let (hour, minute, second) = self.time();
+        let days = (1970..year)
+            .map(|year| if leap(year) { 366 } else { 365 })
+            .sum::<u64>()
+            + (1..month)
+                .map(|month| u64::from(month_days(year, month)))
+                .sum::<u64>()
+            + u64::from(day - 1);
+        UNIX_EPOCH
+            + Duration::from_secs(
+                days * 86_400 + u64::from(hour) * 3600 + u64::from(minute) * 60 + u64::from(second),
+            )
     }
 
     /// The packed DOS date and time words.

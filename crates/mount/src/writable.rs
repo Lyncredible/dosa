@@ -330,6 +330,16 @@ impl Mount {
 
     /// Copy completed data into a new guest file without replacing an existing entry.
     pub fn write_new_file(&self, path: &str, bytes: &[u8]) -> Result<()> {
+        self.write_new_file_at(path, bytes, None)
+    }
+
+    /// Copy completed data and an optional DOS modification time into a new file.
+    pub fn write_new_file_at(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        modified: Option<SystemTime>,
+    ) -> Result<()> {
         if bytes.len() as u64 > MAX_FILE_BYTES {
             return Err(MountError::FileTooLarge);
         }
@@ -343,7 +353,11 @@ impl Mount {
             .create_new(true)
             .follow(FollowSymlinks::No);
         let mut file = target.parent.open_with(&name, &options)?;
-        let result = file.write_all(bytes).and_then(|()| file.sync_all());
+        let result = (|| {
+            file.write_all(bytes)?;
+            set_modified(&file, modified)?;
+            file.sync_all()
+        })();
         if let Err(error) = result {
             // Release the handle before removing the incomplete file on Windows.
             drop(file);
