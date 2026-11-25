@@ -29,6 +29,26 @@ impl Drop for Directory {
 }
 
 #[test]
+fn guest_display_detection_agrees_with_bios_equipment_word() {
+    let directory = Directory::new("equipment-word");
+    directory.write(
+        "DISPLAY.COM",
+        &[
+            0x31, 0xc0, 0x8e, 0xc0, // ES = 0
+            0x26, 0x8b, 0x1e, 0x10, 0x04, // MOV BX, ES:[0410h]
+            0xcd, 0x11, // Read the BIOS equipment word
+            0x39, 0xd8, 0x75, 0x0b, // Fail if the two readings disagree
+            0x24, 0x30, 0x3c, 0x20, 0x75, 0x05, // Require 80-column color
+            0xb8, 0x00, 0x4c, 0xcd, 0x21, // Exit successfully
+            0xb8, 0x01, 0x4c, 0xcd, 0x21, // Exit with an error
+        ],
+    );
+    let mut machine = directory.machine();
+    machine.launch('C', "DISPLAY.COM", "").unwrap();
+    assert_eq!(machine.run(100).unwrap(), RunState::Exited(0));
+}
+
+#[test]
 fn paused_debugger_steps_through_wait_and_consumes_no_wall_clock_time() {
     let directory = Directory::new("debugger");
     directory.write(
