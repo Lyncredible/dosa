@@ -1,7 +1,8 @@
 use std::time::SystemTime;
 
 use dosa_mount::{
-    DosTimestamp, Entry, Mount, MountError, WritableFile, WriteDisposition, attributes,
+    DosTimestamp, Entry, FileWriteOptions, Mount, MountError, WritableFile, WriteDisposition,
+    attributes,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
@@ -318,7 +319,7 @@ impl DosFiles {
         &mut self,
         handle: u16,
         data: &[u8],
-        modified: Option<SystemTime>,
+        write: FileWriteOptions,
     ) -> Result<(), u16> {
         let file = self.handles.get_mut(&handle).ok_or(6u16)?;
         let FileSource::Writable {
@@ -344,7 +345,7 @@ impl DosFiles {
             bytes[file.position..end].copy_from_slice(data);
         }
         destination
-            .replace_at(&bytes, modified)
+            .replace_with(&bytes, write)
             .map_err(mount_code)?;
         file.position = end;
         Ok(())

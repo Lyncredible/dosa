@@ -20,7 +20,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 use writable::WritableDirectory;
-pub use writable::{WritableFile, WriteDisposition};
+pub use writable::{FileWriteOptions, WritableFile, WriteDisposition};
 use zip_mount::ZipMount;
 
 /// Upper bound on a single mounted file read or write.

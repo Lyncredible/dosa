@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
 
-use dosa_dos::{BootDrive, Machine};
+use dosa_dos::{BootDrive, DOS_VERSION, Machine};
 use dosa_mount::Mount;
 
 mod batch;
@@ -32,6 +32,10 @@ const MKDIR_HELP: &str = "MKDIR [drive:]path\r\nMD [drive:]path\r\nCreate a dire
 const RMDIR_HELP: &str = "RMDIR [drive:]path\r\nRD [drive:]path\r\nRemove an empty directory. Change out of it first.\r\n";
 const SET_HELP: &str =
     "SET [variable=[value]]\r\nList, set, or clear DOS environment variables.\r\n";
+
+const VER_HELP: &str = "VER\r\nDisplay the DOS version reported to programs.\r\n";
+const VERIFY_HELP: &str =
+    "VERIFY [ON | OFF]\r\nShow or set read-back verification of file writes.\r\n";
 
 pub enum Command {
     Print(Vec<u8>),
@@ -237,6 +241,8 @@ impl Shell {
             }
             "HELP" if args.eq_ignore_ascii_case("DATE") => clock::DATE_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("TIME") => clock::TIME_HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("VER") => VER_HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("VERIFY") => VERIFY_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("VOL") => volume::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("DIR") => directory::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("COPY") => copy::HELP.as_bytes().to_vec(),
@@ -261,6 +267,8 @@ impl Shell {
                 BOOT A|C path              Boot a floppy or hard disk image\r\n\
                 DATE [mm-dd-yy]            Show or set the DOS date\r\n\
                 TIME [hh:mm]               Show or set the DOS time\r\n\
+                VER                        Display the DOS version\r\n\
+                VERIFY [ON|OFF]            Show or set file write verification\r\n\
                 VOL [drive:]               Display a drive volume label\r\n\
                 C:                         Switch drives\r\n\
                 CLS                        Clear the screen\r\n\
@@ -271,6 +279,31 @@ impl Shell {
             "DATE" => return Ok(self.clock_command(clock::Component::Date, args)),
             "TIME" => return Ok(self.clock_command(clock::Component::Time, args)),
             "VOL" => return self.volume(args),
+            "VER" => match args {
+                "/?" => VER_HELP.as_bytes().to_vec(),
+                "" => {
+                    let [major, minor] = DOS_VERSION;
+                    format!("Dosa DOS version {major}.{minor:02}\r\n").into_bytes()
+                }
+                _ => return Err("usage: VER".into()),
+            },
+            "VERIFY" => match args.to_ascii_uppercase().as_str() {
+                "/?" => VERIFY_HELP.as_bytes().to_vec(),
+                "" => {
+                    let state = if self.machine.verify_writes() {
+                        "on"
+                    } else {
+                        "off"
+                    };
+                    format!("VERIFY is {state}\r\n").into_bytes()
+                }
+                "ON" | "OFF" => {
+                    self.machine
+                        .set_verify_writes(args.eq_ignore_ascii_case("ON"));
+                    return Ok(Command::Prompt);
+                }
+                _ => return Err("usage: VERIFY [ON | OFF]".into()),
+            },
             "CD" | "CHDIR" => {
                 if args.is_empty() {
                     format!("{}\r\n", self.current_path()).into_bytes()

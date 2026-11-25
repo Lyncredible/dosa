@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 
 use dosa_dos::matches_dos_pattern;
-use dosa_mount::{MountError, WritableFile, WriteDisposition};
+use dosa_mount::{FileWriteOptions, MountError, WritableFile, WriteDisposition};
 
 use super::{Command, PendingInput, Shell, rename::destination_name, split_word};
 
@@ -371,16 +371,14 @@ impl CopyOperation {
             data.push(0x1a);
         }
         let mount = shell.drive_mount(self.drive)?;
+        let write = FileWriteOptions {
+            modified,
+            verify: self.verify || shell.machine.verify_writes(),
+        };
         if let Some(file) = existing {
-            file.replace_at(&data, modified)?;
-            if self.verify && file.read()? != data {
-                return Err("COPY verification failed".into());
-            }
+            file.replace_with(&data, write)?;
         } else {
-            mount.write_new_file_at(&job.path, &data, modified)?;
-            if self.verify && mount.read(&job.path)? != data {
-                return Err("COPY verification failed".into());
-            }
+            mount.write_new_file_with(&job.path, &data, write)?;
         }
         if combining || !self.jobs.is_empty() || self.copied != 0 {
             output.extend_from_slice(format!("{}:\\{}\r\n", self.drive, job.path).as_bytes());

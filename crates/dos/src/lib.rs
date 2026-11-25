@@ -185,6 +185,7 @@ pub struct Machine {
     output: Vec<u8>,
     clock: Instant,
     session_clock: clock::SessionClock,
+    verify_writes: bool,
     paused_since: Option<Instant>,
     dta: (u16, u16),
     blocks: BTreeMap<u16, u16>,
@@ -225,6 +226,7 @@ impl Machine {
             output: Vec::new(),
             clock: Instant::now(),
             session_clock: clock::SessionClock::default(),
+            verify_writes: false,
             paused_since: None,
             dta: (PSP, 0x80),
             blocks: BTreeMap::new(),
@@ -259,6 +261,15 @@ impl Machine {
     /// Return the DOS time for a mounted file when the session clock was adjusted.
     pub fn adjusted_file_time(&self) -> Option<std::time::SystemTime> {
         self.session_clock.adjusted_file_time()
+    }
+
+    /// Whether DOS requests read-back verification for mounted file writes.
+    pub fn verify_writes(&self) -> bool {
+        self.verify_writes
+    }
+
+    pub fn set_verify_writes(&mut self, enabled: bool) {
+        self.verify_writes = enabled;
     }
 
     pub fn set_date(&mut self, year: u16, month: u8, day: u8) -> bool {
