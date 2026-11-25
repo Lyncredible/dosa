@@ -28,6 +28,7 @@ The first milestone is a GPU-rendered DOS prompt that can mount host content and
 | [22 · Sound Blaster digital audio](docs/tasks/22-sound-blaster.md) | 19, 21 | Initial 8-bit playback complete |
 | [23 · DOSBox-X feature comparison](docs/tasks/23-dosbox-x-comparison.md) | 10, 15, 16 | Prioritized |
 | [24 · Desktop controls and appearance](docs/tasks/24-desktop-polish.md) | 03, 10, 23 | Reset, compact menu, and icon implemented. Native title-bar placement planned |
+| [25 · MS-DOS 6.22 built-in command parity](docs/tasks/25-dos-command-parity.md) | 02, 04, 17 | Directory switches implemented. Command parity in progress |
 
 See [architecture](docs/architecture.md) for the library boundaries and execution model.
 

@@ -26,6 +26,48 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn dir_formats_wide_bare_and_lowercase_listings() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.0.join("AAA")).unwrap();
+    for letter in 'B'..='F' {
+        fs::write(fixture.0.join(format!("{letter}.TXT")), b"file").unwrap();
+    }
+    fs::create_dir(fixture.0.join("Long Folder")).unwrap();
+    fs::write(fixture.0.join("Long Folder/G.TXT"), b"nested").unwrap();
+    let mut mount = std::ffi::OsString::from("C=");
+    mount.push(&fixture.0);
+    let run = |command| {
+        Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args(["--headless", "--mount"])
+            .arg(&mount)
+            .args(["--exec", command])
+            .output()
+            .unwrap()
+    };
+    let output = run("DIR /w");
+    assert!(output.status.success(), "{output:?}");
+    let wide = String::from_utf8(output.stdout).unwrap();
+    let rows: Vec<_> = wide.lines().skip(2).collect();
+    assert_eq!(rows[0].split_ascii_whitespace().count(), 5);
+    assert_eq!(rows[1].split_ascii_whitespace().count(), 2);
+    assert!(rows[0].contains("[AAA]"));
+    assert!(rows[0].contains("B.TXT"));
+
+    let output = run("dir/w/b/l c:\\?.txt");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        output.stdout,
+        b"b.txt\r\nc.txt\r\nd.txt\r\ne.txt\r\nf.txt\r\n"
+    );
+    let output = run(r#"DIR "C:\Long Folder\*.TXT" /B"#);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"G.TXT\r\n");
+    let output = run("DIR /unknown");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid DIR switch"));
+}
+
+#[test]
 fn runs_a_dos_program_from_file_directory_and_zip_mounts() {
     let dir = Fixture::new();
     let file = dir.0.join("DEMO.COM");
