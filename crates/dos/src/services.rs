@@ -9,13 +9,21 @@ impl Machine {
     pub(crate) fn interrupt(&mut self, vector: u8) -> Result<(), DosError> {
         let ax = self.cpu.regs.ax;
         let [al, ah] = ax.to_le_bytes();
+        if self.cpu.protected_mode() {
+            return self
+                .cpu
+                .enter_interrupt(vector)
+                .ok_or(DosError::Interrupt { vector, ax });
+        }
         if self.mouse.owns_vector(&self.cpu, vector) {
             self.mouse_interrupt();
             return Ok(());
         }
         if self.has_interrupt_handler(vector) {
-            self.cpu.enter_interrupt(vector);
-            return Ok(());
+            return self
+                .cpu
+                .enter_interrupt(vector)
+                .ok_or(DosError::Interrupt { vector, ax });
         }
         match vector {
             0x10 if self.video.bios(&mut self.cpu) => {
@@ -170,11 +178,13 @@ impl Machine {
         self.emit(b"^C\r\n");
         if self.has_interrupt_handler(0x23) {
             // DOS resumes the interrupted service when the guest handler returns by IRET.
-            self.pending.push(PendingCall::new(resume, &self.cpu));
-            self.cpu.enter_interrupt(0x23);
-        } else {
-            self.exit(3);
+            let call = PendingCall::new(resume, &self.cpu);
+            if self.cpu.enter_interrupt(0x23).is_some() {
+                self.pending.push(call);
+                return;
+            }
         }
+        self.exit(3);
     }
 
     fn console_stdin(&self) -> bool {

@@ -777,3 +777,77 @@ fn masked_irq1_leaves_kbc_output_available_for_guest_port_polling() {
     assert_eq!(machine.run(32).unwrap(), RunState::Exited(0x1e));
     assert_eq!(machine.keyboard.port_read(0x64), Some(0));
 }
+
+#[test]
+fn dos_guest_enters_protected_mode_dispatches_an_interrupt_and_returns() {
+    let folder = Directory::new("protected-mode");
+    let mut com = vec![0; 0x708];
+    fn place(com: &mut [u8], offset: usize, bytes: &[u8]) {
+        let start = offset - 0x100;
+        com[start..start + bytes.len()].copy_from_slice(bytes);
+    }
+    place(
+        &mut com,
+        0x100,
+        &[
+            0xfa, // CLI
+            0x0f, 1, 0x16, 0x80, 1, // LGDT [0180h]
+            0x0f, 1, 0x1e, 0x86, 1, // LIDT [0186h]
+            0x0f, 0x20, 0xc3, // MOV EBX,CR0
+            0x66, 0x83, 0xcb, 1, // OR EBX,1
+            0x0f, 0x22, 0xc3, // MOV CR0,EBX
+            0xea, 0, 0, 8, 0, // JMP 0008:0000
+        ],
+    );
+    place(
+        &mut com,
+        0x170,
+        &[
+            0x8c, 0xcb, 0x8e, 0xdb, 0x8e, 0xd3, 0xbc, 0xfe,
+            0xff, // Restore real-mode DS/SS/SP.
+            0xb4, 0x4c, 0x88, 0xd0, 0xcd, 0x21, // Exit with the protected-mode IRQ result.
+        ],
+    );
+    place(
+        &mut com,
+        0x180,
+        &[
+            0x17, 0, 0x90, 1, 1, 0, // GDTR at physical 10190h.
+            0x07, 3, 0, 5, 1, 0, // IDTR at physical 10500h, limit through INT 60h.
+        ],
+    );
+    place(
+        &mut com,
+        0x190,
+        &[
+            0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0, 0, 4, 1, 0x9a, 0, 0, // Code at DOS offset 0400h.
+            0xff, 1, 0, 2, 1, 0x92, 0, 0, // Data and stack at offset 0200h.
+        ],
+    );
+    place(
+        &mut com,
+        0x400,
+        &[
+            0xb8, 0x10, 0, 0x8e, 0xd8, 0x8e, 0xd0, 0xbc, 0, 1, // DS=SS=0010h, SP=0100h.
+            0xcd, 0x60, 0x0f, 0x20, 0xc3, // MOV EBX,CR0
+            0x66, 0x83, 0xe3, 0xfe, // AND EBX,-2
+            0x0f, 0x22, 0xc3, // MOV CR0,EBX
+            0xea, 0x70, 1, 0, 0x10, // JMP 1000:0170h
+        ],
+    );
+    place(
+        &mut com,
+        0x440,
+        &[
+            0xc6, 0x06, 2, 0, 0x6b, // Write through the protected data selector.
+            0xb2, 0x2a, 0xcf, // MOV DL,2Ah; IRET
+        ],
+    );
+    place(&mut com, 0x800, &[0x40, 0, 8, 0, 0, 0x86, 0, 0]); // 16-bit interrupt gate.
+    folder.write("PROTECT.COM", &com);
+    let mut machine = folder.machine();
+    machine.launch('C', "PROTECT.COM", "").unwrap();
+    assert_eq!(machine.run(100).unwrap(), RunState::Exited(0x2a));
+    assert!(!machine.cpu.protected_mode());
+    assert_eq!(machine.cpu.read_u8(crate::PSP, 0x202), 0x6b);
+}

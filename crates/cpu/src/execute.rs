@@ -14,6 +14,8 @@ impl Cpu {
                 }
                 self.write_op(ins, 0, value)?;
             }
+            Sgdt | Sidt | Lgdt | Lidt => self.table_instruction(ins)?,
+            Smsw | Lmsw => self.machine_status_instruction(ins)?,
             Lea => {
                 let offset = self.offset(ins)?;
                 self.write_op(ins, 0, offset)?;
@@ -28,11 +30,11 @@ impl Cpu {
                     _ => unreachable!(),
                 };
                 let width = Self::width(ins, 0)?;
-                let address = self.memory_address(ins)?;
+                let address = self.memory_address(ins, false)?;
                 let offset = self.read_mem(address, width);
                 let selector = self.read_mem(address + usize::from(width), 2);
-                self.write_op(ins, 0, offset)?;
                 self.set_reg(segment, selector)?;
+                self.write_op(ins, 0, offset)?;
             }
             Xchg => {
                 let left = self.read_op(ins, 0)?;
@@ -46,7 +48,7 @@ impl Cpu {
                 }
             }
             Xlatb => {
-                let value = self.read_mem(self.memory_address(ins)?, 1);
+                let value = self.read_mem(self.memory_address(ins, false)?, 1);
                 self.set_reg(Register::AL, value)?;
             }
             Add | Adc | Sub | Sbb | And | Or | Xor | Cmp | Test => {
@@ -105,20 +107,20 @@ impl Cpu {
                 } else {
                     self.read_op(ins, 0)?
                 };
-                self.push(width, value);
+                self.push(width, value)?;
             }
             Pop => {
-                let value = self.pop(push_pop_width(ins)?);
+                let value = self.pop(push_pop_width(ins)?)?;
                 self.write_op(ins, 0, value)?;
             }
             Pushf | Pushfd => {
                 self.push(
                     if op == Pushf { 2 } else { 4 },
                     u32::from(self.profile.normalize_flags(self.regs.flags)),
-                );
+                )?;
             }
             Popf | Popfd => {
-                let flags = self.pop(if op == Popf { 2 } else { 4 }) as u16;
+                let flags = self.pop(if op == Popf { 2 } else { 4 })? as u16;
                 self.regs.flags = self.profile.normalize_flags(flags);
             }
             Pusha | Pushad => self.push_all(if op == Pusha { 2 } else { 4 })?,
@@ -127,7 +129,7 @@ impl Cpu {
             Leave => {
                 let width = if ins.code() == Code::Leavew { 2 } else { 4 };
                 self.regs.sp = self.regs.bp;
-                let value = self.pop(width);
+                let value = self.pop(width)?;
                 self.set_reg(
                     if width == 2 {
                         Register::BP
@@ -218,7 +220,7 @@ impl Cpu {
                 } else {
                     4
                 };
-                let address = self.memory_address(ins)?;
+                let address = self.memory_address(ins, false)?;
                 let segment = self.read_mem(address + usize::from(width), 2) as u16;
                 (self.read_mem(address, width), Some(segment), width)
             }
@@ -228,13 +230,24 @@ impl Cpu {
             _ => return None,
         };
         let target = u16::try_from(target).ok()?;
-        if ins.mnemonic() == Mnemonic::Call {
-            if segment.is_some() {
-                self.push(width, self.regs.cs.into());
+        let descriptor = if let Some(segment) = segment {
+            let descriptor = self.descriptor(Register::CS, segment)?;
+            if let Some(descriptor) = descriptor {
+                descriptor.address(true, target.into(), 1, false)?;
             }
-            self.push(width, self.regs.ip.into());
+            descriptor
+        } else {
+            None
+        };
+        if ins.mnemonic() == Mnemonic::Call {
+            self.check_stack_push(width, 1 + u16::from(segment.is_some()))?;
+            if segment.is_some() {
+                self.push(width, self.regs.cs.into())?;
+            }
+            self.push(width, self.regs.ip.into())?;
         }
         if let Some(segment) = segment {
+            self.control.segments[Register::CS.number()] = descriptor;
             self.regs.cs = segment;
         }
         self.regs.ip = target;
@@ -247,17 +260,34 @@ impl Cpu {
             Code::Retnd | Code::Retnd_imm16 | Code::Retfd | Code::Retfd_imm16 | Code::Iretd => 4,
             _ => return None,
         };
-        let target = self.read_mem(Self::linear(self.regs.ss, self.regs.sp.into()), width);
-        self.regs.ip = u16::try_from(target).ok()?;
-        self.pop(width);
-        if matches!(
+        let target = u16::try_from(self.peek_stack(width, 0)?).ok()?;
+        let far = matches!(
             ins.mnemonic(),
             Mnemonic::Retf | Mnemonic::Iret | Mnemonic::Iretd
-        ) {
-            self.regs.cs = self.pop(width) as u16;
+        );
+        let selector = if far {
+            Some(self.peek_stack(width, width.into())? as u16)
+        } else {
+            None
+        };
+        let interrupt = matches!(ins.mnemonic(), Mnemonic::Iret | Mnemonic::Iretd);
+        let flags = if interrupt {
+            Some(self.peek_stack(width, u16::from(width) * 2)? as u16)
+        } else {
+            None
+        };
+        if let Some(selector) = selector {
+            let descriptor = self.descriptor(Register::CS, selector)?;
+            if let Some(descriptor) = descriptor {
+                descriptor.address(true, target.into(), 1, false)?;
+            }
+            self.control.segments[Register::CS.number()] = descriptor;
+            self.regs.cs = selector;
         }
-        if matches!(ins.mnemonic(), Mnemonic::Iret | Mnemonic::Iretd) {
-            let flags = self.pop(width) as u16;
+        self.regs.ip = target;
+        let words = 1 + u16::from(far) + u16::from(interrupt);
+        self.regs.sp = self.regs.sp.wrapping_add(words * u16::from(width));
+        if let Some(flags) = flags {
             self.regs.flags = self.profile.normalize_flags(flags);
         }
         if ins.op_count() == 1 {
@@ -294,18 +324,19 @@ impl Cpu {
     }
 
     fn push_all(&mut self, width: u8) -> Option<()> {
+        self.check_stack_push(width, 8)?;
         let registers = general_registers(width);
         let sp = self.get_reg(registers[4])?;
         for (index, reg) in registers.into_iter().enumerate() {
             let value = if index == 4 { sp } else { self.get_reg(reg)? };
-            self.push(width, value);
+            self.push(width, value)?;
         }
         Some(())
     }
 
     fn pop_all(&mut self, width: u8) -> Option<()> {
         for (index, reg) in general_registers(width).into_iter().enumerate().rev() {
-            let value = self.pop(width);
+            let value = self.pop(width)?;
             if index != 4 {
                 self.set_reg(reg, value)?;
             }
@@ -325,16 +356,18 @@ impl Cpu {
         } else {
             Register::EBP
         };
-        self.push(width, self.get_reg(register)?);
+        self.push(width, self.get_reg(register)?)?;
         let frame = self.regs.sp;
         if nesting > 0 {
             let mut parent = self.regs.bp;
             for _ in 1..nesting {
                 parent = parent.wrapping_sub(width.into());
-                let saved = self.read_mem(Self::linear(self.regs.ss, parent.into()), width);
-                self.push(width, saved);
+                let address =
+                    self.segment_address(Register::SS, parent.into(), usize::from(width), false)?;
+                let saved = self.read_mem(address, width);
+                self.push(width, saved)?;
             }
-            self.push(width, frame.into());
+            self.push(width, frame.into())?;
         }
         self.set_reg(register, frame.into())?;
         self.regs.sp = self.regs.sp.wrapping_sub(ins.immediate16());
@@ -382,17 +415,21 @@ impl Cpu {
         if repeat && count == 0 {
             return Some(());
         }
-        let src_addr = source
-            .map(|r| {
-                Some(Self::linear(
-                    self.get_reg(ins.memory_segment())? as u16,
-                    self.get_reg(r)?,
-                ))
-            })
-            .unwrap_or(Some(0))?;
-        let dst_addr = dest
-            .map(|r| Some(Self::linear(self.regs.es, self.get_reg(r)?)))
-            .unwrap_or(Some(0))?;
+        let bytes = usize::from(width);
+        let src_addr = if let Some(register) = source {
+            self.segment_address(ins.memory_segment(), self.get_reg(register)?, bytes, false)?
+        } else {
+            0
+        };
+        let dst_addr = if let Some(register) = dest {
+            let write = matches!(
+                ins.mnemonic(),
+                Movsb | Movsw | Movsd | Stosb | Stosw | Stosd
+            );
+            self.segment_address(Register::ES, self.get_reg(register)?, bytes, write)?
+        } else {
+            0
+        };
         let accumulator = Self::accumulator(width)?;
         let is_comparison = matches!(
             ins.mnemonic(),
