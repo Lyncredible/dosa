@@ -756,7 +756,11 @@ fn dir_formats_wide_bare_and_lowercase_listings() {
     let output = run("DIR /w");
     assert!(output.status.success(), "{output:?}");
     let wide = String::from_utf8(output.stdout).unwrap();
-    let rows: Vec<_> = wide.lines().skip(2).collect();
+    let rows: Vec<_> = wide
+        .lines()
+        .skip_while(|line| !line.contains("Directory of"))
+        .skip(2)
+        .collect();
     assert_eq!(rows[0].split_ascii_whitespace().count(), 5);
     assert_eq!(rows[1].split_ascii_whitespace().count(), 2);
     assert!(rows[0].contains("[AAA]"));
@@ -774,6 +778,43 @@ fn dir_formats_wide_bare_and_lowercase_listings() {
     let output = run("DIR /unknown");
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid DIR switch"));
+}
+
+#[test]
+fn dir_reports_allocatable_space_for_writable_host_mounts() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("DATA.TXT"), vec![0; 1024]).unwrap();
+    let c = format!("C={}", fixture.0.display());
+    let run = |access, command| {
+        let result = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args(["--headless", access, &c, "--exec", command])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{command}: {result:?}");
+        String::from_utf8(result.stdout).unwrap()
+    };
+    assert_eq!(
+        run("--mount-rw", "VOL C:"),
+        " Volume in drive C has no label\r\n"
+    );
+    assert_eq!(run("--mount-rw", "DIR /B"), "DATA.TXT\r\n");
+    let directory = run("--mount-rw", "DIR");
+    assert!(directory.lines().any(|line| {
+        line.split_whitespace()
+            .eq(["1", "file(s)", "1,024", "bytes"])
+    }));
+    let free = directory
+        .lines()
+        .last()
+        .unwrap()
+        .trim()
+        .strip_suffix(" bytes free")
+        .unwrap();
+    assert!(
+        free.replace(',', "").parse::<u64>().unwrap() > 0,
+        "{directory}"
+    );
+    assert!(run("--mount", "DIR").ends_with(" 0 bytes free\r\n"));
 }
 
 #[test]

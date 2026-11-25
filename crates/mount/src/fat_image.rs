@@ -5,7 +5,8 @@ use std::sync::Mutex;
 use fatfs::{Dir, DirEntry, FileSystem, FsOptions};
 
 use super::{
-    DosTimestamp, Entry, MAX_FILE_BYTES, MountError, Result, lock, read_bounded, valid_component,
+    DosTimestamp, Entry, MAX_FILE_BYTES, MountError, Result, VolumeIdentity, lock, read_bounded,
+    valid_component,
 };
 
 const READ_BUDGET: u64 = MAX_FILE_BYTES * 2;
@@ -68,18 +69,36 @@ impl FatImage {
 
     fn with_volume<T>(
         &self,
-        operation: impl FnOnce(Dir<'_, ImageReader<'_>>) -> Result<T>,
+        operation: impl FnOnce(FileSystem<ImageReader<'_>>) -> Result<T>,
     ) -> Result<T> {
         let mut file = lock(&self.file)?;
         if !file.metadata()?.is_file() {
             return Err(MountError::UnsupportedSource);
         }
         let volume = open_volume(&mut file, self.region)?;
-        operation(volume.root_dir())
+        operation(volume)
+    }
+
+    pub fn identity(&self) -> Result<VolumeIdentity> {
+        self.with_volume(|volume| {
+            let label = volume
+                .read_volume_label_from_root_dir()?
+                .unwrap_or_else(|| volume.volume_label());
+            let serial = volume.volume_id();
+            Ok(VolumeIdentity::new(&label, (serial != 0).then_some(serial)))
+        })
+    }
+
+    pub fn free_bytes(&self) -> Result<u64> {
+        self.with_volume(|volume| {
+            let stats = volume.stats()?;
+            Ok(u64::from(stats.cluster_size()) * u64::from(stats.free_clusters()))
+        })
     }
 
     pub fn list(&self, components: &[&str], path: &str) -> Result<Vec<Entry>> {
-        self.with_volume(|mut dir| {
+        self.with_volume(|volume| {
+            let mut dir = volume.root_dir();
             for component in components {
                 let entry = find(&dir, component, path)?;
                 if !entry.is_dir() {
@@ -106,15 +125,15 @@ impl FatImage {
     }
 
     pub fn metadata(&self, components: &[&str], path: &str) -> Result<Entry> {
-        self.with_volume(|dir| {
-            info(&open_entry(dir, components, path)?)
+        self.with_volume(|volume| {
+            info(&open_entry(volume.root_dir(), components, path)?)
                 .ok_or_else(|| MountError::NotFound(path.into()))
         })
     }
 
     pub fn read(&self, components: &[&str], path: &str) -> Result<Vec<u8>> {
-        self.with_volume(|dir| {
-            let entry = open_entry(dir, components, path)?;
+        self.with_volume(|volume| {
+            let entry = open_entry(volume.root_dir(), components, path)?;
             if entry.is_dir() {
                 return Err(MountError::IsDirectory(path.into()));
             }

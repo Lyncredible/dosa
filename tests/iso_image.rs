@@ -97,6 +97,11 @@ fn mounts_generated_iso_via_cli_profile_shell_and_desktop() {
     );
     assert!(!mount.is_writable() && mount.is_readonly("notes.txt").unwrap());
     assert_eq!(
+        mount.volume_identity().unwrap().label.as_deref(),
+        Some("DOSA TEST")
+    );
+    assert_eq!(mount.volume_identity().unwrap().serial, None);
+    assert_eq!(
         mount
             .metadata("notes.txt")
             .unwrap()

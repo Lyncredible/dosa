@@ -1,7 +1,7 @@
 use std::{cmp::Ordering, error::Error, fmt::Write};
 
 use dosa_dos::{Video, matches_dos_pattern};
-use dosa_mount::{DosTimestamp, Entry, attributes};
+use dosa_mount::{DosTimestamp, Entry, Mount, attributes};
 
 use super::{Command, PAUSE_MESSAGE, PendingInput, Shell, split_word};
 
@@ -227,8 +227,9 @@ impl Shell {
                     }
                     let parent = mount.canonical_directory(parent)?;
                     let mut text = String::new();
-                    format_listing(&mut text, drive, &parent, vec![entry], &options);
-                    return Ok(self.listing_output(text.into_bytes(), options.paging));
+                    let totals = format_listing(&mut text, drive, &parent, vec![entry], &options);
+                    let listing = finish_listing(text, drive, mount, totals, &options)?;
+                    return Ok(self.listing_output(listing, options.paging));
                 }
                 Ok(_) => (parent, Some(name)),
                 Err(error) if options.recursive && error.is_not_found() => (parent, Some(name)),
@@ -239,6 +240,7 @@ impl Shell {
         // names reported by the same mounted directory.
         let root = mount.canonical_directory(root)?;
         let mut directories = vec![root];
+        let mut total = ListingSummary::default();
         let mut text = String::new();
         while let Some(directory) = directories.pop() {
             let mut entries = mount.list(&directory)?;
@@ -266,12 +268,15 @@ impl Shell {
                     continue;
                 }
             }
-            format_listing(&mut text, drive, &directory, entries, &options);
+            let summary = format_listing(&mut text, drive, &directory, entries, &options);
+            total.files += summary.files;
+            total.bytes += summary.bytes;
         }
         if text.is_empty() && pattern.is_some() {
             return Err("File not found".into());
         }
-        Ok(self.listing_output(text.into_bytes(), options.paging))
+        let listing = finish_listing(text, drive, mount, total, &options)?;
+        Ok(self.listing_output(listing, options.paging))
     }
 }
 
@@ -346,7 +351,12 @@ fn format_listing(
     path: &str,
     mut entries: Vec<Entry>,
     options: &Options,
-) {
+) -> ListingSummary {
+    let mut summary = ListingSummary::default();
+    for entry in entries.iter().filter(|entry| !entry.is_dir) {
+        summary.files += 1;
+        summary.bytes += u128::from(entry.size);
+    }
     let lowercase_path;
     let path = if options.lowercase && options.recursive && options.bare {
         lowercase_path = path.to_ascii_lowercase();
@@ -409,6 +419,61 @@ fn format_listing(
             text.push_str("\r\n");
         }
     }
+    if !options.bare {
+        summary.write(text);
+    }
+    summary
+}
+
+#[derive(Default)]
+struct ListingSummary {
+    files: usize,
+    bytes: u128,
+}
+
+impl ListingSummary {
+    fn write(&self, text: &mut String) {
+        let _ = write!(
+            text,
+            "{:>9} file(s) {:>14} bytes\r\n",
+            self.files,
+            grouped(self.bytes)
+        );
+    }
+}
+
+fn finish_listing(
+    listing: String,
+    drive: char,
+    mount: &Mount,
+    totals: ListingSummary,
+    options: &Options,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    if options.bare {
+        return Ok(listing.into_bytes());
+    }
+    let mut output = super::volume::volume_heading(drive, mount)?;
+    output.push_str(&listing);
+    if options.recursive {
+        output.push_str("\r\n Total files listed:\r\n");
+        totals.write(&mut output);
+    }
+    if let Some(free) = mount.free_bytes()? {
+        let _ = write!(output, "{:>33} bytes free\r\n", grouped(u128::from(free)));
+    }
+    Ok(output.into_bytes())
+}
+
+fn grouped(value: u128) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.bytes().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(char::from(digit));
+    }
+    grouped
 }
 
 fn write_timestamp(text: &mut String, timestamp: DosTimestamp) {
