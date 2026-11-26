@@ -304,6 +304,7 @@ fn build(state: &MenuState, drive: char) -> io::Result<(OwnedMenu, Vec<Option<Ac
         }
         let label = match tab {
             Tab::Debug => String::from("De&bug"),
+            Tab::StateSlots => String::from("State s&lots"),
             _ => format!("&{label}"),
         };
         root.popup(&label, category)?;

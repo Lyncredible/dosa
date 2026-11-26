@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use dosa_desktop::{
     App, CpuMode, Frame, GamepadState, Input, Key, MenuAction, MenuState, PointerEvent,
-    PointerMode, Scaling, Speed, TextMode, Volume,
+    PointerMode, Scaling, Speed, StateSlot, TextMode, Volume,
 };
 use dosa_dos::{CpuProfile, JoystickState, MouseCursor, RunState, TextFrame, Video};
 use dosa_mount::Mount;
@@ -49,6 +49,7 @@ pub struct Desktop {
     joystick_keys: [bool; 6],
     settings: Settings,
     status: String,
+    state_slots: Option<PathBuf>,
     exit: bool,
     width: u32,
     height: u32,
@@ -121,6 +122,7 @@ impl Desktop {
             joystick_keys: [false; 6],
             settings,
             status: String::new(),
+            state_slots: state_slot_directory(),
             exit: false,
             width: 640,
             height: 400,
@@ -171,6 +173,41 @@ impl Desktop {
             self.status = format!("Quick launch cleanup failed: {error}");
         }
         self.write_input_prompt();
+    }
+
+    fn restore_state(&mut self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        load_guest_file(&mut self.shell, path)?;
+        self.running = true;
+        self.paused = self.shell.machine.paused_guest().is_some();
+        self.inspecting = false;
+        self.paste.clear();
+        self.joystick_keys.fill(false);
+        self.line.clear();
+        self.settings.cpu = match self.shell.machine.cpu_profile() {
+            CpuProfile::I8086 => CpuMode::I8086,
+            CpuProfile::I286 => CpuMode::I286,
+            CpuProfile::I386 => CpuMode::I386,
+        };
+        self.render();
+        Ok(())
+    }
+
+    fn save_state_slot(&self, slot: StateSlot) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = self
+            .state_slots
+            .as_deref()
+            .ok_or("no local state directory")?;
+        std::fs::create_dir_all(directory)?;
+        save_guest_file(&self.shell, &slot_file(directory, slot))
+    }
+
+    fn load_state_slot(&mut self, slot: StateSlot) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = self
+            .state_slots
+            .as_deref()
+            .ok_or("no local state directory")?;
+        let path = slot_file(directory, slot);
+        self.restore_state(&path)
     }
 
     fn clipboard(&mut self) -> Result<&mut arboard::Clipboard, arboard::Error> {
@@ -632,6 +669,7 @@ impl App for Desktop {
             running: self.running,
             batch_active: self.shell.command_active(),
             save_state_blocked: !self.shell.supports_save_state(),
+            state_slots_available: self.state_slots.is_some(),
             text_visible: matches!(self.shell.machine.video(), Video::Text(_)),
             paste_pending: !self.paste.is_empty(),
             paused: self.paused,
@@ -684,23 +722,21 @@ impl App for Desktop {
                 };
             }
             MenuAction::LoadGuestState(path) => {
-                self.status = match load_guest_file(&mut self.shell, &path) {
-                    Ok(()) => {
-                        self.running = true;
-                        self.paused = self.shell.machine.paused_guest().is_some();
-                        self.inspecting = false;
-                        self.paste.clear();
-                        self.joystick_keys.fill(false);
-                        self.line.clear();
-                        self.settings.cpu = match self.shell.machine.cpu_profile() {
-                            CpuProfile::I8086 => CpuMode::I8086,
-                            CpuProfile::I286 => CpuMode::I286,
-                            CpuProfile::I386 => CpuMode::I386,
-                        };
-                        self.render();
-                        "State loaded".into()
-                    }
+                self.status = match self.restore_state(&path) {
+                    Ok(()) => "State loaded".into(),
                     Err(error) => format!("Load state failed: {error}"),
+                };
+            }
+            MenuAction::SaveStateSlot(slot) if self.running => {
+                self.status = match self.save_state_slot(slot) {
+                    Ok(()) => format!("Slot {} saved", slot.number()),
+                    Err(error) => format!("Save slot {} failed: {error}", slot.number()),
+                };
+            }
+            MenuAction::LoadStateSlot(slot) => {
+                self.status = match self.load_state_slot(slot) {
+                    Ok(()) => format!("Slot {} loaded", slot.number()),
+                    Err(error) => format!("Load slot {} failed: {error}", slot.number()),
                 };
             }
             MenuAction::Mount {
@@ -941,6 +977,28 @@ fn save_screenshot(
     writer.finish()?;
     file.persist(path)?;
     Ok(())
+}
+
+fn state_slot_directory() -> Option<PathBuf> {
+    let absolute = |name| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    let root = if cfg!(windows) {
+        absolute("LOCALAPPDATA").map(|path| path.join("Dosa"))
+    } else if cfg!(target_os = "macos") {
+        absolute("HOME").map(|path| path.join("Library/Application Support/Dosa"))
+    } else {
+        absolute("XDG_DATA_HOME")
+            .or_else(|| absolute("HOME").map(|path| path.join(".local/share")))
+            .map(|path| path.join("dosa"))
+    };
+    root.map(|path| path.join("states"))
+}
+
+fn slot_file(directory: &Path, slot: StateSlot) -> PathBuf {
+    directory.join(format!("slot-{}.dosastate", slot.number()))
 }
 
 fn save_guest_file(shell: &Shell, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -2115,6 +2173,53 @@ mod tests {
         }
         assert!(!restored.menu().running && !restored.menu().batch_active);
         assert_eq!(std::fs::read(result).unwrap(), b"BEFOREAFTER");
+    }
+
+    #[test]
+    fn desktop_state_slots_replace_one_checkpoint_and_preserve_the_others() {
+        let media = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let slots = storage.path().join("states");
+        std::fs::write(
+            media.path().join("WAIT.COM"),
+            [0xb4, 0, 0xcd, 0x16, 0xb4, 0x4c, 0xcd, 0x21],
+        )
+        .unwrap();
+        let desktop = |command: Option<&str>| {
+            let mut shell = Shell::new();
+            shell
+                .mount('C', Mount::open(media.path()).unwrap())
+                .unwrap();
+            let mut desktop = Desktop::new(shell, command);
+            desktop.state_slots = Some(slots.clone());
+            desktop
+        };
+        let mut original = desktop(Some("WAIT.COM"));
+        original.tick();
+        original.menu_action(MenuAction::SetPaused(true));
+        original.menu_action(MenuAction::SaveStateSlot(StateSlot::One));
+        assert_eq!(original.menu().status, "Slot 1 saved");
+        original.menu_action(MenuAction::SaveStateSlot(StateSlot::Two));
+        assert_eq!(original.menu().status, "Slot 2 saved");
+        let second = std::fs::read(slot_file(&slots, StateSlot::Two)).unwrap();
+        original.shell.machine.key(b'X', 0x2d);
+        original.menu_action(MenuAction::SaveStateSlot(StateSlot::One));
+        assert_eq!(original.menu().status, "Slot 1 saved");
+        assert_eq!(
+            std::fs::read(slot_file(&slots, StateSlot::Two)).unwrap(),
+            second
+        );
+
+        let mut restored = desktop(None);
+        restored.menu_action(MenuAction::LoadStateSlot(StateSlot::One));
+        assert_eq!(restored.menu().status, "Slot 1 loaded");
+        assert!(restored.menu().running && restored.menu().paused);
+        restored.menu_action(MenuAction::LoadStateSlot(StateSlot::Three));
+        assert!(restored.menu().status.starts_with("Load slot 3 failed"));
+        assert!(restored.menu().running && restored.menu().paused);
+        restored.menu_action(MenuAction::SetPaused(false));
+        restored.tick();
+        assert_eq!(restored.shell.errorlevel(), b'X');
     }
 
     #[test]
