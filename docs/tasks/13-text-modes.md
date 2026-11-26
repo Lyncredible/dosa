@@ -7,6 +7,6 @@ Support 80- and 132-column text with 25, 43, and 50 rows through the shared DOS 
 - Exercise console output, cursor movement, wrapping, and scrolling at rows 43 and 50.
 - Verify guest-visible geometry and the last row of B800 text memory, for both the shell and a real-mode program.
 - Verify intended text geometry after leaving CGA or VGA graphics and returning to the shell.
-- Check the higher-density text modes in a live GPU window at several window sizes.
+- On Windows, run `cargo test --locked -p dosa-desktop presents_wide_text_across_native_window_resizes -- --ignored` with a working GPU backend. It presents a generated 132×50 text grid in a native window at 800×480, 1360×660, and 640×420. It checks fit, whole-pixel scaling, the small-window fallback, and pointer bounds from the published viewport. The desktop application test separately verifies that the DOS text preset produces the same framebuffer geometry.
 
 DOSBox-X offers both 80- and 132-column text modes with several row counts through its menu and shell. [DOSBox-X TrueType and text geometry guide](https://dosbox-x.com/wiki/Guide%3AUsing-TrueType-font-output-in-DOSBox%E2%80%90X)
