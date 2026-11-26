@@ -2,39 +2,43 @@ use std::{error::Error, io::Read, sync::Arc};
 
 use rustysynth::{SoundFont, Synthesizer, SynthesizerSettings};
 
+#[path = "midi_snapshot.rs"]
+mod snapshot;
+use snapshot::{FingerprintReader, MidiChip};
+pub(super) use snapshot::{MidiReplay, MidiSnapshot};
+
 const DATA: u16 = 0x330;
 const STATUS_COMMAND: u16 = 0x331;
 const ACK: u8 = 0xfe;
 
 #[derive(Default)]
 pub(super) struct Mpu401 {
-    synth: Option<Box<Synthesizer>>,
+    synth: Option<MidiChip>,
     acknowledgements: u8,
     uart: bool,
     decoder: Decoder,
 }
 
 impl Mpu401 {
-    pub(super) fn configured(&self) -> bool {
-        self.synth.is_some()
-    }
-
     pub(super) fn load(&mut self, source: &mut impl Read) -> Result<(), Box<dyn Error>> {
-        let font = Arc::new(SoundFont::new(source)?);
-        let settings = SynthesizerSettings::new(crate::AUDIO_SAMPLE_RATE as i32);
-        let synth = Synthesizer::new(&font, &settings)?;
-        self.synth = Some(Box::new(synth));
-        self.reset();
+        let mut reader = FingerprintReader::new(source);
+        let font = Arc::new(SoundFont::new(&mut reader)?);
+        self.synth = Some(MidiChip::new(font, reader.finish())?);
+        self.reset_uart();
         Ok(())
     }
 
     pub(super) fn reset(&mut self) {
+        self.reset_uart();
+        if let Some(chip) = &mut self.synth {
+            chip.restart();
+        }
+    }
+
+    fn reset_uart(&mut self) {
         self.acknowledgements = 0;
         self.uart = false;
         self.decoder = Decoder::default();
-        if let Some(synth) = &mut self.synth {
-            synth.reset();
-        }
     }
 
     pub(super) fn read_port(&mut self, port: u16) -> Option<u8> {
@@ -60,7 +64,8 @@ impl Mpu401 {
         };
         match port {
             STATUS_COMMAND if byte == 0xff => {
-                self.reset();
+                synth.apply(Message::Reset);
+                self.reset_uart();
                 self.acknowledgements = 1;
             }
             STATUS_COMMAND if byte == 0x3f && !self.uart => {
@@ -68,16 +73,11 @@ impl Mpu401 {
                 self.acknowledgements += 1;
             }
             STATUS_COMMAND => {}
-            DATA if self.uart => match self.decoder.push(byte) {
-                Some(Message::Channel(status, [first, second])) => synth.process_midi_message(
-                    i32::from(status & 15),
-                    i32::from(status & 0xf0),
-                    i32::from(first),
-                    i32::from(second),
-                ),
-                Some(Message::Reset) => synth.reset(),
-                None => {}
-            },
+            DATA if self.uart => {
+                if let Some(message) = self.decoder.push(byte) {
+                    synth.apply(message);
+                }
+            }
             DATA => {}
             _ => return false,
         }
@@ -91,13 +91,13 @@ impl Mpu401 {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 enum Message {
     Channel(u8, [u8; 2]),
     Reset,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct Decoder {
     status: u8,
     data: [u8; 2],
@@ -226,6 +226,70 @@ mod tests {
             assert!(pcm.iter().any(|sample| sample.abs() > 0.02));
             machine.reset();
         }
+    }
+
+    #[test]
+    fn midi_snapshot_restores_notes_uart_acknowledgements_and_running_status() {
+        use crate::GuestSnapshotError;
+
+        let folder = Directory::new("midi-save-state");
+        folder.write("LOOP.COM", &[0xeb, 0xfe]);
+        let font = test_soundfont();
+        let mut original = folder.machine();
+        original.load_midi_soundfont(&mut font.as_slice()).unwrap();
+        original.launch('C', "LOOP.COM", "").unwrap();
+        original.clock = std::time::Instant::now() - Duration::from_millis(100);
+        for (port, value) in [
+            (STATUS_COMMAND, 0xff),
+            (STATUS_COMMAND, 0x3f),
+            (DATA, 0x90),
+            (DATA, 60),
+            (DATA, 100),
+        ] {
+            assert!(original.audio.mpu.write_port(port, value));
+        }
+        original
+            .audio
+            .advance(Duration::from_millis(70), &original.cpu);
+        assert!(original.take_audio().iter().any(|value| value.abs() > 0.02));
+        assert!(original.audio.mpu.write_port(DATA, 67)); // A partial running-status Note On.
+        original.set_paused(true);
+        let bytes = original.save_guest().unwrap();
+
+        let mut missing_font = folder.machine();
+        assert!(matches!(
+            missing_font.load_guest(&bytes),
+            Err(GuestSnapshotError::MidiSoundFontChanged)
+        ));
+        let mut different_font = font.clone();
+        let sample_data = different_font
+            .windows(4)
+            .position(|window| window == b"smpl")
+            .unwrap();
+        different_font[sample_data + 8] ^= 1;
+        missing_font
+            .load_midi_soundfont(&mut different_font.as_slice())
+            .unwrap();
+        assert!(matches!(
+            missing_font.load_guest(&bytes),
+            Err(GuestSnapshotError::MidiSoundFontChanged)
+        ));
+
+        let mut restored = folder.machine();
+        restored.load_midi_soundfont(&mut font.as_slice()).unwrap();
+        restored.load_guest(&bytes).unwrap();
+        for guest in [&mut original, &mut restored] {
+            let port = &mut guest.audio.mpu;
+            assert_eq!(port.read_port(STATUS_COMMAND), Some(0x3f));
+            assert_eq!(port.read_port(DATA), Some(ACK));
+            assert_eq!(port.read_port(DATA), Some(ACK));
+            assert_eq!(port.read_port(STATUS_COMMAND), Some(0xbf));
+            assert!(port.write_port(DATA, 96));
+            guest.audio.advance(Duration::from_millis(105), &guest.cpu);
+        }
+        let expected = original.take_audio();
+        assert!(expected.iter().any(|value| value.abs() > 0.02));
+        assert_eq!(restored.take_audio(), expected);
     }
 
     fn test_soundfont() -> Vec<u8> {
