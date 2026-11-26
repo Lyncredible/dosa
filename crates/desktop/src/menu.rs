@@ -86,6 +86,8 @@ pub enum MenuAction {
     SaveScreenshot(PathBuf),
     SaveGuestState(PathBuf),
     LoadGuestState(PathBuf),
+    SaveStateSlot(StateSlot),
+    LoadStateSlot(StateSlot),
     StartRecording(PathBuf),
     StopRecording,
     Mount {
@@ -124,6 +126,7 @@ pub struct MenuState {
     pub running: bool,
     pub batch_active: bool,
     pub save_state_blocked: bool,
+    pub state_slots_available: bool,
     pub text_visible: bool,
     pub paste_pending: bool,
     pub paused: bool,
@@ -148,6 +151,7 @@ impl Default for MenuState {
             running: false,
             batch_active: false,
             save_state_blocked: false,
+            state_slots_available: false,
             text_visible: false,
             paste_pending: false,
             paused: false,
@@ -176,17 +180,34 @@ pub(crate) enum Tab {
     Audio,
     Edit,
     Debug,
+    StateSlots,
 }
 
-pub(crate) const CATEGORIES: [(Tab, &str); 7] = [
+pub(crate) const CATEGORIES: [(Tab, &str); 8] = [
     (Tab::Drives, "Drives"),
     (Tab::Cpu, "CPU"),
     (Tab::Speed, "Speed"),
     (Tab::View, "View"),
+    (Tab::StateSlots, "State slots"),
     (Tab::Audio, "Audio"),
     (Tab::Edit, "Edit"),
     (Tab::Debug, "Debug"),
 ];
+
+/// The three local, named save destinations.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StateSlot {
+    One = 1,
+    Two = 2,
+    Three = 3,
+}
+
+impl StateSlot {
+    pub fn number(self) -> u8 {
+        self as u8
+    }
+}
 const ROOT_ROWS: usize = CATEGORIES.len() + 1;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -696,6 +717,29 @@ pub(crate) fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool
         chosen,
     };
     match tab {
+        Tab::StateSlots => [
+            (StateSlot::One, "Save slot 1", "Load slot 1"),
+            (StateSlot::Two, "Save slot 2", "Load slot 2"),
+            (StateSlot::Three, "Save slot 3", "Load slot 3"),
+        ]
+        .into_iter()
+        .flat_map(|(slot, save, load)| {
+            [
+                item(
+                    save,
+                    Command::App(MenuAction::SaveStateSlot(slot)),
+                    state.state_slots_available && state.running && !state.save_state_blocked,
+                    false,
+                ),
+                item(
+                    load,
+                    Command::App(MenuAction::LoadStateSlot(slot)),
+                    state.state_slots_available,
+                    false,
+                ),
+            ]
+        })
+        .collect(),
         Tab::Edit => vec![
             item(
                 "Copy screen text",
@@ -1073,6 +1117,40 @@ mod tests {
                 })
                 .collect();
             assert_eq!(commands, [(true, enabled[0]), (false, enabled[1])]);
+        }
+    }
+
+    #[test]
+    fn state_slots_offer_saves_only_for_a_supported_running_guest() {
+        for (running, save_state_blocked, save_enabled) in [
+            (false, false, false),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let state = MenuState {
+                running,
+                save_state_blocked,
+                state_slots_available: true,
+                ..Default::default()
+            };
+            let items = options(Tab::StateSlots, &state, 'C', false);
+            assert_eq!(items.len(), 6);
+            for (items, slot) in
+                items
+                    .chunks_exact(2)
+                    .zip([StateSlot::One, StateSlot::Two, StateSlot::Three])
+            {
+                assert_eq!(
+                    items[0].command,
+                    Command::App(MenuAction::SaveStateSlot(slot))
+                );
+                assert_eq!(items[0].enabled, save_enabled);
+                assert_eq!(
+                    items[1].command,
+                    Command::App(MenuAction::LoadStateSlot(slot))
+                );
+                assert!(items[1].enabled);
+            }
         }
     }
 

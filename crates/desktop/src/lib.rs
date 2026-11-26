@@ -21,7 +21,9 @@ mod pointer;
 mod renderer;
 
 pub use input::{Input, Key, Modifiers};
-pub use menu::{CpuMode, MenuAction, MenuState, MountKind, Scaling, Speed, TextMode, Volume};
+pub use menu::{
+    CpuMode, MenuAction, MenuState, MountKind, Scaling, Speed, StateSlot, TextMode, Volume,
+};
 pub use pointer::{PointerEvent, PointerMode};
 use renderer::Renderer;
 
