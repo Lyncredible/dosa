@@ -1,6 +1,6 @@
 use super::{Cpu, CpuProfile, Instruction, Mnemonic, Register};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) struct Table {
     pub(super) base: u32,
     pub(super) limit: u32,
@@ -15,7 +15,7 @@ impl Table {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) struct Segment {
     base: u32,
     limit: u32,
@@ -66,6 +66,7 @@ pub(super) struct InterruptGate {
     pub(super) disable_irq: bool,
 }
 
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(super) struct Control {
     pub(super) cr0: u32,
     pub(super) cr2: u32,
@@ -78,6 +79,29 @@ pub(super) struct Control {
 }
 
 impl Control {
+    pub(super) fn valid_snapshot(&self, profile: CpuProfile) -> bool {
+        let valid_cr0 = match profile {
+            CpuProfile::I8086 => self.cr0 == 0 && self.segments.iter().all(Option::is_none),
+            CpuProfile::I286 => self.cr0 & !0xf == 0,
+            CpuProfile::I386 => {
+                self.cr0 & !(super::paging::PG | 0x1f) == 0
+                    && self.cr0 & 0x10 != 0
+                    && (self.cr0 & super::paging::PG == 0 || self.cr0 & 1 != 0)
+            }
+        };
+        let valid_ldt = if self.ldt.is_some() {
+            self.ldtr & 4 == 0 && self.ldtr & !7 != 0
+        } else {
+            self.ldtr & !3 == 0
+        };
+        valid_cr0
+            && valid_ldt
+            && self.gdtr.limit <= u32::from(u16::MAX)
+            && self.idtr.limit <= u32::from(u16::MAX)
+            && self.cr3 & 0xfff == 0
+            && (profile == CpuProfile::I386 || self.cr2 == 0 && self.cr3 == 0)
+    }
+
     pub(super) fn new(profile: CpuProfile) -> Self {
         Self {
             cr0: if profile == CpuProfile::I386 { 0x10 } else { 0 },
