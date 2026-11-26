@@ -11,7 +11,7 @@ const HEADER_BYTES: usize = 18;
 /// Maximum size in bytes of a serialized guest save state.
 pub const MAX_GUEST_SNAPSHOT_BYTES: usize = 300 * 1024 * 1024;
 const MAX_ELAPSED: Duration = Duration::from_secs(366 * 86_400);
-const MAX_MEDIA_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_MEDIA_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_MEDIA_ENTRIES: usize = 32_768;
 
 /// An error saving a guest or preparing a replacement guest.
@@ -241,13 +241,15 @@ fn fingerprints(mounts: &BTreeMap<char, Mount>) -> Result<BTreeMap<char, u32>, G
     let mut entry_count = 0;
     let mut media = BTreeMap::new();
     for (&drive, mount) in mounts {
-        if mount.iso_sector_count().is_some() {
-            return Err(GuestSnapshotError::Unavailable(
-                "an optical image is mounted",
-            ));
-        }
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(mount.description().as_bytes());
+        if let Some(sectors) = mount.iso_sector_count() {
+            let bytes = u64::from(sectors) * dosa_mount::ISO_SECTOR_BYTES as u64;
+            total = checked_media_size(total, bytes)?;
+            hash_iso_sectors(mount, sectors, &mut hasher)?;
+            media.insert(drive, hasher.finalize());
+            continue;
+        }
         let mut directories = vec![String::new()];
         while let Some(directory) = directories.pop() {
             let mut entries = mount.list(&directory)?;
@@ -270,16 +272,11 @@ fn fingerprints(mounts: &BTreeMap<char, Mount>) -> Result<BTreeMap<char, u32>, G
                 if entry.is_dir {
                     directories.push(path);
                 } else {
-                    if entry.size > MAX_MEDIA_BYTES - total {
-                        return Err(GuestSnapshotError::Unavailable(
-                            "mounted media are too large",
-                        ));
-                    }
+                    total = checked_media_size(total, entry.size)?;
                     let bytes = mount.read(&path)?;
                     if bytes.len() as u64 != entry.size {
                         return Err(GuestSnapshotError::MediaChanged);
                     }
-                    total += entry.size;
                     hasher.update(&bytes);
                 }
             }
@@ -287,6 +284,33 @@ fn fingerprints(mounts: &BTreeMap<char, Mount>) -> Result<BTreeMap<char, u32>, G
         media.insert(drive, hasher.finalize());
     }
     Ok(media)
+}
+
+fn checked_media_size(current: u64, bytes: u64) -> Result<u64, GuestSnapshotError> {
+    current
+        .checked_add(bytes)
+        .filter(|&total| total <= MAX_MEDIA_BYTES)
+        .ok_or(GuestSnapshotError::Unavailable(
+            "mounted media are too large",
+        ))
+}
+
+fn hash_iso_sectors(
+    mount: &Mount,
+    sectors: u32,
+    hasher: &mut crc32fast::Hasher,
+) -> Result<(), MountError> {
+    const BATCH: usize = 64;
+    const SECTOR_BYTES: usize = dosa_mount::ISO_SECTOR_BYTES;
+    hasher.update(&sectors.to_le_bytes());
+    let mut bytes = vec![0; BATCH * SECTOR_BYTES];
+    for first in (0..sectors).step_by(BATCH) {
+        let count = (sectors - first).min(BATCH as u32) as usize;
+        let buffer = &mut bytes[..count * SECTOR_BYTES];
+        mount.read_iso_sectors(first, buffer)?;
+        hasher.update(buffer);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
