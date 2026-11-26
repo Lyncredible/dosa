@@ -993,3 +993,120 @@ fn guest_a20_controls_share_the_same_bus_and_preserve_independent_latches() {
         assert_eq!(machine.cpu.memory[0x100500], 0);
     }
 }
+
+#[test]
+fn dos_guest_discovers_xms_moves_data_and_releases_the_handle() {
+    fn call(code: &mut Vec<u8>, function: u8) {
+        code.extend([0xb4, function, 0xff, 0x1e, 0, 4]); // CALL FAR [0400h].
+    }
+
+    let folder = Directory::new("xms");
+    let mut code = vec![
+        0xb8, 0, 0x43, 0xcd, 0x2f, 0xa2, 0x40, 4, // Save installed-state response.
+        0xb8, 0x10, 0x43, 0xcd, 0x2f, // Driver pointer in ES:BX.
+        0x89, 0x1e, 0, 4, 0x8c, 0x06, 2, 4,
+    ];
+    call(&mut code, 0);
+    code.extend([0xa3, 0x42, 4, 0x89, 0x16, 0x44, 4]); // Version and HMA support.
+    call(&mut code, 8);
+    code.extend([0xa3, 0x46, 4]); // Largest available block.
+    code.extend([0xba, 1, 0]);
+    call(&mut code, 9);
+    code.extend([
+        0xa3, 0x48, 4, 0x89, 0x16, 4, 4, // Record success and save handle.
+        0x89, 0x16, 0x2a, 4, 0xbe, 0x20, 4, // Control block with XMS destination.
+    ]);
+    call(&mut code, 0x0b);
+    code.extend([0xa3, 0x4a, 4]);
+    call(&mut code, 0x0c);
+    code.extend([
+        0x89, 0x1e, 0x4c, 4, 0x89, 0x16, 0x4e, 4, // Save locked address.
+        0x8b, 0x16, 4, 4, // Restore handle.
+    ]);
+    call(&mut code, 0x0a);
+    code.extend([0x88, 0x1e, 0x50, 4]); // Locked-block error.
+    call(&mut code, 0x0d);
+    code.extend([0xbb, 2, 0]); // Resize the block to 2 KiB.
+    call(&mut code, 0x0f);
+    code.extend([0xa3, 0x52, 4]);
+    call(&mut code, 0x0e);
+    code.extend([
+        0x89, 0x1e, 0x54, 4, 0x89, 0x16, 0x56, 4, // Free handles, locks and size.
+        0x8b, 0x16, 4, 4, 0x89, 0x16, 0x34, 4, // Control block with XMS source.
+        0xbe, 0x30, 4,
+    ]);
+    call(&mut code, 0x0b);
+    code.extend([0xa3, 0x58, 4]);
+    code.extend([0xc6, 0x06, 0x30, 4, 3]); // Odd lengths are invalid.
+    call(&mut code, 0x0b);
+    code.extend([0x88, 0x1e, 0x5a, 4]);
+    call(&mut code, 0x0a);
+    code.extend([0xa3, 0x5c, 4]);
+    call(&mut code, 8);
+    code.extend([0xa3, 0x5e, 4, 0xb8, 0, 0x4c, 0xcd, 0x21]);
+
+    code.resize(0x390, 0);
+    code[0x320..0x330].copy_from_slice(&[4, 0, 0, 0, 0, 0, 0x80, 4, 0, 0x10, 0, 0, 0, 0, 0, 0]);
+    code[0x330..0x340].copy_from_slice(&[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 4, 0, 0x10]);
+    code[0x380..0x384].copy_from_slice(b"XMS!");
+    folder.write("XMS.COM", &code);
+    let mut machine = folder.machine();
+    machine.launch('C', "XMS.COM", "").unwrap();
+    assert_eq!(machine.run(512).unwrap(), RunState::Exited(0));
+    let result = |offset| machine.cpu.read_u16(crate::PSP, offset);
+    assert_eq!(result(0x440) as u8, 0x80);
+    assert_eq!(result(0x442), 0x0200);
+    assert_eq!(result(0x444), 1);
+    assert_eq!(result(0x446), 15 * 1024 - 64);
+    assert_eq!(result(0x448), 1);
+    assert_eq!(result(0x44a), 1);
+    assert_eq!(result(0x44c), 0);
+    assert_eq!(result(0x44e), 0x11);
+    assert_eq!(result(0x450) as u8, 0xab);
+    assert_eq!(result(0x452), 1);
+    assert_eq!(result(0x454), 63);
+    assert_eq!(result(0x456), 2);
+    assert_eq!(result(0x458), 1);
+    assert_eq!(result(0x45a) as u8, 0xa7);
+    assert_eq!(result(0x45c), 1);
+    assert_eq!(result(0x45e), result(0x446));
+    assert_eq!(&machine.cpu.memory[0x10488..0x1048c], b"XMS!");
+    assert!(!machine.cpu.a20_enabled());
+
+    machine.set_cpu_profile(crate::CpuProfile::I8086).unwrap();
+    folder.write(
+        "DETECT.COM",
+        &[0xb8, 0, 0x43, 0xcd, 0x2f, 0xb4, 0x4c, 0xcd, 0x21],
+    );
+    machine.launch('C', "DETECT.COM", "").unwrap();
+    assert_eq!(machine.run(32).unwrap(), RunState::Exited(0));
+}
+
+#[test]
+fn xms_a20_requests_are_balanced_and_hma_can_be_reclaimed() {
+    let mut machine = Machine::new();
+    let call = |machine: &mut Machine, function: u16| {
+        machine.cpu.regs.ax = function << 8;
+        machine.xms_call();
+        (machine.cpu.regs.ax, machine.cpu.regs.bx as u8)
+    };
+    machine.cpu.regs.dx = 0xffff;
+    assert_eq!(call(&mut machine, 1).0, 1);
+    assert_eq!(call(&mut machine, 1), (0, 0x91));
+    assert_eq!(call(&mut machine, 2).0, 1);
+    assert_eq!(call(&mut machine, 2), (0, 0x93));
+    assert_eq!(call(&mut machine, 1).0, 1);
+
+    assert_eq!(call(&mut machine, 5).0, 1);
+    assert_eq!(call(&mut machine, 5).0, 1);
+    assert_eq!(call(&mut machine, 6).0, 1);
+    assert_eq!(call(&mut machine, 7), (1, 0));
+    assert_eq!(call(&mut machine, 6).0, 1);
+    assert_eq!(call(&mut machine, 7), (0, 0));
+
+    machine.fast_a20 = true;
+    machine.refresh_a20();
+    assert_eq!(call(&mut machine, 3).0, 1);
+    assert_eq!(call(&mut machine, 4), (0, 0x94));
+    assert_eq!(call(&mut machine, 7), (1, 0));
+}

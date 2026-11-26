@@ -12,7 +12,7 @@ Complete the remaining roadmap and verification requirements with focused implem
 | Disk media | Read-only raw FAT volumes, primary and logical MBR FAT partitions, and ISO 9660 images mount through the CLI, launch profile, and desktop. Generated fixtures verify DOS access and unchanged image bytes. [Task 23](23-dosbox-x-comparison.md) tracks MSCDEX and initial disk boot. Full operating-system boot, advanced device services, and image swapping remain open. |
 | AdLib | OPL2 address/data ports and polled timers implemented. A generated COM program exercises FM synthesis and the 48 kHz PC speaker mixer. See [task 21](21-adlib.md). |
 | Sound Blaster | Standard and high-speed 8-bit PCM playback through DMA channel 1 and IRQ7 verified with generated COM programs. Extended commands and native program playback verification remain in [task 22](22-sound-blaster.md). |
-| Protected mode | 16-bit and 32-bit ring 0 transitions, GDT/IDT, and segment access supported. 286 and 386 have extended RAM and A20. See [task 26](26-protected-mode.md) for paging, memory management, privilege, exceptions, and DPMI. |
+| Protected mode | 16-bit and 32-bit ring 0 transitions, GDT/IDT, and segment access supported. 286 and 386 have extended RAM, A20, and built-in XMS 2.0 services. See [task 26](26-protected-mode.md) for paging, privilege, exceptions, and DPMI. |
 | DPMI | Host services exercised by a reproducible protected-mode workload |
 | Snapshots | Versioned CPU/device state, mount identity, save/restore and invalid-state tests |
 | Platforms | CI and native Windows/Linux/macOS desktop, input, resizing, fullscreen and mount verification |

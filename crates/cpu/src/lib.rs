@@ -487,7 +487,10 @@ impl Cpu {
     }
 
     fn read_byte(&self, address: usize) -> u8 {
-        let address = self.physical(address);
+        self.read_physical_byte(self.physical(address))
+    }
+
+    fn read_physical_byte(&self, address: usize) -> u8 {
         if let Some(map) = &self.mapping
             && (map.start..map.end).contains(&address)
         {
@@ -549,7 +552,10 @@ impl Cpu {
     }
 
     fn write_byte(&mut self, address: usize, value: u8) {
-        let address = self.physical(address);
+        self.write_physical_byte(self.physical(address), value);
+    }
+
+    fn write_physical_byte(&mut self, address: usize, value: u8) {
         if let Some(map) = &self.mapping
             && (map.start..map.end).contains(&address)
         {
@@ -557,6 +563,41 @@ impl Cpu {
         } else if let Some(byte) = self.memory.get_mut(address) {
             *byte = value;
         }
+    }
+
+    /// Copy bytes on the physical bus for a firmware memory transfer.
+    pub fn copy_physical_range(
+        &mut self,
+        source: std::ops::Range<usize>,
+        destination: usize,
+    ) -> bool {
+        let Some(count) = source.end.checked_sub(source.start) else {
+            return false;
+        };
+        let Some(end) = destination.checked_add(count) else {
+            return false;
+        };
+        if source.end > self.memory.len() || end > self.memory.len() {
+            return false;
+        }
+        let mapped = self.mapping.as_ref().is_some_and(|map| {
+            (source.start < map.end && source.end > map.start)
+                || (destination < map.end && end > map.start)
+        });
+        if !mapped {
+            self.memory.copy_within(source, destination);
+        } else if destination > source.start && destination < source.end {
+            for index in (0..count).rev() {
+                let byte = self.read_physical_byte(source.start + index);
+                self.write_physical_byte(destination + index, byte);
+            }
+        } else {
+            for index in 0..count {
+                let byte = self.read_physical_byte(source.start + index);
+                self.write_physical_byte(destination + index, byte);
+            }
+        }
+        true
     }
 
     fn read_mem(&self, address: usize, width: u8) -> u32 {

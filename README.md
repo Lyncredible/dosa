@@ -97,7 +97,7 @@ On Windows, Dosa automatically maps up to two XInput controllers to the DOS game
 
 Use `--midi-soundfont PATH` to enable General MIDI playback through the MPU-401 UART at port `330h`. Choose General MIDI or MPU-401 in the DOS program's sound setup. Supply an SF2 SoundFont, or set `midi_soundfont = "music.sf2"` in a launch profile. Profile paths are relative to the TOML file. MIDI shares Dosa's master volume and WAV recording.
 
-CPU profiles are `8086`, `286`, and `386`. Text modes have 80 or 132 columns and 25, 43, or 50 rows. Desktop execution speeds are `slow`, `normal`, `fast`, and `maximum` (`max` also works). Headless mode uses the same mounts, CPU, text rows, and command with its fixed instruction limit. Its command can come from `--exec` or the profile's `exec` field.
+CPU profiles are `8086`, `286`, and `386`. The built-in DOS runtime exposes XMS 2.0 extended memory on the 286 and 386 profiles. Text modes have 80 or 132 columns and 25, 43, or 50 rows. Desktop execution speeds are `slow`, `normal`, `fast`, and `maximum` (`max` also works). Headless mode uses the same mounts, CPU, text rows, and command with its fixed instruction limit. Its command can come from `--exec` or the profile's `exec` field.
 
 ## Desktop controls
 

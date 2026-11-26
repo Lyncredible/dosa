@@ -24,6 +24,7 @@ mod sound_blaster;
 mod speaker;
 mod vga;
 mod video;
+mod xms;
 
 /// Sample rate of the mono PCM samples produced by [Machine::take_audio].
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
@@ -234,6 +235,7 @@ pub struct Machine {
     keys: VecDeque<(u8, u8)>,
     keyboard: Keyboard,
     fast_a20: bool,
+    xms: xms::Xms,
     gameport: gameport::GamePort,
     mouse: Mouse,
     pic: Pic,
@@ -264,6 +266,7 @@ impl Machine {
         let mut video = Adapter::new();
         video::initialize(&mut cpu, &mut video);
         bios::install(&mut cpu, 0);
+        xms::Xms::install(&mut cpu);
         Mouse::install(&mut cpu);
         Self {
             cpu,
@@ -278,6 +281,7 @@ impl Machine {
             keys: VecDeque::new(),
             keyboard: Keyboard::default(),
             fast_a20: false,
+            xms: xms::Xms::default(),
             gameport: gameport::GamePort::default(),
             mouse: Mouse::default(),
             pic: Pic::default(),
@@ -634,6 +638,9 @@ impl Machine {
         let elapsed = self.clock.elapsed();
         let now = pit::ticks(elapsed);
         bios::install(&mut cpu, now);
+        if cpu.has_a20() {
+            xms::Xms::install(&mut cpu);
+        }
         Mouse::install(&mut cpu);
         video.copy_console(&self.video, &self.cpu, &mut cpu);
         self.cpu = cpu;
@@ -644,6 +651,7 @@ impl Machine {
         self.keys.clear();
         self.keyboard = Keyboard::default();
         self.fast_a20 = false;
+        self.xms = xms::Xms::default();
         self.gameport.reset_timers();
         self.mouse = Mouse::default();
         self.pic = Pic::default();
@@ -957,10 +965,36 @@ impl Machine {
 
     fn refresh_a20(&mut self) {
         self.cpu
-            .set_a20(self.fast_a20 || self.keyboard.a20_enabled());
+            .set_a20(self.fast_a20 || self.keyboard.a20_enabled() || self.xms.a20_enabled());
+    }
+
+    fn xms_available(&self) -> bool {
+        self.cpu.has_a20() && self.boot_disk.is_none()
+    }
+
+    fn xms_call(&mut self) {
+        let function = (self.cpu.regs.ax >> 8) as u8;
+        if !matches!(function, 3..=6) {
+            self.xms.call(&mut self.cpu);
+            return;
+        }
+        let result = self.xms.update_a20(function);
+        self.refresh_a20();
+        let result = result.and_then(|()| {
+            let disabling = function == 4 || function == 6 && !self.xms.a20_enabled();
+            if disabling && self.cpu.a20_enabled() {
+                Err(0x94)
+            } else {
+                Ok(())
+            }
+        });
+        xms::Xms::complete(&mut self.cpu, result);
     }
 
     fn run_firmware_hooks(&mut self) {
+        if xms::Xms::at_entry(&self.cpu) && self.xms_available() {
+            self.xms_call();
+        }
         match bios::hook(&self.cpu) {
             Some(Hook::Tick) => bios::advance_timer(&mut self.cpu),
             Some(Hook::TimerEoi) => self.pic.end_irq(0),
