@@ -700,6 +700,7 @@ impl App for Desktop {
                         .is_some()
                 })
                 .collect(),
+            iso_set_drives: self.shell.iso_set_drives().collect(),
             cpu: self.settings.cpu,
             speed: self.settings.speed,
             volume: self.volume,
@@ -796,6 +797,30 @@ impl App for Desktop {
                 self.status = match self.load_automatic_save() {
                     Ok(()) => "Automatic save loaded".into(),
                     Err(error) => format!("Load automatic save failed: {error}"),
+                };
+            }
+            MenuAction::MountIsoSet { drive, paths }
+                if !self.running && !self.shell.command_active() =>
+            {
+                let previous = self.shell.prompt();
+                self.status = match self.shell.mount_iso_set(drive, paths) {
+                    Ok((current, count)) => {
+                        self.refresh_prompt(&previous);
+                        format!("Drive {drive}: ISO {current}/{count}")
+                    }
+                    Err(error) => format!("ISO set mount failed: {error}"),
+                };
+            }
+            MenuAction::NextIso(drive) => {
+                let previous = self.shell.prompt();
+                self.status = match self.shell.next_iso(drive) {
+                    Ok((current, count)) => {
+                        if !self.running && !self.shell.command_active() {
+                            self.refresh_prompt(&previous);
+                        }
+                        format!("Drive {drive}: ISO {current}/{count}")
+                    }
+                    Err(error) => format!("ISO swap failed: {error}"),
                 };
             }
             MenuAction::Mount {

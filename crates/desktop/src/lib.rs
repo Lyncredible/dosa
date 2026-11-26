@@ -254,6 +254,20 @@ impl<A: App> Desktop<A> {
                     });
                 }
             }
+            Some(menu::Command::MountIsoSet(drive)) => {
+                self.pointer.set_position(None);
+                self.sync_pointer(window, true);
+                if let Some(mut paths) = rfd::FileDialog::new()
+                    .set_parent(window)
+                    .set_title("Choose ISO images for the disc set")
+                    .add_filter("ISO image", &["iso"])
+                    .pick_files()
+                {
+                    paths.sort();
+                    self.app
+                        .menu_action(MenuAction::MountIsoSet { drive, paths });
+                }
+            }
             Some(menu::Command::Fullscreen) => {
                 self.menu.close();
                 window.set_fullscreen(if window.fullscreen().is_some() {

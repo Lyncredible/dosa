@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use dosa_dos::{BootDrive, CodePage, DOS_VERSION, Machine, ShellIo};
 use dosa_mount::Mount;
@@ -27,11 +27,14 @@ use pending_input::PendingInput;
 pub(crate) use snapshot::MAX_DESKTOP_SNAPSHOT_BYTES;
 
 const MOUNT_HELP: &str = "MOUNT drive [/ISO | /FAT | /RW | /SESSION] host-path\r\n\
+    MOUNT drive /ISOSET image1 image2 [image...]\r\n\
     Files, directories, and ZIPs open read-only by default.\r\n\
     /ISO      Mount an ISO 9660 data image.\r\n\
+    /ISOSET   Mount a list of ISO images. Use IMGSWAP to advance.\r\n\
     /FAT      Mount a FAT volume or partitioned disk image.\r\n\
     /RW       Mount a writable host directory.\r\n\
     /SESSION  Mount a temporary writable copy of a ZIP.\r\n";
+const IMGSWAP_HELP: &str = "IMGSWAP [drive]\r\nAdvance the ISO set of the selected drive.\r\n";
 const MKDIR_HELP: &str = "MKDIR [drive:]path\r\nMD [drive:]path\r\nCreate a directory. The parent directory must exist.\r\n";
 const RMDIR_HELP: &str = "RMDIR [drive:]path\r\nRD [drive:]path\r\nRemove an empty directory. Change out of it first.\r\n";
 const SET_HELP: &str =
@@ -57,12 +60,18 @@ pub struct Shell {
     pub machine: Machine,
     drive: char,
     directories: BTreeMap<char, String>,
+    iso_sets: BTreeMap<char, IsoSet>,
     batch: Option<Batch>,
     pending_input: Option<PendingInput>,
     pending_redirects: Option<ShellIo>,
     pipelines: Vec<pipeline::Pipeline>,
     errorlevel: u8,
     quick_launch: Option<QuickLaunch>,
+}
+
+struct IsoSet {
+    paths: Vec<PathBuf>,
+    current: usize,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -84,6 +93,7 @@ impl Shell {
             machine: Machine::new(),
             drive: 'C',
             directories: BTreeMap::new(),
+            iso_sets: BTreeMap::new(),
             batch: None,
             pending_input: None,
             pending_redirects: None,
@@ -100,6 +110,7 @@ impl Shell {
         let drive = drive.to_ascii_uppercase();
         let select = self.directories.is_empty();
         self.machine.mount(drive, mount)?;
+        self.iso_sets.remove(&drive);
         self.directories.insert(drive, String::new());
         if select {
             self.drive = drive;
@@ -113,6 +124,7 @@ impl Shell {
         }
         let drive = drive.to_ascii_uppercase();
         self.machine.unmount(drive)?;
+        self.iso_sets.remove(&drive);
         self.directories.remove(&drive);
         if self.drive == drive {
             self.drive = self.directories.keys().next().copied().unwrap_or('C');
@@ -123,8 +135,46 @@ impl Shell {
     pub(crate) fn swap_iso(&mut self, drive: char, mount: Mount) -> Result<(), dosa_dos::DosError> {
         let drive = drive.to_ascii_uppercase();
         self.machine.swap_iso(drive, mount)?;
+        self.iso_sets.remove(&drive);
         self.directories.insert(drive, String::new());
         Ok(())
+    }
+
+    pub(crate) fn mount_iso_set(
+        &mut self,
+        drive: char,
+        paths: Vec<PathBuf>,
+    ) -> Result<(usize, usize), Box<dyn Error>> {
+        if paths.len() < 2 {
+            return Err("an ISO set requires at least two images".into());
+        }
+        let mounted = Mount::open_iso_image(&paths[0])?;
+        for path in &paths[1..] {
+            Mount::open_iso_image(path)?;
+        }
+        self.mount(drive, mounted)?;
+        let count = paths.len();
+        self.iso_sets
+            .insert(drive.to_ascii_uppercase(), IsoSet { paths, current: 0 });
+        Ok((1, count))
+    }
+
+    pub(crate) fn iso_set_drives(&self) -> impl Iterator<Item = char> + '_ {
+        self.iso_sets.keys().copied()
+    }
+
+    pub(crate) fn next_iso(&mut self, drive: char) -> Result<(usize, usize), Box<dyn Error>> {
+        let drive = drive.to_ascii_uppercase();
+        let set = self
+            .iso_sets
+            .get_mut(&drive)
+            .ok_or_else(|| format!("drive {drive}: has no ISO set"))?;
+        let next = (set.current + 1) % set.paths.len();
+        let mount = Mount::open_iso_image(&set.paths[next])?;
+        self.machine.swap_iso(drive, mount)?;
+        self.directories.insert(drive, String::new());
+        set.current = next;
+        Ok((next + 1, set.paths.len()))
     }
 
     pub(crate) fn command_active(&self) -> bool {
@@ -268,6 +318,7 @@ impl Shell {
             "SHIFT" if args == "/?" => batch::SHIFT_HELP.as_bytes().to_vec(),
             "PAUSE" if args == "/?" => batch::PAUSE_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("MOUNT") => MOUNT_HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("IMGSWAP") => IMGSWAP_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("SET") => SET_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("PATH") => search_path::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("IF") => condition::HELP.as_bytes().to_vec(),
@@ -308,6 +359,7 @@ impl Shell {
                 PATH [directories]         Set the executable search path\r\n\
                 PROMPT [text]               Customize the DOS prompt\r\n\
                 MOUNT drive path           Mount host files or images (see HELP MOUNT)\r\n\
+                IMGSWAP [drive]            Advance to the next ISO in the set\r\n\
                 BOOT A|C path              Boot a floppy or hard disk image\r\n\
                 DATE [mm-dd-yy]            Show or set the DOS date\r\n\
                 TIME [hh:mm]               Show or set the DOS time\r\n\
@@ -410,6 +462,19 @@ impl Shell {
             "DEL" | "ERASE" => return self.delete(args),
             "MOUNT" => self.mount_command(args, false)?,
             "IMGMOUNT" => self.mount_command(args, true)?,
+            "IMGSWAP" => {
+                if args == "/?" {
+                    IMGSWAP_HELP.as_bytes().to_vec()
+                } else {
+                    let drive = if args.is_empty() {
+                        self.drive
+                    } else {
+                        parse_drive_arg(args).ok_or("usage: IMGSWAP [drive]")?
+                    };
+                    let (current, count) = self.next_iso(drive)?;
+                    format!("Drive {drive}: ISO {current}/{count}\r\n").into_bytes()
+                }
+            }
             "BOOT" => {
                 const USAGE: &str = "usage: BOOT A|C host-disk-image";
                 let (drive, host) = split_word(args)?;
@@ -516,26 +581,34 @@ impl Shell {
             return Ok(MOUNT_HELP.as_bytes().to_vec());
         }
         let (letter, host) = split_word(args)?;
-        let drive = letter
-            .trim_end_matches(':')
-            .parse::<char>()
-            .ok()
-            .filter(char::is_ascii_alphabetic)
-            .ok_or(USAGE)?
-            .to_ascii_uppercase();
+        let drive = parse_drive_arg(letter).ok_or(USAGE)?;
         let (format, host) = if legacy_iso {
             ("/ISO".to_owned(), host)
         } else {
             let (first, rest) = split_word(host)?;
             let option = first.to_ascii_uppercase();
             if !host.starts_with('"')
-                && matches!(option.as_str(), "/ISO" | "/FAT" | "/RW" | "/SESSION")
+                && matches!(
+                    option.as_str(),
+                    "/ISO" | "/FAT" | "/RW" | "/SESSION" | "/ISOSET"
+                )
             {
                 (option, rest)
             } else {
                 (String::new(), host)
             }
         };
+        if format == "/ISOSET" {
+            let mut paths = Vec::new();
+            let mut rest = host;
+            while !rest.is_empty() {
+                let (path, tail) = split_word(rest)?;
+                paths.push(PathBuf::from(path));
+                rest = tail;
+            }
+            let (current, count) = self.mount_iso_set(drive, paths)?;
+            return Ok(format!("Drive {drive}: ISO {current}/{count}\r\n").into_bytes());
+        }
         let path = unquote(host);
         if path.is_empty() {
             return Err(USAGE.into());
@@ -584,6 +657,15 @@ impl Shell {
         }
         Ok((drive, components.join("\\")))
     }
+}
+
+fn parse_drive_arg(drive: &str) -> Option<char> {
+    drive
+        .trim_end_matches(':')
+        .parse::<char>()
+        .ok()
+        .filter(char::is_ascii_alphabetic)
+        .map(|drive| drive.to_ascii_uppercase())
 }
 
 fn split_word(line: &str) -> Result<(&str, &str), &'static str> {

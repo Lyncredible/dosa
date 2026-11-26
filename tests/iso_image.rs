@@ -393,6 +393,15 @@ fn expect(program: &mut Vec<u8>, jump_if_passed: u8, error: u8) {
 
 #[test]
 fn desktop_swaps_iso_during_a_guest_and_reports_media_change_once() {
+    verify_desktop_iso_swap(false);
+}
+
+#[test]
+fn desktop_advances_an_iso_set_during_a_guest() {
+    verify_desktop_iso_swap(true);
+}
+
+fn verify_desktop_iso_swap(queued: bool) {
     let scratch = tempfile::tempdir().unwrap();
     let first = scratch.path().join("first.iso");
     let second = scratch.path().join("second.iso");
@@ -443,10 +452,35 @@ fn desktop_swaps_iso_during_a_guest_and_reports_media_change_once() {
     shell
         .mount('C', Mount::open_writable_directory(scratch.path()).unwrap())
         .unwrap();
-    shell
-        .mount('D', Mount::open_iso_image(&first).unwrap())
-        .unwrap();
-    let mut desktop = Desktop::new(shell, Some("SWAP.BAT"));
+    let mut desktop = Desktop::new(shell, None);
+    if queued {
+        desktop.menu_action(MenuAction::MountIsoSet {
+            drive: 'D',
+            paths: vec![first.clone(), second.clone()],
+        });
+        assert_eq!(desktop.menu().status, "Drive D: ISO 1/2");
+    } else {
+        desktop.menu_action(MenuAction::Mount {
+            drive: 'D',
+            source: first.clone(),
+            kind: MountKind::Iso,
+        });
+    }
+    desktop.input(Input {
+        key: Key::Character(' '),
+        pressed: true,
+        text: Some("SWAP.BAT".into()),
+        scan_code: 0,
+        modifiers: Default::default(),
+    });
+    let enter = || Input {
+        key: Key::Enter,
+        pressed: true,
+        text: None,
+        scan_code: 0x1c,
+        modifiers: Default::default(),
+    };
+    desktop.input(enter());
     desktop.tick();
     desktop.tick();
     assert!(desktop.menu().running && desktop.menu().iso_drives.contains(&'D'));
@@ -457,12 +491,18 @@ fn desktop_swaps_iso_during_a_guest_and_reports_media_change_once() {
     });
     assert!(desktop.menu().status.starts_with("ISO swap failed"));
     assert!(desktop.menu().running);
-    desktop.menu_action(MenuAction::Mount {
-        drive: 'D',
-        source: second.clone(),
-        kind: MountKind::SwapIso,
-    });
-    assert_eq!(desktop.menu().status, "Swapped ISO in D:");
+    if queued {
+        assert!(desktop.menu().iso_set_drives.contains(&'D'));
+        desktop.menu_action(MenuAction::NextIso('D'));
+        assert_eq!(desktop.menu().status, "Drive D: ISO 2/2");
+    } else {
+        desktop.menu_action(MenuAction::Mount {
+            drive: 'D',
+            source: second.clone(),
+            kind: MountKind::SwapIso,
+        });
+        assert_eq!(desktop.menu().status, "Swapped ISO in D:");
+    }
     let states = tempfile::tempdir().unwrap();
     let save = states.path().join("pending.dosastate");
     desktop.menu_action(MenuAction::SaveGuestState(save.clone()));
@@ -470,13 +510,7 @@ fn desktop_swaps_iso_during_a_guest_and_reports_media_change_once() {
 
     let result = scratch.path().join("RESULT.TXT");
     let finish_probe = |desktop: &mut Desktop| {
-        desktop.input(Input {
-            key: Key::Enter,
-            pressed: true,
-            text: None,
-            scan_code: 0x1c,
-            modifiers: Default::default(),
-        });
+        desktop.input(enter());
         for _ in 0..4 {
             desktop.tick();
         }
@@ -490,4 +524,45 @@ fn desktop_swaps_iso_during_a_guest_and_reports_media_change_once() {
     finish_probe(&mut desktop);
     assert_eq!(fs::read(first).unwrap(), before);
     assert_eq!(fs::read(second).unwrap(), after);
+}
+
+#[test]
+fn shell_iso_sets_wrap_and_survive_a_failed_advance() {
+    let scratch = tempfile::tempdir().unwrap();
+    let first = scratch.path().join("first disc.iso");
+    let second = scratch.path().join("second disc.iso");
+    let first_image = fixture();
+    let mut second_image = first_image.clone();
+    second_image[24 * SECTOR..24 * SECTOR + 3].copy_from_slice(b"NEW");
+    fs::write(&first, first_image).unwrap();
+    fs::write(&second, &second_image).unwrap();
+
+    let mut shell = Shell::new();
+    let command = |drive: char| {
+        format!(
+            "MOUNT {drive} /ISOSET \"{}\" \"{}\"",
+            first.display(),
+            second.display()
+        )
+    };
+    let output = |shell: &mut Shell, line: &str| {
+        let ShellCommand::Print(text) = shell.execute(line).unwrap() else {
+            panic!("expected output from {line}");
+        };
+        String::from_utf8(text).unwrap()
+    };
+    assert_eq!(output(&mut shell, &command('D')), "Drive D: ISO 1/2\r\n");
+    assert_eq!(output(&mut shell, &command('E')), "Drive E: ISO 1/2\r\n");
+    fs::remove_file(&second).unwrap();
+    assert!(shell.execute("IMGSWAP").is_err());
+    assert_eq!(output(&mut shell, "TYPE D:\\NOTES.TXT"), "ISO works\r\n");
+    fs::write(&second, second_image).unwrap();
+    assert_eq!(output(&mut shell, "IMGSWAP"), "Drive D: ISO 2/2\r\n");
+    assert_eq!(output(&mut shell, "TYPE D:\\NOTES.TXT"), "NEW works\r\n");
+    assert_eq!(output(&mut shell, "TYPE E:\\NOTES.TXT"), "ISO works\r\n");
+    assert_eq!(output(&mut shell, "IMGSWAP D:"), "Drive D: ISO 1/2\r\n");
+    assert_eq!(output(&mut shell, "TYPE D:\\NOTES.TXT"), "ISO works\r\n");
+    output(&mut shell, &format!("MOUNT D /ISO \"{}\"", first.display()));
+    assert!(shell.execute("IMGSWAP D").is_err());
+    assert_eq!(output(&mut shell, "IMGSWAP E"), "Drive E: ISO 2/2\r\n");
 }
