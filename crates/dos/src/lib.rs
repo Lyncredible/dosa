@@ -69,6 +69,7 @@ const TIMER_SAMPLE_INTERVAL: usize = 256;
 pub enum DosError {
     InvalidDrive(char),
     UnmountedDrive(char),
+    NotOpticalDrive(char),
     InvalidCommandTail,
     Redirection { path: String, code: u16 },
     InvalidEnvironment(&'static str),
@@ -87,6 +88,7 @@ impl fmt::Display for DosError {
         match self {
             Self::InvalidDrive(drive) => write!(f, "invalid DOS drive {drive}"),
             Self::UnmountedDrive(drive) => write!(f, "DOS drive {drive}: is unmounted"),
+            Self::NotOpticalDrive(drive) => write!(f, "DOS drive {drive}: has no ISO mounted"),
             Self::InvalidCommandTail => write!(
                 f,
                 "command tail must be at most 126 ASCII bytes including its leading space"
@@ -230,6 +232,7 @@ pub struct Machine {
     cpu_profile: CpuProfile,
     video: Adapter,
     mounts: BTreeMap<char, Mount>,
+    iso_media_changed: u32,
     boot_disk: Option<boot_disk::BootDisk>,
     environment: Environment,
     files: DosFiles,
@@ -276,6 +279,7 @@ impl Machine {
             cpu_profile: CpuProfile::default(),
             video,
             mounts: BTreeMap::new(),
+            iso_media_changed: 0,
             boot_disk: None,
             environment: Environment::default(),
             files: DosFiles::new('C', String::new()),
@@ -308,7 +312,28 @@ impl Machine {
         if self.state.is_active() {
             return Err(DosError::Busy);
         }
-        self.mounts.insert(normalize_drive(drive)?, mount);
+        let drive = normalize_drive(drive)?;
+        self.mounts.insert(drive, mount);
+        self.iso_media_changed &= !(1 << (drive as u8 - b'A'));
+        Ok(())
+    }
+
+    /// Replace a mounted CD-ROM image while preserving its drive letter and guest execution.
+    pub fn swap_iso(&mut self, drive: char, mount: Mount) -> Result<(), DosError> {
+        let drive = normalize_drive(drive)?;
+        if self
+            .drive(drive)
+            .and_then(Mount::iso_sector_count)
+            .is_none()
+        {
+            return Err(DosError::NotOpticalDrive(drive));
+        }
+        if mount.iso_sector_count().is_none() {
+            return Err(DosError::Mount(MountError::UnsupportedSource));
+        }
+        self.mounts.insert(drive, mount);
+        self.iso_media_changed |= 1 << (drive as u8 - b'A');
+        self.files.reset_media_directory(drive);
         Ok(())
     }
 
@@ -421,6 +446,7 @@ impl Machine {
         self.mounts
             .remove(&drive)
             .ok_or(DosError::UnmountedDrive(drive))?;
+        self.iso_media_changed &= !(1 << (drive as u8 - b'A'));
         Ok(())
     }
 

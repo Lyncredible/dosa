@@ -128,6 +128,11 @@ impl DosFiles {
         self.directories.get(&drive).map_or("", String::as_str)
     }
 
+    pub(crate) fn reset_media_directory(&mut self, drive: char) {
+        self.directories.insert(drive, String::new());
+        self.search.clear();
+    }
+
     fn resolve(&self, path: &str) -> Result<(char, String), u16> {
         let (drive, path) = match path.split_once(':') {
             Some((drive, path))

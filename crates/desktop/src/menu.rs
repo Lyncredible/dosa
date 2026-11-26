@@ -95,6 +95,7 @@ pub enum MountKind {
     Zip,
     Fat,
     Iso,
+    SwapIso,
     SessionZip,
 }
 
@@ -140,6 +141,7 @@ pub struct MenuState {
     pub active_drive: char,
     pub write_blocked_zip: Option<char>,
     pub drives: std::collections::BTreeMap<char, &'static str>,
+    pub iso_drives: std::collections::BTreeSet<char>,
     pub cpu: CpuMode,
     pub speed: Speed,
     pub volume: Volume,
@@ -167,6 +169,7 @@ impl Default for MenuState {
             active_drive: 'C',
             write_blocked_zip: None,
             drives: Default::default(),
+            iso_drives: Default::default(),
             cpu: CpuMode::default(),
             speed: Speed::default(),
             volume: Volume::default(),
@@ -829,6 +832,12 @@ pub(crate) fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool
             false,
         )))
         .chain(std::iter::once(item(
+            "Swap ISO image...",
+            Command::Mount(MountKind::SwapIso, drive),
+            state.iso_drives.contains(&drive),
+            false,
+        )))
+        .chain(std::iter::once(item(
             "Unmount",
             Command::App(MenuAction::Unmount(drive)),
             can_change_mounts && state.drives.contains_key(&drive),
@@ -1062,8 +1071,12 @@ pub(crate) fn pick_path(window: &Window, kind: MountKind) -> Option<PathBuf> {
             .set_title("Mount a read-only ZIP archive")
             .add_filter("ZIP archive", &["zip"])
             .pick_file(),
-        MountKind::Iso => dialog
-            .set_title("Mount an ISO 9660 image")
+        MountKind::Iso | MountKind::SwapIso => dialog
+            .set_title(if kind == MountKind::SwapIso {
+                "Choose a replacement ISO image"
+            } else {
+                "Mount an ISO 9660 image"
+            })
             .add_filter("ISO image", &["iso"])
             .pick_file(),
         MountKind::Fat => dialog
@@ -1250,7 +1263,7 @@ mod tests {
     #[test]
     fn running_guest_can_change_speed_but_cannot_mount() {
         let mut menu = Menu::default();
-        let state = MenuState {
+        let mut state = MenuState {
             running: true,
             ..Default::default()
         };
@@ -1259,6 +1272,11 @@ mod tests {
             menu.key(&input(Key::Enter, false), &state, false, true),
             (true, None)
         );
+        state.iso_drives.insert('D');
+        let options = options(Tab::Drives, &state, 'D', false);
+        let enabled: Vec<_> = options.iter().filter(|item| item.enabled).collect();
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].command, Command::Mount(MountKind::SwapIso, 'D'));
         menu.open(Tab::Speed, &state);
         assert_eq!(
             menu.key(&input(Key::Enter, false), &state, false, true),

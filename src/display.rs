@@ -691,6 +691,15 @@ impl App for Desktop {
                         .map(|mount| (letter, mount.description()))
                 })
                 .collect(),
+            iso_drives: ('A'..='Z')
+                .filter(|&drive| {
+                    self.shell
+                        .machine
+                        .drive(drive)
+                        .and_then(Mount::iso_sector_count)
+                        .is_some()
+                })
+                .collect(),
             cpu: self.settings.cpu,
             speed: self.settings.speed,
             volume: self.volume,
@@ -787,6 +796,25 @@ impl App for Desktop {
                 self.status = match self.load_automatic_save() {
                     Ok(()) => "Automatic save loaded".into(),
                     Err(error) => format!("Load automatic save failed: {error}"),
+                };
+            }
+            MenuAction::Mount {
+                drive,
+                source,
+                kind: dosa_desktop::MountKind::SwapIso,
+            } => {
+                let previous = self.shell.prompt();
+                let result = Mount::open_iso_image(source)
+                    .map_err(dosa_dos::DosError::Mount)
+                    .and_then(|mount| self.shell.swap_iso(drive, mount));
+                self.status = match result {
+                    Ok(()) => {
+                        if !self.running && !self.shell.command_active() {
+                            self.refresh_prompt(&previous);
+                        }
+                        format!("Swapped ISO in {drive}:")
+                    }
+                    Err(error) => format!("ISO swap failed: {error}"),
                 };
             }
             MenuAction::Mount {

@@ -383,6 +383,7 @@ impl Machine {
             cpu_profile: state.profile,
             video,
             mounts: std::mem::take(&mut self.mounts),
+            iso_media_changed: self.iso_media_changed,
             boot_disk,
             environment,
             files,
