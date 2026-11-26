@@ -16,6 +16,26 @@ use crate::{
 pub(super) const SAMPLE_RATE: u64 = crate::AUDIO_SAMPLE_RATE as u64;
 const MAX_SAMPLES: usize = SAMPLE_RATE as usize / 5;
 
+/// Host mixer levels in percent. Inputs above 100 are clamped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AudioLevels {
+    pub speaker: u8,
+    pub adlib: u8,
+    pub sound_blaster: u8,
+    pub midi: u8,
+}
+
+impl Default for AudioLevels {
+    fn default() -> Self {
+        Self {
+            speaker: 100,
+            adlib: 100,
+            sound_blaster: 100,
+            midi: 100,
+        }
+    }
+}
+
 pub(super) struct Audio {
     speaker: Speaker,
     adlib: Adlib,
@@ -24,6 +44,7 @@ pub(super) struct Audio {
     pub(super) mpu: Mpu401,
     pub(super) sample: u64,
     samples: VecDeque<f32>,
+    pub(super) levels: AudioLevels,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -44,7 +65,12 @@ impl Audio {
             dma: self.dma.clone(),
             sound_blaster: self.sound_blaster.clone(),
             sample: self.sample,
-            samples: self.samples.clone(),
+            // The pending mix embeds host levels. Keep it only at the default mix.
+            samples: if self.levels == AudioLevels::default() {
+                self.samples.clone()
+            } else {
+                VecDeque::new()
+            },
         }
     }
 
@@ -76,6 +102,7 @@ impl Audio {
             mpu: Mpu401::default(),
             sample: state.sample,
             samples: state.samples,
+            levels: AudioLevels::default(),
         })
     }
 
@@ -88,6 +115,7 @@ impl Audio {
             mpu: Mpu401::default(),
             sample: sample_at(elapsed),
             samples: VecDeque::new(),
+            levels: AudioLevels::default(),
         }
     }
 
@@ -96,8 +124,16 @@ impl Audio {
         mpu.reset();
         *self = Self {
             mpu,
+            levels: self.levels,
             ..Self::new(elapsed)
         };
+    }
+
+    pub(super) fn set_levels(&mut self, levels: AudioLevels) {
+        if self.levels != levels {
+            self.levels = levels;
+            self.samples.clear();
+        }
     }
 
     pub fn advance(&mut self, elapsed: Duration, cpu: &Cpu) {
@@ -110,6 +146,11 @@ impl Audio {
         }
         let mut left = [0.0; 64];
         let mut right = [0.0; 64];
+        let gain = |level: u8| f32::from(level.min(100)) / 100.0;
+        let speaker_gain = gain(self.levels.speaker);
+        let adlib_gain = gain(self.levels.adlib);
+        let blaster_gain = gain(self.levels.sound_blaster);
+        let midi_gain = gain(self.levels.midi);
         while self.sample < end {
             let count = (end - self.sample).min(left.len() as u64) as usize;
             self.mpu.render(&mut left[..count], &mut right[..count]);
@@ -119,10 +160,10 @@ impl Audio {
                 let tick =
                     (u128::from(self.sample + 1) * pit::FREQUENCY / u128::from(SAMPLE_RATE)) as u64;
                 self.sound_blaster.advance(1, &mut self.dma, cpu);
-                let value = (self.speaker.sample(tick)
-                    + self.adlib.sample()
-                    + self.sound_blaster.sample()
-                    + (left + right) * 0.5)
+                let value = (self.speaker.sample(tick) * speaker_gain
+                    + self.adlib.sample() * adlib_gain
+                    + self.sound_blaster.sample() * blaster_gain
+                    + (left + right) * 0.5 * midi_gain)
                     .clamp(-1.0, 1.0);
                 if self.samples.len() == MAX_SAMPLES {
                     self.samples.pop_front();
@@ -192,6 +233,36 @@ fn sample_at(elapsed: Duration) -> u64 {
 mod tests {
     use super::*;
     use crate::tests::Directory;
+
+    #[test]
+    fn device_levels_change_the_mix_without_resetting_the_sources() {
+        let mut cpu = Cpu::new();
+        let mut audio = Audio::new(Duration::ZERO);
+        for (port, value) in [(0x61, 2), (0x22c, 0xd1), (0x22c, 0x10), (0x22c, 64)] {
+            assert!(audio.write_port(port, value, Duration::ZERO, &mut cpu));
+        }
+        audio.advance(Duration::from_millis(1), &cpu);
+        assert_eq!(audio.samples.front().copied(), Some(0.12 - 0.25));
+
+        audio.set_levels(AudioLevels {
+            speaker: 0,
+            sound_blaster: 50,
+            ..AudioLevels::default()
+        });
+        assert!(audio.drain().is_empty());
+        audio.advance(Duration::from_millis(2), &cpu);
+        assert_eq!(audio.samples.front().copied(), Some(-0.125));
+        assert!(audio.snapshot().samples.is_empty());
+
+        audio.set_levels(AudioLevels {
+            sound_blaster: 0,
+            ..AudioLevels::default()
+        });
+        audio.advance(Duration::from_millis(3), &cpu);
+        assert_eq!(audio.drain(), vec![0.12; 48]);
+        audio.restart(Duration::from_millis(3));
+        assert_eq!(audio.levels.sound_blaster, 0);
+    }
 
     #[test]
     fn guest_fm_register_writes_mix_with_pc_speaker_and_reset_on_launch() {

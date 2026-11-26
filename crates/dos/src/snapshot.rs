@@ -362,6 +362,7 @@ impl Machine {
         };
         let mut audio =
             audio::Audio::from_snapshot(state.audio, state.elapsed, replay).ok_or(Invalid)?;
+        audio.set_levels(self.audio.levels);
         audio.mpu = Mpu401::from_snapshot(midi, &self.audio.mpu, audio.sample)?;
         let mut video = Adapter::from_snapshot(state.video).ok_or(Invalid)?;
         let mut cpu = Cpu::with_profile(state.profile);

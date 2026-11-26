@@ -42,11 +42,32 @@ pub enum Speed {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Volume {
+    Off = 0,
     Quiet = 25,
     Half = 50,
     Loud = 75,
     #[default]
     Full = 100,
+}
+
+impl Volume {
+    fn next_device_level(self) -> Self {
+        match self {
+            Self::Full => Self::Loud,
+            Self::Loud => Self::Half,
+            Self::Half => Self::Quiet,
+            Self::Quiet => Self::Off,
+            Self::Off => Self::Full,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AudioDevice {
+    Speaker,
+    AdLib,
+    SoundBlaster,
+    Midi,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -102,6 +123,7 @@ pub enum MenuAction {
     UseWritableZip(char),
     SetSpeed(Speed),
     SetVolume(Volume),
+    SetDeviceVolume(AudioDevice, Volume),
     SetMuted(bool),
     SetTextMode(TextMode),
     SetScaling(Scaling),
@@ -121,6 +143,7 @@ pub struct MenuState {
     pub cpu: CpuMode,
     pub speed: Speed,
     pub volume: Volume,
+    pub device_volumes: [Volume; 4],
     pub muted: bool,
     pub recording: bool,
     pub text_mode: TextMode,
@@ -147,6 +170,7 @@ impl Default for MenuState {
             cpu: CpuMode::default(),
             speed: Speed::default(),
             volume: Volume::default(),
+            device_volumes: [Volume::Full; 4],
             muted: false,
             recording: false,
             text_mode: TextMode::default(),
@@ -855,6 +879,57 @@ pub(crate) fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool
                 )
             }),
         )
+        .chain(
+            [
+                (
+                    AudioDevice::Speaker,
+                    [
+                        "PC speaker off",
+                        "PC speaker 25%",
+                        "PC speaker 50%",
+                        "PC speaker 75%",
+                        "PC speaker 100%",
+                    ],
+                ),
+                (
+                    AudioDevice::AdLib,
+                    [
+                        "AdLib off",
+                        "AdLib 25%",
+                        "AdLib 50%",
+                        "AdLib 75%",
+                        "AdLib 100%",
+                    ],
+                ),
+                (
+                    AudioDevice::SoundBlaster,
+                    [
+                        "Sound Blaster off",
+                        "Sound Blaster 25%",
+                        "Sound Blaster 50%",
+                        "Sound Blaster 75%",
+                        "Sound Blaster 100%",
+                    ],
+                ),
+                (
+                    AudioDevice::Midi,
+                    ["MIDI off", "MIDI 25%", "MIDI 50%", "MIDI 75%", "MIDI 100%"],
+                ),
+            ]
+            .into_iter()
+            .map(|(device, labels)| {
+                let volume = state.device_volumes[device as usize];
+                item(
+                    labels[volume as usize / 25],
+                    Command::App(MenuAction::SetDeviceVolume(
+                        device,
+                        volume.next_device_level(),
+                    )),
+                    true,
+                    false,
+                )
+            }),
+        )
         .chain(std::iter::once(if state.recording {
             item(
                 "Stop WAV recording",
@@ -1227,6 +1302,14 @@ mod tests {
         assert_eq!(state.audio_gain(), 0.5);
         state.muted = true;
         assert_eq!(state.audio_gain(), 0.0);
+        state.device_volumes[AudioDevice::Midi as usize] = Volume::Quiet;
+        let items = options(Tab::Audio, &state, 'C', false);
+        let midi = items.iter().find(|item| item.label == "MIDI 25%").unwrap();
+        assert!(midi.enabled);
+        assert_eq!(
+            midi.command,
+            Command::App(MenuAction::SetDeviceVolume(AudioDevice::Midi, Volume::Off))
+        );
         menu.open(Tab::Audio, &state);
         menu.key(&input(Key::Down, false), &state, false, true);
         assert_eq!(
