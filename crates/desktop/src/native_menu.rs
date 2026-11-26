@@ -339,3 +339,160 @@ fn caption(state: &MenuState) -> String {
     }
     title
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CpuMode, MountKind, Speed, TextMode};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetMenuItemCount, GetMenuItemID, GetMenuState, GetMenuStringW, GetSubMenu, GetWindowTextW,
+        MF_BYPOSITION, SendMessageW,
+    };
+    use winit::{
+        application::ApplicationHandler,
+        dpi::PhysicalPosition,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+    };
+
+    #[test]
+    #[ignore = "requires a Windows desktop session"]
+    fn windows_caption_routes_native_messages_and_builds_actions() {
+        #[derive(Default)]
+        struct Check {
+            completed: bool,
+        }
+
+        impl ApplicationHandler for Check {
+            fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+                let window = event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_visible(false)
+                            .with_position(PhysicalPosition::new(100, 100)),
+                    )
+                    .unwrap();
+                let mut native = NativeMenu::new(Arc::new(window)).unwrap();
+                let state = MenuState {
+                    enabled: true,
+                    active_drive: 'D',
+                    cpu: CpuMode::I286,
+                    speed: Speed::Fast,
+                    running: true,
+                    paused: true,
+                    iso_drives: ['D'].into(),
+                    iso_set_drives: ['D'].into(),
+                    ..Default::default()
+                };
+                native.sync(&state, false);
+                let mut title = [0u16; 128];
+                let length =
+                    unsafe { GetWindowTextW(native.hwnd, title.as_mut_ptr(), title.len() as i32) };
+                let title = String::from_utf16(&title[..length as usize]).unwrap();
+                for part in ["Dosa", "286", "Fast", "D:", "Paused"] {
+                    assert!(title.contains(part), "{title:?}");
+                }
+
+                let mut bounds = RECT::default();
+                assert_ne!(unsafe { GetWindowRect(native.hwnd, &mut bounds) }, 0);
+                let x = bounds.left + scaled(native.hwnd, 32);
+                let caption_x = bounds.left + scaled(native.hwnd, 120);
+                let y = bounds.top + scaled(native.hwnd, 15);
+                let send = |message, x: i32| unsafe {
+                    let point = (u32::from(x as u16) | (u32::from(y as u16) << 16)) as LPARAM;
+                    SendMessageW(native.hwnd, message, HTCAPTION as WPARAM, point)
+                };
+                assert_eq!(send(WM_NCLBUTTONDOWN, x), 0);
+                assert!(matches!(native.take_request(), Some(OpenAt::Title)));
+                assert_eq!(send(WM_NCRBUTTONUP, caption_x), 0);
+                assert!(matches!(
+                    native.take_request(),
+                    Some(OpenAt::Pointer(point)) if (point.x, point.y) == (caption_x, y)
+                ));
+                assert!(native.request_keyboard_open());
+                native.sync(&state, true);
+                assert!(native.take_request().is_none());
+                assert!(!native.request_keyboard_open());
+
+                let (popup, actions) = build(&state, 'D').unwrap();
+                let drives = unsafe { GetSubMenu(popup.0, item_position(popup.0, "&Drives")) };
+                let open_iso = item_position(drives, "Mount ISO image...");
+                assert_ne!(
+                    unsafe { GetMenuState(drives, open_iso as u32, MF_BYPOSITION) } & MF_GRAYED,
+                    0
+                );
+                assert!(matches!(
+                    action_at(drives, &actions, "Next ISO in set"),
+                    Some(Action::Run(Command::App(MenuAction::NextIso('D'))))
+                ));
+                let view = unsafe { GetSubMenu(popup.0, item_position(popup.0, "&View")) };
+                assert!(action_at(view, &actions, "132 x 50").is_none());
+                assert!(matches!(
+                    action_at(popup.0, &actions, "&Reset guest"),
+                    Some(Action::Run(Command::App(MenuAction::ResetGuest)))
+                ));
+                assert!(matches!(
+                    action_at(drives, &actions, "Swap ISO image..."),
+                    Some(Action::Run(Command::Mount(MountKind::SwapIso, 'D')))
+                ));
+
+                let idle = MenuState {
+                    running: false,
+                    paused: false,
+                    ..state
+                };
+                let (popup, actions) = build(&idle, 'D').unwrap();
+                let view = unsafe { GetSubMenu(popup.0, item_position(popup.0, "&View")) };
+                assert!(matches!(
+                    action_at(view, &actions, "132 x 50"),
+                    Some(Action::Run(Command::App(MenuAction::SetTextMode(
+                        TextMode::WideRows50
+                    ))))
+                ));
+                self.completed = true;
+                event_loop.exit();
+            }
+
+            fn window_event(
+                &mut self,
+                _: &ActiveEventLoop,
+                _: winit::window::WindowId,
+                _: winit::event::WindowEvent,
+            ) {
+            }
+        }
+
+        let event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
+        let mut check = Check::default();
+        event_loop.run_app(&mut check).unwrap();
+        assert!(check.completed);
+    }
+
+    fn item_position(menu: HMENU, label: &str) -> i32 {
+        let count = unsafe { GetMenuItemCount(menu) };
+        (0..count)
+            .find(|&position| {
+                let mut text = [0u16; 128];
+                let size = unsafe {
+                    GetMenuStringW(
+                        menu,
+                        position as u32,
+                        text.as_mut_ptr(),
+                        text.len() as i32,
+                        MF_BYPOSITION,
+                    )
+                };
+                String::from_utf16_lossy(&text[..size as usize]) == label
+            })
+            .unwrap_or_else(|| panic!("missing native menu item {label:?}"))
+    }
+
+    fn action_at<'a>(
+        menu: HMENU,
+        actions: &'a [Option<Action>],
+        label: &str,
+    ) -> Option<&'a Action> {
+        let id = unsafe { GetMenuItemID(menu, item_position(menu, label)) };
+        actions.get(id.checked_sub(1)? as usize)?.as_ref()
+    }
+}
