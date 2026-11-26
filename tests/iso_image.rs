@@ -165,6 +165,47 @@ fn rejects_truncated_and_bad_directory_records() {
 }
 
 #[test]
+fn save_state_rebinds_an_optical_image_and_checks_raw_sectors() {
+    use dosa_dos::{GuestSnapshotError, Machine, RunState};
+
+    let scratch = tempfile::tempdir().unwrap();
+    let original = scratch.path().join("original.iso");
+    let altered = scratch.path().join("altered.iso");
+    let mut image = fixture();
+    let wait_for_key = [0x30, 0xe4, 0xcd, 0x16];
+    let exit = [0xb4, 0x4c, 0xcd, 0x21];
+    image[25 * SECTOR..25 * SECTOR + 8].copy_from_slice(&[wait_for_key, exit].concat());
+    // Update the recorded file length in BIN's third directory record.
+    both_u32(&mut image[22 * SECTOR + 68 + 10..22 * SECTOR + 68 + 18], 8);
+    fs::write(&original, &image).unwrap();
+    // MSCDEX can read the system area even though the filesystem cannot list it.
+    image[17] ^= 1;
+    fs::write(&altered, &image).unwrap();
+    let mount = |path: &std::path::Path| {
+        let mut machine = Machine::new();
+        machine
+            .mount('D', Mount::open_iso_image(path).unwrap())
+            .unwrap();
+        machine
+    };
+    let mut guest = mount(&original);
+    guest.launch('D', "BIN\\HELLO.COM", "").unwrap();
+    assert_eq!(guest.run(100).unwrap(), RunState::WaitingForKey);
+    let state = guest.save_guest().unwrap();
+
+    let mut restored = mount(&original);
+    restored.load_guest(&state).unwrap();
+    restored.key(b'Q', 0x10);
+    assert_eq!(restored.run(100).unwrap(), RunState::Exited(b'Q'));
+
+    let mut changed_media = mount(&altered);
+    assert!(matches!(
+        changed_media.load_guest(&state),
+        Err(GuestSnapshotError::MediaChanged)
+    ));
+}
+
+#[test]
 fn dos_program_discovers_iso_drives_and_reads_sectors_through_mscdex() {
     let scratch = tempfile::tempdir().unwrap();
     let image = scratch.path().join("compact disc.iso");
