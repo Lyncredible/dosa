@@ -9,3 +9,5 @@ Exercise the emulator as a user launches it, using repeatable fixtures for publi
 - Keep native Linux and macOS checks in [06](06-platforms.md).
 
 The opt-in `desktop_smoke` target can generate its own ZIP and exercise VGA presentation, Enter and Escape transitions, WAV capture, and paused inspection and stepping in a native window. Set `DOSA_SMOKE_GENERATED=1` to run it without a supplied archive. A caller-supplied ZIP can use the same native window test with its own scripted Enter and Escape sequence.
+
+On Windows, run `cargo test --locked -p dosa-desktop windows_caption_routes_native_messages_and_builds_actions -- --ignored` in a desktop session. The test creates a Win32 window, sends non-client caption messages to Dosa's subclass, reads the native caption, and checks the command IDs registered on Windows popup menus. Use the built Dosa window for visual inspection, physical input, and native file-picker interaction.
