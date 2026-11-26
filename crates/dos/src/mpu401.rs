@@ -238,7 +238,7 @@ mod tests {
         let mut original = folder.machine();
         original.load_midi_soundfont(&mut font.as_slice()).unwrap();
         original.launch('C', "LOOP.COM", "").unwrap();
-        original.clock = std::time::Instant::now() - Duration::from_millis(100);
+        let started = original.elapsed();
         for (port, value) in [
             (STATUS_COMMAND, 0xff),
             (STATUS_COMMAND, 0x3f),
@@ -250,10 +250,10 @@ mod tests {
         }
         original
             .audio
-            .advance(Duration::from_millis(70), &original.cpu);
+            .advance(started + Duration::from_millis(70), &original.cpu);
         assert!(original.take_audio().iter().any(|value| value.abs() > 0.02));
         assert!(original.audio.mpu.write_port(DATA, 67)); // A partial running-status Note On.
-        original.set_paused(true);
+        original.paused_since = Some(original.clock + started + Duration::from_millis(100));
         let bytes = original.save_guest().unwrap();
 
         let mut missing_font = folder.machine();
@@ -285,7 +285,9 @@ mod tests {
             assert_eq!(port.read_port(DATA), Some(ACK));
             assert_eq!(port.read_port(STATUS_COMMAND), Some(0xbf));
             assert!(port.write_port(DATA, 96));
-            guest.audio.advance(Duration::from_millis(105), &guest.cpu);
+            guest
+                .audio
+                .advance(started + Duration::from_millis(105), &guest.cpu);
         }
         let expected = original.take_audio();
         assert!(expected.iter().any(|value| value.abs() > 0.02));
