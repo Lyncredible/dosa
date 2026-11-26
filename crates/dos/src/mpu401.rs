@@ -216,9 +216,8 @@ mod tests {
             let status: [u8; 4] =
                 std::array::from_fn(|index| machine.cpu.read_u8(segment, 0x200 + index as u16));
             assert_eq!(status, [0xbf, 0x3f, ACK, ACK]);
-            machine
-                .audio
-                .advance(Duration::from_millis(150), &machine.cpu);
+            let end = machine.elapsed() + Duration::from_millis(150);
+            machine.audio.advance(end, &machine.cpu);
             let pcm = machine.take_audio();
             assert!(pcm.iter().any(|sample| sample.abs() > 0.02));
             machine.reset();
