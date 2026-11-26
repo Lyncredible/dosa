@@ -212,10 +212,6 @@ fn dos_program_discovers_iso_drives_and_reads_sectors_through_mscdex() {
     let before = fixture();
     fs::write(&image, &before).unwrap();
 
-    fn expect(program: &mut Vec<u8>, jump_if_passed: u8, error: u8) {
-        program.extend([jump_if_passed, 5, 0xb8, error, 0x4c, 0xcd, 0x21]);
-    }
-
     let mut absent = vec![0xbb, 0xff, 0xff, 0xb8, 0x00, 0x15, 0xcd, 0x2f];
     absent.extend([0x83, 0xfb, 0]); // CMP BX,0
     expect(&mut absent, 0x74, 1);
@@ -286,4 +282,111 @@ fn dos_program_discovers_iso_drives_and_reads_sectors_through_mscdex() {
     run("ABSENT", false);
     run("CHECK", true);
     assert_eq!(fs::read(image).unwrap(), before);
+}
+
+#[test]
+fn dos_program_sends_mscdex_driver_requests_to_the_selected_iso() {
+    let scratch = tempfile::tempdir().unwrap();
+    let image = scratch.path().join("cd.iso");
+    let before = fixture();
+    fs::write(&image, &before).unwrap();
+
+    fn set_word(code: &mut Vec<u8>, address: u16, value: u16) {
+        code.extend([0xc7, 0x06]); // MOV word [address],value
+        code.extend(address.to_le_bytes());
+        code.extend(value.to_le_bytes());
+    }
+    fn expect_word(code: &mut Vec<u8>, address: u16, value: u16, error: u8) {
+        code.extend([0x81, 0x3e]); // CMP word [address],value
+        code.extend(address.to_le_bytes());
+        code.extend(value.to_le_bytes());
+        expect(code, 0x74, error);
+    }
+    fn request(code: &mut Vec<u8>, drive: u8, error: u8) {
+        code.extend([0xb9, drive, 0, 0xb8, 0x10, 0x15, 0xcd, 0x2f]);
+        expect(code, if drive == 5 { 0x73 } else { 0x72 }, error);
+    }
+
+    const PACKET: u16 = 0x1000;
+    const CONTROL: u16 = 0x2000;
+    const STATUS: u16 = PACKET + 3;
+    let mut program = vec![
+        0xbb, 0, 0x10, // MOV BX,PACKET
+        0x8c, 0xd8, // MOV AX,DS
+        0xa3, 0x10, 0x10, // MOV [PACKET+16],AX
+    ];
+    set_word(&mut program, PACKET, 26);
+    set_word(&mut program, PACKET + 2, 3);
+    set_word(&mut program, PACKET + 14, CONTROL);
+    set_word(&mut program, PACKET + 18, 5);
+
+    set_word(&mut program, CONTROL, 6); // Device capabilities
+    set_word(&mut program, CONTROL + 2, 0xffff);
+    set_word(&mut program, CONTROL + 4, 0xff);
+    request(&mut program, 5, 1);
+    expect_word(&mut program, STATUS, 0x0100, 2);
+    expect_word(&mut program, PACKET, 0x011a, 3); // F is the second CD drive.
+    expect_word(&mut program, CONTROL, 6, 4);
+    expect_word(&mut program, CONTROL + 2, 0, 5);
+    expect_word(&mut program, CONTROL + 4, 0, 6);
+
+    set_word(&mut program, CONTROL, 7); // Size of a cooked sector
+    request(&mut program, 5, 7);
+    expect_word(&mut program, CONTROL + 2, SECTOR as u16, 8);
+    expect_word(&mut program, PACKET + 18, 4, 9);
+    set_word(&mut program, CONTROL, 0x0107); // Raw sector size is unsupported.
+    request(&mut program, 5, 10);
+    expect_word(&mut program, STATUS, 0x8103, 11);
+
+    set_word(&mut program, CONTROL, 8); // Lead-out in absolute CD frames
+    set_word(&mut program, PACKET + 18, 5);
+    request(&mut program, 5, 12);
+    expect_word(&mut program, CONTROL + 1, 26 + 150, 13);
+    set_word(&mut program, CONTROL, 9); // Media check
+    request(&mut program, 5, 14);
+    expect_word(&mut program, CONTROL, 0x0109, 15);
+
+    set_word(&mut program, PACKET, 27);
+    set_word(&mut program, PACKET + 2, 0x80); // Read two cooked sectors
+    set_word(&mut program, PACKET + 18, 2);
+    set_word(&mut program, PACKET + 20, 24);
+    request(&mut program, 5, 16);
+    expect_word(&mut program, STATUS, 0x0100, 17);
+    expect_word(&mut program, CONTROL, u16::from_le_bytes(*b"IS"), 18);
+    expect_word(&mut program, CONTROL + SECTOR as u16, 0x07b8, 19);
+
+    set_word(&mut program, PACKET + 20, 25); // End of volume
+    request(&mut program, 5, 20);
+    expect_word(&mut program, STATUS, 0x8108, 21);
+    expect_word(&mut program, CONTROL, u16::from_le_bytes(*b"IS"), 22);
+    set_word(&mut program, PACKET, 13); // Short read packet
+    request(&mut program, 5, 23);
+    expect_word(&mut program, STATUS, 0x8105, 24);
+    request(&mut program, 2, 25); // Host directory is not a CD drive.
+    program.extend([0x3d, 15, 0]); // AX=unknown drive
+    expect(&mut program, 0x74, 26);
+    expect_word(&mut program, STATUS, 0x8105, 27);
+    program.extend([0xb8, 0, 0x4c, 0xcd, 0x21]);
+    fs::write(scratch.path().join("DRIVER.COM"), program).unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args([
+            "--headless",
+            "--mount",
+            &format!("C={}", scratch.path().display()),
+            "--mount-iso",
+            &format!("D={}", image.display()),
+            "--mount-iso",
+            &format!("F={}", image.display()),
+            "--exec",
+            "DRIVER.COM",
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(fs::read(image).unwrap(), before);
+}
+
+fn expect(program: &mut Vec<u8>, jump_if_passed: u8, error: u8) {
+    program.extend([jump_if_passed, 5, 0xb8, error, 0x4c, 0xcd, 0x21]);
 }
