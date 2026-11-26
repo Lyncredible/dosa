@@ -105,6 +105,11 @@ pub enum MenuAction {
     PasteText,
     StopPaste,
     QuickLaunch(PathBuf),
+    MountIsoSet {
+        drive: char,
+        paths: Vec<PathBuf>,
+    },
+    NextIso(char),
     SaveScreenshot(PathBuf),
     SaveGuestState(PathBuf),
     LoadGuestState(PathBuf),
@@ -142,6 +147,7 @@ pub struct MenuState {
     pub write_blocked_zip: Option<char>,
     pub drives: std::collections::BTreeMap<char, &'static str>,
     pub iso_drives: std::collections::BTreeSet<char>,
+    pub iso_set_drives: std::collections::BTreeSet<char>,
     pub cpu: CpuMode,
     pub speed: Speed,
     pub volume: Volume,
@@ -170,6 +176,7 @@ impl Default for MenuState {
             write_blocked_zip: None,
             drives: Default::default(),
             iso_drives: Default::default(),
+            iso_set_drives: Default::default(),
             cpu: CpuMode::default(),
             speed: Speed::default(),
             volume: Volume::default(),
@@ -265,6 +272,7 @@ pub(crate) enum Command {
     GuestState { save: bool },
     RecordAudio,
     Mount(MountKind, char),
+    MountIsoSet(char),
     Fullscreen,
     App(MenuAction),
 }
@@ -832,9 +840,21 @@ pub(crate) fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool
             false,
         )))
         .chain(std::iter::once(item(
+            "Mount ISO set...",
+            Command::MountIsoSet(drive),
+            can_change_mounts,
+            false,
+        )))
+        .chain(std::iter::once(item(
             "Swap ISO image...",
             Command::Mount(MountKind::SwapIso, drive),
             state.iso_drives.contains(&drive),
+            false,
+        )))
+        .chain(std::iter::once(item(
+            "Next ISO in set",
+            Command::App(MenuAction::NextIso(drive)),
+            state.iso_set_drives.contains(&drive),
             false,
         )))
         .chain(std::iter::once(item(
@@ -1273,10 +1293,19 @@ mod tests {
             (true, None)
         );
         state.iso_drives.insert('D');
-        let options = options(Tab::Drives, &state, 'D', false);
-        let enabled: Vec<_> = options.iter().filter(|item| item.enabled).collect();
+        let choices = options(Tab::Drives, &state, 'D', false);
+        let enabled: Vec<_> = choices.iter().filter(|item| item.enabled).collect();
         assert_eq!(enabled.len(), 1);
         assert_eq!(enabled[0].command, Command::Mount(MountKind::SwapIso, 'D'));
+        state.iso_set_drives.insert('D');
+        assert!(options(Tab::Drives, &state, 'D', false).iter().any(|item| {
+            item.enabled && item.command == Command::App(MenuAction::NextIso('D'))
+        }));
+        assert!(
+            !options(Tab::Drives, &state, 'E', false)
+                .iter()
+                .any(|item| item.enabled)
+        );
         menu.open(Tab::Speed, &state);
         assert_eq!(
             menu.key(&input(Key::Enter, false), &state, false, true),
