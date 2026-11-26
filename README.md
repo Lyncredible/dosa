@@ -139,6 +139,6 @@ cargo clippy --workspace --all-targets --locked
 
 See [TASKS.md](TASKS.md) for the architecture and work in progress.
 
-Set `DOSA_SMOKE_GENERATED=1` and run `cargo test --test desktop_smoke --locked` to exercise a live window. The test builds a temporary ZIP with a DOS program that updates VGA graphics after Enter. To use your own ZIP, set `DOSA_SMOKE_ARCHIVE`, `DOSA_SMOKE_PROGRAM`, and optionally `DOSA_SMOKE_ENTER_COUNT`. Set `DOSA_SMOKE_SESSION=1` to exercise the writable ZIP copy. The test mounts the ZIP through the application menu action and checks graphics updates in the GPU event loop.
+Set `DOSA_SMOKE_GENERATED=1` and run `cargo test --test desktop_smoke --locked` to exercise a live window. The test builds a temporary ZIP with a DOS program that updates VGA graphics after Enter and again after Escape. To use your own ZIP, set `DOSA_SMOKE_ARCHIVE`, `DOSA_SMOKE_PROGRAM`, and optionally a key sequence such as `DOSA_SMOKE_KEYS=enter,escape` or a count in `DOSA_SMOKE_ENTER_COUNT`. Set `DOSA_SMOKE_SESSION=1` to exercise the writable ZIP copy. The test mounts the ZIP through the application menu action and checks graphics updates in the GPU event loop.
 
-For an animated final prompt, use `DOSA_SMOKE_FINAL_ENTER_DELAY_MS` to schedule the final Enter relative to the previous one. Use `DOSA_SMOKE_FINAL_MIN_COLORS` to require a minimum number of distinct colors in the resulting scene.
+For an animated final prompt, use `DOSA_SMOKE_FINAL_INPUT_DELAY_MS` to schedule the final key relative to the previous input. Use `DOSA_SMOKE_FINAL_MIN_COLORS` to require a minimum number of distinct colors in the resulting scene.

@@ -1,7 +1,7 @@
 //! Optional native-window smoke test with a generated or caller-provided DOS archive.
 
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::error::Error;
 use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -20,30 +20,31 @@ use dosa_desktop::{
 fn main() -> Result<(), Box<dyn Error>> {
     let generated;
     let mut wav_path = None;
-    let (archive, program, key_count) =
-        if let Some(archive) = std::env::var_os("DOSA_SMOKE_ARCHIVE") {
-            let program = std::env::var("DOSA_SMOKE_PROGRAM")?;
-            let key_count: u32 = std::env::var("DOSA_SMOKE_ENTER_COUNT")
-                .unwrap_or_else(|_| "0".into())
-                .parse()?;
-            (PathBuf::from(archive), program, key_count)
-        } else if std::env::var_os("DOSA_SMOKE_GENERATED").is_some() {
-            generated = tempfile::tempdir()?;
-            let archive = generated.path().join("desktop fixture.zip");
-            wav_path = Some(generated.path().join("desktop capture.wav"));
-            generate_archive(&archive)?;
-            (archive, "SMOKE.COM".to_owned(), 1)
-        } else {
-            println!(
-                "desktop smoke skipped; set DOSA_SMOKE_GENERATED or DOSA_SMOKE_ARCHIVE to enable it"
-            );
-            return Ok(());
-        };
+    let (archive, program, keys) = if let Some(archive) = std::env::var_os("DOSA_SMOKE_ARCHIVE") {
+        let program = std::env::var("DOSA_SMOKE_PROGRAM")?;
+        (PathBuf::from(archive), program, smoke_keys()?)
+    } else if std::env::var_os("DOSA_SMOKE_GENERATED").is_some() {
+        generated = tempfile::tempdir()?;
+        let archive = generated.path().join("desktop fixture.zip");
+        wav_path = Some(generated.path().join("desktop capture.wav"));
+        generate_archive(&archive)?;
+        (
+            archive,
+            "SMOKE.COM".to_owned(),
+            VecDeque::from([Key::Enter, Key::Escape]),
+        )
+    } else {
+        println!(
+            "desktop smoke skipped; set DOSA_SMOKE_GENERATED or DOSA_SMOKE_ARCHIVE to enable it"
+        );
+        return Ok(());
+    };
     let min_colors: usize = std::env::var("DOSA_SMOKE_MIN_COLORS")
         .unwrap_or_else(|_| "3".into())
         .parse()?;
     let session_zip = std::env::var_os("DOSA_SMOKE_SESSION").is_some();
-    let final_enter_delay = std::env::var("DOSA_SMOKE_FINAL_ENTER_DELAY_MS")
+    let final_input_delay = std::env::var("DOSA_SMOKE_FINAL_INPUT_DELAY_MS")
+        .or_else(|_| std::env::var("DOSA_SMOKE_FINAL_ENTER_DELAY_MS"))
         .ok()
         .map(|value| value.parse().map(Duration::from_millis))
         .transpose()?;
@@ -107,15 +108,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let result = Rc::new(Cell::new(None));
     let now = Instant::now();
+    let key_count = keys.len();
     dosa_desktop::run(Smoke {
         desktop,
         started: now,
         changed_at: now,
         sample_at: now,
-        last_enter_at: now,
+        last_input_at: now,
         key_frame: None,
-        keys_remaining: key_count,
-        final_enter_delay,
+        keys,
+        final_input_delay,
         result: Rc::clone(&result),
         fingerprint: None,
         min_colors,
@@ -141,6 +143,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn smoke_keys() -> Result<VecDeque<Key>, Box<dyn Error>> {
+    if let Ok(keys) = std::env::var("DOSA_SMOKE_KEYS") {
+        return keys
+            .split(',')
+            .map(|name| match name.trim().to_ascii_lowercase().as_str() {
+                "enter" => Ok(Key::Enter),
+                "esc" | "escape" => Ok(Key::Escape),
+                _ => Err(format!("unknown smoke key {name:?}").into()),
+            })
+            .collect();
+    }
+    let count = std::env::var("DOSA_SMOKE_ENTER_COUNT")
+        .unwrap_or_else(|_| "0".into())
+        .parse()?;
+    Ok(std::iter::repeat_n(Key::Enter, count).collect())
+}
+
 fn generate_archive(path: &std::path::Path) -> Result<(), Box<dyn Error>> {
     let guest = [
         0xba, 0x2c, 0x02, 0xb0, 0xd1, 0xee, // Enable Sound Blaster DAC
@@ -150,6 +169,8 @@ fn generate_archive(path: &std::path::Path) -> Result<(), Box<dyn Error>> {
         0x26, 0xc7, 0x06, 0, 0, 1, 2, // MOV WORD [ES:0],0201h
         0xb4, 0x00, 0xcd, 0x16, // INT 16h, wait for input
         0x26, 0xc6, 0x06, 0, 0, 3, // MOV BYTE [ES:0],3
+        0xb4, 0x00, 0xcd, 0x16, 0x3c, 27, 0x75, 0xf8, // Wait for Escape
+        0x26, 0xc6, 0x06, 0, 0, 4, // MOV BYTE [ES:0],4
         0xeb, 0xfe, // JMP $ to retain the graphics frame
     ];
     let mut archive = zip::ZipWriter::new(File::create(path)?);
@@ -164,10 +185,10 @@ struct Smoke {
     started: Instant,
     changed_at: Instant,
     sample_at: Instant,
-    last_enter_at: Instant,
+    last_input_at: Instant,
     key_frame: Option<u64>,
-    keys_remaining: u32,
-    final_enter_delay: Option<Duration>,
+    keys: VecDeque<Key>,
+    final_input_delay: Option<Duration>,
     result: Rc<Cell<Option<Result<(), &'static str>>>>,
     fingerprint: Option<u64>,
     min_colors: usize,
@@ -227,7 +248,7 @@ impl App for Smoke {
             .iter()
             .take(640 * 480)
             .collect();
-        let min_colors = if self.keys_remaining == 0 {
+        let min_colors = if self.keys.is_empty() {
             self.final_min_colors
         } else {
             self.min_colors
@@ -243,28 +264,27 @@ impl App for Smoke {
         if self.fingerprint.replace(hash) != Some(hash) {
             self.changed_at = now;
         }
-        if self.keys_remaining == 0 && self.key_frame.is_some_and(|previous| previous != hash) {
+        if self.keys.is_empty() && self.key_frame.is_some_and(|previous| previous != hash) {
             self.result.set(Some(Ok(())));
             return;
         }
-        let settled = match self.final_enter_delay.filter(|_| self.keys_remaining == 1) {
-            Some(delay) => now.duration_since(self.last_enter_at) >= delay,
+        let settled = match self.final_input_delay.filter(|_| self.keys.len() == 1) {
+            Some(delay) => now.duration_since(self.last_input_at) >= delay,
             None => now.duration_since(self.changed_at) >= Duration::from_millis(400),
         };
         if !settled || self.key_frame == Some(hash) {
             return;
         }
 
-        if self.keys_remaining == 0 {
+        let Some(key) = self.keys.pop_front() else {
             self.result.set(Some(Ok(())));
             return;
-        }
-        self.keys_remaining -= 1;
-        self.last_enter_at = now;
+        };
+        self.last_input_at = now;
         self.key_frame = Some(hash);
         self.changed_at = now;
         for pressed in [true, false] {
-            self.desktop.input(key_event(Key::Enter, None, pressed));
+            self.desktop.input(key_event(key, None, pressed));
         }
     }
 
@@ -303,7 +323,11 @@ impl App for Smoke {
 
 fn key_event(key: Key, text: Option<String>, pressed: bool) -> Input {
     Input {
-        scan_code: if key == Key::Enter { 0x1c } else { 0 },
+        scan_code: match key {
+            Key::Escape => 1,
+            Key::Enter => 0x1c,
+            _ => 0,
+        },
         key,
         pressed,
         text,
