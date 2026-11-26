@@ -5,7 +5,12 @@ use std::{collections::VecDeque, time::Duration};
 use dosa_cpu::Cpu;
 
 use crate::{
-    adlib::Adlib, dma::Dma, mpu401::Mpu401, pit, sound_blaster::SoundBlaster, speaker::Speaker,
+    adlib::{Adlib, SynthReplay},
+    dma::Dma,
+    mpu401::Mpu401,
+    pit,
+    sound_blaster::SoundBlaster,
+    speaker::Speaker,
 };
 
 pub(super) const SAMPLE_RATE: u64 = crate::AUDIO_SAMPLE_RATE as u64;
@@ -38,7 +43,7 @@ impl Audio {
         }
         Ok(AudioSnapshot {
             speaker: self.speaker.clone(),
-            adlib: self.adlib.snapshot().ok_or("AdLib synthesis is active")?,
+            adlib: self.adlib.snapshot(),
             dma: self.dma.clone(),
             sound_blaster: self.sound_blaster.clone(),
             sample: self.sample,
@@ -46,7 +51,15 @@ impl Audio {
         })
     }
 
-    pub(super) fn from_snapshot(state: AudioSnapshot, elapsed: Duration) -> Option<Self> {
+    pub(super) fn adlib_replay(&self) -> Result<Option<&SynthReplay>, &'static str> {
+        self.adlib.replay()
+    }
+
+    pub(super) fn from_snapshot(
+        state: AudioSnapshot,
+        elapsed: Duration,
+        replay: Option<SynthReplay>,
+    ) -> Option<Self> {
         if state.sample > sample_at(elapsed)
             || state.samples.len() > MAX_SAMPLES
             || !state
@@ -60,7 +73,7 @@ impl Audio {
         }
         Some(Self {
             speaker: state.speaker,
-            adlib: Adlib::from_snapshot(state.adlib)?,
+            adlib: Adlib::from_snapshot(state.adlib, replay, state.sample)?,
             dma: state.dma,
             sound_blaster: state.sound_blaster,
             mpu: Mpu401::default(),
