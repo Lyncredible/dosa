@@ -180,8 +180,26 @@ struct Line {
 }
 
 impl Batch {
-    pub(super) fn supports_snapshot(&self) -> bool {
-        self.frames.iter().all(|frame| frame.io.is_none())
+    pub(super) fn snapshot_streams(&self) -> (Vec<u8>, Vec<&ShellIo>) {
+        self.frames
+            .iter()
+            .enumerate()
+            .filter_map(|(index, frame)| frame.io.as_ref().map(|io| (index as u8, io)))
+            .unzip()
+    }
+
+    pub(super) fn valid_stream_slots(&self, indices: &[u8]) -> bool {
+        !indices.is_empty()
+            && indices.windows(2).all(|pair| pair[0] < pair[1])
+            && indices
+                .iter()
+                .all(|&index| usize::from(index) < self.frames.len())
+    }
+
+    pub(super) fn bind_streams(&mut self, indices: &[u8], streams: Vec<ShellIo>) {
+        for (&index, stream) in indices.iter().zip(streams) {
+            self.frames[usize::from(index)].io = Some(stream);
+        }
     }
 
     pub(super) fn prepare_snapshot(&mut self) -> bool {

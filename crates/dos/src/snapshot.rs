@@ -77,6 +77,19 @@ struct State<'a> {
 }
 
 impl Machine {
+    /// Save the guest and attached shell file tables, preserving shared open files.
+    pub fn save_guest_with_shell_io(
+        &self,
+        streams: &[&ShellIo],
+    ) -> Result<(Vec<u8>, Vec<u8>), GuestSnapshotError> {
+        let guest = self.save_guest()?;
+        let streams = self
+            .files
+            .snapshot_shell_io(&self.mounts, streams)
+            .map_err(GuestSnapshotError::Unavailable)?;
+        Ok((guest, streams))
+    }
+
     /// Save an active guest and its devices at an instruction boundary.
     pub fn save_guest(&self) -> Result<Vec<u8>, GuestSnapshotError> {
         use GuestSnapshotError::{Invalid, Unavailable};
@@ -167,6 +180,24 @@ impl Machine {
 
     /// Load a saved guest once the entire state and mounted media validate.
     pub fn load_guest(&mut self, bytes: &[u8]) -> Result<(), GuestSnapshotError> {
+        self.load_guest_snapshot(bytes, None).map(drop)
+    }
+
+    /// Load the guest and return exactly the requested number of shell file tables.
+    pub fn load_guest_with_shell_io(
+        &mut self,
+        bytes: &[u8],
+        streams: &[u8],
+        count: usize,
+    ) -> Result<Vec<ShellIo>, GuestSnapshotError> {
+        self.load_guest_snapshot(bytes, Some((streams, count)))
+    }
+
+    fn load_guest_snapshot(
+        &mut self,
+        bytes: &[u8],
+        streams: Option<(&[u8], usize)>,
+    ) -> Result<Vec<ShellIo>, GuestSnapshotError> {
         use GuestSnapshotError::{Invalid, MediaChanged};
         if !(HEADER_BYTES..=MAX_GUEST_SNAPSHOT_BYTES).contains(&bytes.len()) || &bytes[..8] != MAGIC
         {
@@ -239,6 +270,12 @@ impl Machine {
         let session_clock =
             clock::SessionClock::from_snapshot(state.session_clock).ok_or(Invalid)?;
         let files = DosFiles::from_snapshot(state.files, &self.mounts).ok_or(Invalid)?;
+        let streams = match streams {
+            Some((bytes, count)) => files
+                .restore_shell_io(&self.mounts, bytes, count)
+                .ok_or(Invalid)?,
+            None => Vec::new(),
+        };
         let mut audio =
             audio::Audio::from_snapshot(state.audio, state.elapsed, replay).ok_or(Invalid)?;
         audio.mpu = Mpu401::from_snapshot(midi, &self.audio.mpu, audio.sample)?;
@@ -287,7 +324,7 @@ impl Machine {
             blocks: state.blocks,
             line: state.line,
         };
-        Ok(())
+        Ok(streams)
     }
 }
 
