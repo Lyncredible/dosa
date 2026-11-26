@@ -38,7 +38,7 @@ mod tests;
 
 pub use gameport::JoystickState;
 pub use mouse::MouseCursor;
-pub use snapshot::{GuestSnapshotError, MAX_GUEST_SNAPSHOT_BYTES};
+pub use snapshot::{GuestSnapshotError, MAX_GUEST_SNAPSHOT_BYTES, RestoredPipelineIo};
 pub use video::{TextFrame, Video};
 
 use bios::{Hook, TIMER_VECTOR};

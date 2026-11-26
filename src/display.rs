@@ -2052,6 +2052,72 @@ mod tests {
     }
 
     #[test]
+    fn desktop_restores_a_pipeline_during_production_and_consumption() {
+        let media = tempfile::tempdir().unwrap();
+        let states = tempfile::tempdir().unwrap();
+        let producer_state = states.path().join("producer.dosastate");
+        let consumer_state = states.path().join("consumer.dosastate");
+        let result = media.path().join("RESULT.TXT");
+        let mut producer = vec![
+            0xba, 0x20, 1, 0xb4, 9, 0xcd, 0x21, // Write BEFORE.
+            0x30, 0xe4, 0xcd, 0x16, // Wait for the checkpoint.
+            0xba, 0x27, 1, 0xb4, 9, 0xcd, 0x21, // Write AFTER.
+            0xb8, 0, 0x4c, 0xcd, 0x21,
+        ];
+        producer.resize(0x20, 0);
+        producer.extend(b"BEFORE$AFTER$");
+        let transfer = |length| {
+            [
+                0x31, 0xdb, 0xb9, length, 0, 0xba, 0, 2, 0xb4, 0x3f, 0xcd,
+                0x21, // Read stdin.
+                0x89, 0xc1, 0xbb, 1, 0, 0xb4, 0x40, 0xcd, 0x21, // Write to stdout.
+            ]
+        };
+        let consumer = [
+            transfer(2).as_slice(),
+            &[0x30, 0xe4, 0xcd, 0x16], // Wait while positioned within the pipe.
+            transfer(64).as_slice(),
+            &[0xb8, 0, 0x4c, 0xcd, 0x21],
+        ]
+        .concat();
+        std::fs::write(media.path().join("WRITE.COM"), producer).unwrap();
+        std::fs::write(media.path().join("READ.COM"), consumer).unwrap();
+        let desktop = |command: Option<&str>| {
+            let mut shell = Shell::new();
+            shell
+                .mount('C', Mount::open_writable_directory(media.path()).unwrap())
+                .unwrap();
+            Desktop::new(shell, command)
+        };
+        let mut writer = desktop(Some("WRITE | READ > RESULT.TXT"));
+        writer.tick();
+        assert!(writer.menu().running && writer.menu().batch_active);
+        writer.menu_action(MenuAction::SaveGuestState(producer_state.clone()));
+        assert_eq!(writer.menu().status, "State saved");
+
+        let mut reader = desktop(None);
+        reader.menu_action(MenuAction::LoadGuestState(producer_state));
+        assert_eq!(reader.menu().status, "State loaded");
+        reader.shell.machine.key(b'Y', 0x15);
+        for _ in 0..3 {
+            reader.tick();
+        }
+        assert_eq!(std::fs::read(&result).unwrap(), b"BE");
+        reader.menu_action(MenuAction::SaveGuestState(consumer_state.clone()));
+        assert_eq!(reader.menu().status, "State saved");
+
+        let mut restored = desktop(None);
+        restored.menu_action(MenuAction::LoadGuestState(consumer_state));
+        assert_eq!(restored.menu().status, "State loaded");
+        restored.shell.machine.key(b'Y', 0x15);
+        for _ in 0..3 {
+            restored.tick();
+        }
+        assert!(!restored.menu().running && !restored.menu().batch_active);
+        assert_eq!(std::fs::read(result).unwrap(), b"BEFOREAFTER");
+    }
+
+    #[test]
     fn mounted_guest_uses_mouse_and_can_pause_and_resume() {
         let scratch = std::env::temp_dir().join(format!("dosa-pointer-{}", std::process::id()));
         std::fs::create_dir(&scratch).unwrap();

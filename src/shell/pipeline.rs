@@ -5,11 +5,20 @@ use dosa_dos::ShellPipe;
 
 use super::{Command, Shell, redirection, split_word};
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Pipeline {
     stages: VecDeque<String>,
-    input: Option<ShellPipe>,
+    #[serde(skip)]
+    pub(super) input: Option<ShellPipe>,
     pub(super) batch_depth: usize,
     batch: bool,
+}
+
+impl Pipeline {
+    pub(super) fn valid_snapshot(&self) -> bool {
+        self.batch_depth <= super::batch::MAX_CALL_DEPTH
+            && self.stages.iter().all(|stage| !stage.trim().is_empty())
+    }
 }
 
 pub(super) fn parse(line: &str) -> Result<Option<VecDeque<String>>, &'static str> {
