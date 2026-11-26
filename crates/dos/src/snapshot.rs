@@ -6,6 +6,7 @@ use crate::{
     audio::AudioSnapshot,
     boot_disk::{BootDisk, DiskSnapshot},
     files::FilesSnapshot,
+    mpu401::{MidiReplay, MidiSnapshot, Mpu401},
     video::VideoSnapshot,
     xms::XmsSnapshot,
 };
@@ -15,6 +16,7 @@ const MAGIC: &[u8; 8] = b"DOSAGST\0";
 const VERSION_LEGACY: u16 = 1;
 const VERSION_ADLIB_REPLAY: u16 = 2;
 const VERSION_BOOT_MEDIA: u16 = 3;
+const VERSION_MIDI: u16 = 4;
 const HEADER_BYTES: usize = 18;
 /// Maximum size in bytes of a serialized guest save state.
 pub const MAX_GUEST_SNAPSHOT_BYTES: usize = 300 * 1024 * 1024;
@@ -37,6 +39,8 @@ pub enum GuestSnapshotError {
     Media(#[from] MountError),
     #[error("could not inspect the boot disk: {0}")]
     BootMedia(#[from] std::io::Error),
+    #[error("the configured MIDI SoundFont differs from the saved session")]
+    MidiSoundFontChanged,
     #[error("could not restore the guest CPU: {0}")]
     Cpu(#[from] dosa_cpu::SnapshotError),
 }
@@ -84,6 +88,7 @@ impl Machine {
             return Err(Unavailable("the guest has been running too long"));
         }
         let replay = self.audio.adlib_replay().map_err(Unavailable)?;
+        let midi = self.audio.mpu.snapshot().map_err(Unavailable)?;
         let state = State {
             profile: self.cpu_profile,
             elapsed,
@@ -110,7 +115,7 @@ impl Machine {
             mouse: self.mouse.clone(),
             pic: self.pic.clone(),
             pit: self.pit.clone(),
-            audio: self.audio.snapshot().map_err(Unavailable)?,
+            audio: self.audio.snapshot(),
             modifiers: self.modifiers,
             locks: self.locks,
             output: self.output.clone(),
@@ -121,17 +126,26 @@ impl Machine {
             line: self.line.clone(),
         };
         let mut metadata = postcard::to_allocvec(&state).map_err(|_| Invalid)?;
-        let version = match (&self.boot_disk, replay) {
-            (Some(disk), replay) => {
-                metadata = postcard::to_extend(&(disk.snapshot()?, replay), metadata)
-                    .map_err(|_| Invalid)?;
+        let boot = self
+            .boot_disk
+            .as_ref()
+            .map(BootDisk::snapshot)
+            .transpose()?;
+        let version = match (boot, replay, midi) {
+            (boot, replay, Some(midi)) => {
+                metadata =
+                    postcard::to_extend(&(boot, replay, midi), metadata).map_err(|_| Invalid)?;
+                VERSION_MIDI
+            }
+            (Some(disk), replay, None) => {
+                metadata = postcard::to_extend(&(disk, replay), metadata).map_err(|_| Invalid)?;
                 VERSION_BOOT_MEDIA
             }
-            (None, Some(replay)) => {
+            (None, Some(replay), None) => {
                 metadata = postcard::to_extend(replay, metadata).map_err(|_| Invalid)?;
                 VERSION_ADLIB_REPLAY
             }
-            (None, None) => VERSION_LEGACY,
+            (None, None, None) => VERSION_LEGACY,
         };
         let cpu = self.cpu.save_snapshot()?;
         let metadata_len = u32::try_from(metadata.len()).map_err(|_| Invalid)?;
@@ -153,10 +167,7 @@ impl Machine {
 
     /// Load a saved guest once the entire state and mounted media validate.
     pub fn load_guest(&mut self, bytes: &[u8]) -> Result<(), GuestSnapshotError> {
-        use GuestSnapshotError::{Invalid, MediaChanged, Unavailable};
-        if self.audio.mpu.configured() {
-            return Err(Unavailable("MIDI synthesis is configured"));
-        }
+        use GuestSnapshotError::{Invalid, MediaChanged};
         if !(HEADER_BYTES..=MAX_GUEST_SNAPSHOT_BYTES).contains(&bytes.len()) || &bytes[..8] != MAGIC
         {
             return Err(Invalid);
@@ -164,7 +175,7 @@ impl Machine {
         let version = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
         if !matches!(
             version,
-            VERSION_LEGACY | VERSION_ADLIB_REPLAY | VERSION_BOOT_MEDIA
+            VERSION_LEGACY | VERSION_ADLIB_REPLAY | VERSION_BOOT_MEDIA | VERSION_MIDI
         ) {
             return Err(GuestSnapshotError::Version(version));
         }
@@ -177,13 +188,21 @@ impl Machine {
         }
         let (state, trailing): (State<'static>, _) =
             postcard::take_from_bytes(metadata).map_err(|_| Invalid)?;
-        let (boot, replay) = match version {
-            VERSION_LEGACY if trailing.is_empty() => (None, None),
-            VERSION_ADLIB_REPLAY => (None, Some(decode_extension::<SynthReplay>(trailing)?)),
+        let (boot, replay, midi) = match version {
+            VERSION_LEGACY if trailing.is_empty() => (None, None, None),
+            VERSION_ADLIB_REPLAY => (None, Some(decode_extension::<SynthReplay>(trailing)?), None),
             VERSION_BOOT_MEDIA => {
                 let (boot, replay) =
                     decode_extension::<(DiskSnapshot, Option<SynthReplay>)>(trailing)?;
-                (Some(boot), replay)
+                (Some(boot), replay, None)
+            }
+            VERSION_MIDI => {
+                let (boot, replay, midi) = decode_extension::<(
+                    Option<DiskSnapshot>,
+                    Option<SynthReplay>,
+                    MidiSnapshot<MidiReplay>,
+                )>(trailing)?;
+                (boot, replay, Some(midi))
             }
             _ => return Err(Invalid),
         };
@@ -220,8 +239,9 @@ impl Machine {
         let session_clock =
             clock::SessionClock::from_snapshot(state.session_clock).ok_or(Invalid)?;
         let files = DosFiles::from_snapshot(state.files, &self.mounts).ok_or(Invalid)?;
-        let audio =
+        let mut audio =
             audio::Audio::from_snapshot(state.audio, state.elapsed, replay).ok_or(Invalid)?;
+        audio.mpu = Mpu401::from_snapshot(midi, &self.audio.mpu, audio.sample)?;
         let mut video = Adapter::from_snapshot(state.video).ok_or(Invalid)?;
         let mut cpu = Cpu::with_profile(state.profile);
         if !video.bind_snapshot_aperture(&mut cpu) {

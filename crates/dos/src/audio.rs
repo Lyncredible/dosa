@@ -22,7 +22,7 @@ pub(super) struct Audio {
     dma: Dma,
     sound_blaster: SoundBlaster,
     pub(super) mpu: Mpu401,
-    sample: u64,
+    pub(super) sample: u64,
     samples: VecDeque<f32>,
 }
 
@@ -37,18 +37,15 @@ pub(super) struct AudioSnapshot {
 }
 
 impl Audio {
-    pub(super) fn snapshot(&self) -> Result<AudioSnapshot, &'static str> {
-        if self.mpu.configured() {
-            return Err("MIDI synthesis is configured");
-        }
-        Ok(AudioSnapshot {
+    pub(super) fn snapshot(&self) -> AudioSnapshot {
+        AudioSnapshot {
             speaker: self.speaker.clone(),
             adlib: self.adlib.snapshot(),
             dma: self.dma.clone(),
             sound_blaster: self.sound_blaster.clone(),
             sample: self.sample,
             samples: self.samples.clone(),
-        })
+        }
     }
 
     pub(super) fn adlib_replay(&self) -> Result<Option<&SynthReplay>, &'static str> {
