@@ -5,7 +5,8 @@ use crate::{audio::AudioSnapshot, files::FilesSnapshot, video::VideoSnapshot, xm
 use serde::{Deserialize, Serialize};
 
 const MAGIC: &[u8; 8] = b"DOSAGST\0";
-const VERSION: u16 = 1;
+const VERSION_LEGACY: u16 = 1;
+const VERSION_ADLIB_REPLAY: u16 = 2;
 const HEADER_BYTES: usize = 18;
 /// Maximum size in bytes of a serialized guest save state.
 pub const MAX_GUEST_SNAPSHOT_BYTES: usize = 300 * 1024 * 1024;
@@ -72,6 +73,7 @@ impl Machine {
         if elapsed > MAX_ELAPSED {
             return Err(Unavailable("the guest has been running too long"));
         }
+        let replay = self.audio.adlib_replay().map_err(Unavailable)?;
         let state = State {
             profile: self.cpu_profile,
             elapsed,
@@ -106,6 +108,13 @@ impl Machine {
             line: self.line.clone(),
         };
         let mut metadata = postcard::to_allocvec(&state).map_err(|_| Invalid)?;
+        let version = match replay {
+            Some(replay) => {
+                metadata = postcard::to_extend(replay, metadata).map_err(|_| Invalid)?;
+                VERSION_ADLIB_REPLAY
+            }
+            None => VERSION_LEGACY,
+        };
         let cpu = self.cpu.save_snapshot()?;
         let metadata_len = u32::try_from(metadata.len()).map_err(|_| Invalid)?;
         if HEADER_BYTES + metadata.len() + cpu.len() > MAX_GUEST_SNAPSHOT_BYTES {
@@ -116,7 +125,7 @@ impl Machine {
         checksum.update(&cpu);
         let mut bytes = Vec::with_capacity(HEADER_BYTES + metadata.len() + cpu.len());
         bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&VERSION.to_le_bytes());
+        bytes.extend_from_slice(&version.to_le_bytes());
         bytes.extend_from_slice(&metadata_len.to_le_bytes());
         bytes.extend_from_slice(&checksum.finalize().to_le_bytes());
         bytes.append(&mut metadata);
@@ -135,7 +144,7 @@ impl Machine {
             return Err(Invalid);
         }
         let version = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
-        if version != VERSION {
+        if !matches!(version, VERSION_LEGACY | VERSION_ADLIB_REPLAY) {
             return Err(GuestSnapshotError::Version(version));
         }
         let metadata_len = u32::from_le_bytes(bytes[10..14].try_into().unwrap()) as usize;
@@ -147,8 +156,18 @@ impl Machine {
         }
         let (state, trailing): (State<'static>, _) =
             postcard::take_from_bytes(metadata).map_err(|_| Invalid)?;
-        if !trailing.is_empty()
-            || !state.state.is_active()
+        let replay = if version == VERSION_ADLIB_REPLAY {
+            let (replay, remainder) = postcard::take_from_bytes(trailing).map_err(|_| Invalid)?;
+            if !remainder.is_empty() {
+                return Err(Invalid);
+            }
+            Some(replay)
+        } else if trailing.is_empty() {
+            None
+        } else {
+            return Err(Invalid);
+        };
+        if !state.state.is_active()
             || state.elapsed > MAX_ELAPSED
             || state.keys.len() > MAX_KEYS
             || state.line.len() > 255
@@ -170,7 +189,8 @@ impl Machine {
         let session_clock =
             clock::SessionClock::from_snapshot(state.session_clock).ok_or(Invalid)?;
         let files = DosFiles::from_snapshot(state.files, &self.mounts).ok_or(Invalid)?;
-        let audio = audio::Audio::from_snapshot(state.audio, state.elapsed).ok_or(Invalid)?;
+        let audio =
+            audio::Audio::from_snapshot(state.audio, state.elapsed, replay).ok_or(Invalid)?;
         let mut video = Adapter::from_snapshot(state.video).ok_or(Invalid)?;
         let mut cpu = Cpu::with_profile(state.profile);
         if !video.bind_snapshot_aperture(&mut cpu) {
@@ -290,6 +310,7 @@ mod tests {
         assert_eq!(original.run(100).unwrap(), RunState::WaitingForKey);
         original.set_paused(true);
         let bytes = original.save_guest().unwrap();
+        assert_eq!(&bytes[8..10], &VERSION_LEGACY.to_le_bytes());
 
         let mut restored = directory.machine();
         restored.load_guest(&bytes).unwrap();
@@ -304,6 +325,52 @@ mod tests {
         restored.key(b'Z', 0x2c);
         assert_eq!(restored.run(100).unwrap(), RunState::Exited(42));
         assert_eq!(restored.take_output(), b"Z");
+    }
+
+    #[test]
+    fn restores_an_active_adlib_envelope_at_the_same_sample_phase() {
+        let directory = Directory::new("save-guest-adlib");
+        directory.write("LOOP.COM", &[0xeb, 0xfe]);
+        let mut machine = directory.machine();
+        machine.launch('C', "LOOP.COM", "").unwrap();
+        machine.clock = Instant::now() - Duration::from_millis(40);
+        let start = Duration::from_millis(1);
+        let write = |m: &mut Machine, address, value, at| {
+            assert!(m.audio.write_port(0x388, address, at, &mut m.cpu));
+            assert!(m.audio.write_port(0x389, value, at, &mut m.cpu));
+        };
+        for (register, value) in [
+            (0x20, 1),
+            (0x23, 1),
+            (0x40, 0),
+            (0x43, 0),
+            (0x60, 0xf0),
+            (0x63, 0xf0),
+            (0x80, 0x77),
+            (0x83, 0x77),
+            (0xa0, 0x98),
+            (0xb0, 0x31),
+        ] {
+            write(&mut machine, register, value, start);
+        }
+        let change = Duration::from_millis(20);
+        write(&mut machine, 0xa0, 0xcc, change);
+        machine
+            .audio
+            .advance(Duration::from_millis(35), &machine.cpu);
+        machine.take_audio();
+        machine.set_paused(true);
+        let state = machine.save_guest().unwrap();
+        assert_eq!(&state[8..10], &VERSION_ADLIB_REPLAY.to_le_bytes());
+
+        let mut restored = directory.machine();
+        restored.load_guest(&state).unwrap();
+        let end = Duration::from_millis(46);
+        machine.audio.advance(end, &machine.cpu);
+        restored.audio.advance(end, &restored.cpu);
+        let expected = machine.take_audio();
+        assert!(expected.iter().any(|sample| sample.abs() > 0.01));
+        assert_eq!(restored.take_audio(), expected);
     }
 
     #[test]
