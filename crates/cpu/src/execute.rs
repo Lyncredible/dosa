@@ -15,6 +15,8 @@ impl Cpu {
                 self.write_op(ins, 0, value)?;
             }
             Sgdt | Sidt | Lgdt | Lidt => self.table_instruction(ins)?,
+            Lldt | Sldt => self.ldt_instruction(ins)?,
+            Lar | Lsl | Verr | Verw => self.verify_selector(ins)?,
             Smsw | Lmsw => self.machine_status_instruction(ins)?,
             Lea => {
                 let offset = self.offset(ins)?;

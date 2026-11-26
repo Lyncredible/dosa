@@ -705,3 +705,80 @@ fn protected_mode_segment_faults_push_error_codes_and_resume_guest_execution() {
     assert_eq!(cpu.read_u16(0x1700, 0x202), 0);
     assert_eq!(cpu.read_u16(0x1700, 0x204), 0);
 }
+
+#[test]
+fn protected_mode_local_descriptors_are_selectable_and_queryable_on_286_and_386() {
+    for profile in [CpuProfile::I286, CpuProfile::I386] {
+        let mut cpu = program_for(
+            profile,
+            &[
+                0xfa, 0x0f, 1, 0x16, 0, 2, 0x0f, 1, 0x1e, 6, 2, // LGDT and LIDT.
+                0xb8, 1, 0, 0x0f, 1, 0xf0, 0xea, 0, 0, 8, 0, // Enter protected mode.
+            ],
+        );
+        cpu.load(
+            cpu.regs.ds,
+            0x200,
+            &[0x1f, 0, 0, 0x40, 1, 0, 0x6f, 0, 0, 0x60, 1, 0],
+        );
+        cpu.load(
+            0x1400,
+            8,
+            &[
+                0xff, 0, 0, 0x80, 1, 0x9a, 0, 0, // Code at 18000h.
+                0xff, 0, 0, 0xa0, 1, 0x92, 0, 0, // GDT data and stack.
+                7, 0, 0, 0x70, 1, 0x82, 0, 0, // LDT at 17000h, just one entry.
+            ],
+        );
+        cpu.load(0x1600, 13 * 8, &[0x70, 0, 8, 0, 0, 0x86, 0, 0]);
+        cpu.load(0x1700, 0, &[0x3f, 0, 0, 0x90, 1, 0x92, 0, 0]);
+        cpu.write_u16(0x1900, 0x20, 0xbabe);
+        cpu.load(
+            0x1800,
+            0,
+            &[
+                0xb8, 0x10, 0, 0x8e, 0xd0, 0xbc, 0xf0, 0, // SS=0010h, SP=00F0h.
+                0xb8, 0x18, 0, 0x0f, 0, 0xd0, 0x0f, 0, 0xc3, // LLDT AX; SLDT BX.
+                0xba, 4, 0, 0x8e, 0xda, // DS=0004h is the first LDT entry.
+                0x0f, 2, 0xf2, 0x0f, 3, 0xfa, // LAR SI,DX; LSL DI,DX.
+                0x0f, 0, 0xe2, // VERR DX.
+                0x0f, 0, 0xea, // VERW DX.
+                0x31, 0xc0, 0x0f, 0, 0xd0, // LLDT AX with a null selector.
+                0x8b, 0x0e, 0x20, 0, // Read through the cached DS after disabling the LDT.
+                0x0f, 3, 0xfa, // LSL DI,DX fails and preserves DI.
+                0x8e, 0xc2, // MOV ES,DX faults because LDTR is no longer usable.
+                0xf4,
+            ],
+        );
+        cpu.load(
+            0x1800,
+            0x70,
+            &[
+                0x5d, 0x58, 0x83, 0xc0, 2, 0x50, 0xcf, // Capture error, skip MOV ES, IRET.
+            ],
+        );
+
+        advance(&mut cpu, 16); // Through LAR and LSL.
+        assert!(cpu.flag(ZF));
+        advance(&mut cpu, 1); // VERR.
+        assert!(cpu.flag(ZF));
+        advance(&mut cpu, 1); // VERW.
+        assert!(cpu.flag(ZF));
+        advance(&mut cpu, 4); // Disable the LDT and probe it again.
+        assert!(!cpu.flag(ZF));
+        assert_eq!(cpu.regs.di, 0x3f);
+        for _ in 0..32 {
+            if cpu.step().unwrap() == Step::Halt {
+                break;
+            }
+        }
+        assert!(cpu.is_halted());
+        assert_eq!(cpu.regs.bx, 0x18);
+        assert_eq!(cpu.regs.cx, 0xbabe);
+        assert_eq!(cpu.regs.si, 0x9200);
+        assert_eq!(cpu.regs.di, 0x3f);
+        assert_eq!(cpu.regs.bp, 4);
+        assert_eq!(cpu.regs.sp, 0xf0);
+        assert_eq!(cpu.regs.es, 0x1400);
+    }
+}
