@@ -5,7 +5,7 @@ use crate::{
     adlib::SynthReplay,
     audio::AudioSnapshot,
     boot_disk::{BootDisk, DiskSnapshot},
-    files::FilesSnapshot,
+    files::{FilesSnapshot, SnapshotPipes},
     mpu401::{MidiReplay, MidiSnapshot, Mpu401},
     video::VideoSnapshot,
     xms::XmsSnapshot,
@@ -23,6 +23,19 @@ pub const MAX_GUEST_SNAPSHOT_BYTES: usize = 300 * 1024 * 1024;
 const MAX_ELAPSED: Duration = Duration::from_secs(366 * 86_400);
 const MAX_MEDIA_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_MEDIA_ENTRIES: usize = 32_768;
+
+/// The resumed file tables and pending pipe buffers for the shell.
+pub struct RestoredPipelineIo {
+    pub streams: Vec<ShellIo>,
+    pub pipes: Vec<Option<ShellPipe>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PipelineIo {
+    streams: Vec<u8>,
+    buffers: Vec<Vec<u8>>,
+    pending: Vec<Option<u16>>,
+}
 
 /// An error saving a guest or preparing a replacement guest.
 #[derive(Debug, thiserror::Error)]
@@ -85,13 +98,48 @@ impl Machine {
         let guest = self.save_guest()?;
         let streams = self
             .files
-            .snapshot_shell_io(&self.mounts, streams)
+            .snapshot_shell_io(&self.mounts, streams, None)
             .map_err(GuestSnapshotError::Unavailable)?;
         Ok((guest, streams))
     }
 
     /// Save an active guest and its devices at an instruction boundary.
     pub fn save_guest(&self) -> Result<Vec<u8>, GuestSnapshotError> {
+        self.save_guest_snapshot(None)
+    }
+
+    /// Save the guest with shell handles and all buffers reachable from its pipeline.
+    pub fn save_guest_with_pipeline_io(
+        &self,
+        streams: &[&ShellIo],
+        pending: &[Option<&ShellPipe>],
+    ) -> Result<(Vec<u8>, Vec<u8>), GuestSnapshotError> {
+        use GuestSnapshotError::{Invalid, Unavailable};
+        let mut pipes = SnapshotPipes::default();
+        let pending = pending
+            .iter()
+            .map(|pipe| pipe.map(|pipe| pipes.register(&pipe.0)).transpose())
+            .collect::<Result<_, _>>()
+            .map_err(Unavailable)?;
+        let guest = self.save_guest_snapshot(Some(&mut pipes))?;
+        let streams = self
+            .files
+            .snapshot_shell_io(&self.mounts, streams, Some(&mut pipes))
+            .map_err(Unavailable)?;
+        let buffers = pipes.buffers().map_err(Unavailable)?;
+        let shell = postcard::to_allocvec(&PipelineIo {
+            streams,
+            buffers,
+            pending,
+        })
+        .map_err(|_| Invalid)?;
+        Ok((guest, shell))
+    }
+
+    fn save_guest_snapshot(
+        &self,
+        pipes: Option<&mut SnapshotPipes>,
+    ) -> Result<Vec<u8>, GuestSnapshotError> {
         use GuestSnapshotError::{Invalid, Unavailable};
         if !self.state.is_active() {
             return Err(Unavailable("an active guest is required"));
@@ -113,7 +161,10 @@ impl Machine {
             )?,
             state: self.state,
             pending: self.pending.clone(),
-            files: self.files.snapshot(&self.mounts).map_err(Unavailable)?,
+            files: self
+                .files
+                .snapshot(&self.mounts, pipes)
+                .map_err(Unavailable)?,
             environment: self
                 .environment
                 .variables()
@@ -180,7 +231,7 @@ impl Machine {
 
     /// Load a saved guest once the entire state and mounted media validate.
     pub fn load_guest(&mut self, bytes: &[u8]) -> Result<(), GuestSnapshotError> {
-        self.load_guest_snapshot(bytes, None).map(drop)
+        self.load_guest_snapshot(bytes, None, &[]).map(drop)
     }
 
     /// Load the guest and return exactly the requested number of shell file tables.
@@ -190,13 +241,46 @@ impl Machine {
         streams: &[u8],
         count: usize,
     ) -> Result<Vec<ShellIo>, GuestSnapshotError> {
-        self.load_guest_snapshot(bytes, Some((streams, count)))
+        self.load_guest_snapshot(bytes, Some((streams, count)), &[])
+    }
+
+    /// Load the guest and restore the shared pipe buffers and shell file tables.
+    pub fn load_guest_with_pipeline_io(
+        &mut self,
+        bytes: &[u8],
+        io: &[u8],
+        stream_count: usize,
+        pipeline_count: usize,
+    ) -> Result<RestoredPipelineIo, GuestSnapshotError> {
+        use GuestSnapshotError::Invalid;
+        let io: PipelineIo = decode_extension(io)?;
+        if io.pending.len() != pipeline_count {
+            return Err(Invalid);
+        }
+        let pipes = SnapshotPipes::restore(io.buffers).ok_or(Invalid)?;
+        let pending = io
+            .pending
+            .into_iter()
+            .map(|id| match id {
+                Some(id) => pipes
+                    .get(usize::from(id))
+                    .map(|pipe| Some(ShellPipe(std::sync::Arc::clone(&pipe.0)))),
+                None => Some(None),
+            })
+            .collect::<Option<_>>()
+            .ok_or(Invalid)?;
+        let streams = self.load_guest_snapshot(bytes, Some((&io.streams, stream_count)), &pipes)?;
+        Ok(RestoredPipelineIo {
+            streams,
+            pipes: pending,
+        })
     }
 
     fn load_guest_snapshot(
         &mut self,
         bytes: &[u8],
         streams: Option<(&[u8], usize)>,
+        pipes: &[ShellPipe],
     ) -> Result<Vec<ShellIo>, GuestSnapshotError> {
         use GuestSnapshotError::{Invalid, MediaChanged};
         if !(HEADER_BYTES..=MAX_GUEST_SNAPSHOT_BYTES).contains(&bytes.len()) || &bytes[..8] != MAGIC
@@ -269,10 +353,10 @@ impl Machine {
         }
         let session_clock =
             clock::SessionClock::from_snapshot(state.session_clock).ok_or(Invalid)?;
-        let files = DosFiles::from_snapshot(state.files, &self.mounts).ok_or(Invalid)?;
+        let files = DosFiles::from_snapshot(state.files, &self.mounts, pipes).ok_or(Invalid)?;
         let streams = match streams {
             Some((bytes, count)) => files
-                .restore_shell_io(&self.mounts, bytes, count)
+                .restore_shell_io(&self.mounts, bytes, count, pipes)
                 .ok_or(Invalid)?,
             None => Vec::new(),
         };

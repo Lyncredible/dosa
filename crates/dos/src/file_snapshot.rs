@@ -3,6 +3,60 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::ShellPipe;
+
+pub(crate) const MAX_SNAPSHOT_PIPES: usize = 1024;
+
+#[derive(Default)]
+pub(crate) struct SnapshotPipes {
+    ids: HashMap<*const Mutex<Vec<u8>>, u16>,
+    pipes: Vec<ShellPipe>,
+}
+
+impl SnapshotPipes {
+    pub(crate) fn register(&mut self, bytes: &Arc<Mutex<Vec<u8>>>) -> Result<u16, &'static str> {
+        let key = Arc::as_ptr(bytes);
+        if let Some(&id) = self.ids.get(&key) {
+            return Ok(id);
+        }
+        if self.pipes.len() == MAX_SNAPSHOT_PIPES {
+            return Err("too many shell pipe buffers");
+        }
+        let id = self.pipes.len() as u16;
+        self.ids.insert(key, id);
+        self.pipes.push(ShellPipe(Arc::clone(bytes)));
+        Ok(id)
+    }
+
+    pub(crate) fn buffers(&self) -> Result<Vec<Vec<u8>>, &'static str> {
+        let mut total = 0;
+        self.pipes
+            .iter()
+            .map(|pipe| {
+                let bytes = pipe.0.lock().map_err(|_| "shell pipe lock failed")?;
+                total += bytes.len();
+                if total > 32 * 1024 * 1024 {
+                    return Err("buffered pipe data exceed the save limit");
+                }
+                Ok(bytes.clone())
+            })
+            .collect()
+    }
+
+    pub(crate) fn restore(buffers: Vec<Vec<u8>>) -> Option<Vec<ShellPipe>> {
+        if buffers.len() > MAX_SNAPSHOT_PIPES
+            || buffers.iter().map(Vec::len).sum::<usize>() > 32 * 1024 * 1024
+        {
+            return None;
+        }
+        Some(
+            buffers
+                .into_iter()
+                .map(|bytes| ShellPipe(Arc::new(Mutex::new(bytes))))
+                .collect(),
+        )
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct FilesSnapshot<'a> {
@@ -35,6 +89,10 @@ enum Source<'a> {
         writable: bool,
     },
     Shared(u16),
+    Pipe {
+        id: u16,
+        writable: bool,
+    },
 }
 
 impl DosFiles {
@@ -42,6 +100,7 @@ impl DosFiles {
         &'a self,
         mounts: &BTreeMap<char, Mount>,
         streams: &[&'a crate::ShellIo],
+        mut pipes: Option<&mut SnapshotPipes>,
     ) -> Result<Vec<u8>, &'static str> {
         if streams.len() > 16 {
             return Err("too many shell file tables");
@@ -55,7 +114,11 @@ impl DosFiles {
         }
         let states = streams
             .iter()
-            .map(|stream| stream.files.capture(mounts, Some(&mut files)))
+            .map(|stream| {
+                stream
+                    .files
+                    .capture(mounts, Some(&mut files), pipes.as_deref_mut())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         postcard::to_allocvec(&states).map_err(|_| "shell file tables could not be encoded")
     }
@@ -65,6 +128,7 @@ impl DosFiles {
         mounts: &BTreeMap<char, Mount>,
         bytes: &[u8],
         count: usize,
+        pipes: &[ShellPipe],
     ) -> Option<Vec<crate::ShellIo>> {
         if count > 16 {
             return None;
@@ -78,7 +142,7 @@ impl DosFiles {
         states
             .into_iter()
             .map(|state| {
-                Self::restore(state, mounts, Some(&mut shared))
+                Self::restore(state, mounts, Some(&mut shared), pipes)
                     .map(|files| crate::ShellIo { files })
             })
             .collect()
@@ -87,14 +151,16 @@ impl DosFiles {
     pub(crate) fn snapshot(
         &self,
         mounts: &BTreeMap<char, Mount>,
+        pipes: Option<&mut SnapshotPipes>,
     ) -> Result<FilesSnapshot<'_>, &'static str> {
-        self.capture(mounts, None)
+        self.capture(mounts, None, pipes)
     }
 
     fn capture(
         &self,
         mounts: &BTreeMap<char, Mount>,
         mut shared: Option<&mut HashMap<*const File, u16>>,
+        mut pipes: Option<&mut SnapshotPipes>,
     ) -> Result<FilesSnapshot<'_>, &'static str> {
         let mut open_files = BTreeMap::new();
         for (&slot, file) in &self.open_files {
@@ -124,7 +190,13 @@ impl DosFiles {
                     contents: Cow::Borrowed(contents),
                     modified: *modified,
                 },
-                FileSource::Spool { .. } => return Err("a shell pipeline is active"),
+                FileSource::Spool { bytes, writable } => Source::Pipe {
+                    id: pipes
+                        .as_deref_mut()
+                        .ok_or("a shell pipeline is active")?
+                        .register(bytes)?,
+                    writable: *writable,
+                },
                 FileSource::Writable {
                     file: live,
                     readable,
@@ -169,14 +241,16 @@ impl DosFiles {
     pub(crate) fn from_snapshot(
         state: FilesSnapshot<'_>,
         mounts: &BTreeMap<char, Mount>,
+        pipes: &[ShellPipe],
     ) -> Option<Self> {
-        Self::restore(state, mounts, None)
+        Self::restore(state, mounts, None, pipes)
     }
 
     fn restore(
         state: FilesSnapshot<'_>,
         mounts: &BTreeMap<char, Mount>,
         mut shared: Option<&mut Vec<Arc<File>>>,
+        pipes: &[ShellPipe],
     ) -> Option<Self> {
         if !state.drive.is_ascii_uppercase()
             || state
@@ -236,6 +310,10 @@ impl DosFiles {
                     open_files.insert(slot, Arc::clone(existing));
                     continue;
                 }
+                Source::Pipe { id, writable } => FileSource::Spool {
+                    bytes: Arc::clone(&pipes.get(usize::from(id))?.0),
+                    writable,
+                },
             };
             let file = Arc::new(File {
                 source,
@@ -285,9 +363,9 @@ mod tests {
         assert_eq!(files.seek(5, 0, 2), Ok(2));
 
         let mounts = BTreeMap::new();
-        let bytes = postcard::to_allocvec(&files.snapshot(&mounts).unwrap()).unwrap();
+        let bytes = postcard::to_allocvec(&files.snapshot(&mounts, None).unwrap()).unwrap();
         let snapshot: FilesSnapshot<'static> = postcard::from_bytes(&bytes).unwrap();
-        let mut restored = DosFiles::from_snapshot(snapshot, &mounts).unwrap();
+        let mut restored = DosFiles::from_snapshot(snapshot, &mounts, &[]).unwrap();
         assert_eq!(restored.directory('C'), "\\GUEST");
         assert_eq!(restored.read(duplicate, 2).unwrap().as_ref(), b"cd");
         assert_eq!(restored.read(5, 2).unwrap().as_ref(), b"ef");
@@ -296,6 +374,6 @@ mod tests {
 
         let mut snapshot: FilesSnapshot<'static> = postcard::from_bytes(&bytes).unwrap();
         snapshot.handles.insert(63, 63);
-        assert!(DosFiles::from_snapshot(snapshot, &mounts).is_none());
+        assert!(DosFiles::from_snapshot(snapshot, &mounts, &[]).is_none());
     }
 }

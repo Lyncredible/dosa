@@ -10,7 +10,7 @@ use super::{Command, Shell, split_word};
 const MAX_BATCH_BYTES: u64 = 1024 * 1024;
 const MAX_BATCH_LINES: usize = 10_000;
 const MAX_COMMAND_BYTES: usize = 8192;
-const MAX_CALL_DEPTH: usize = 16;
+pub(super) const MAX_CALL_DEPTH: usize = 16;
 pub(super) const SHIFT_HELP: &str =
     "SHIFT\r\n    Move each batch argument down one position, starting at %0.\r\n";
 pub(super) const PAUSE_HELP: &str = "PAUSE\r\n    Wait for a key before continuing the batch.\r\n";

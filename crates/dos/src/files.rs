@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 #[path = "file_snapshot.rs"]
 mod snapshot;
-pub(crate) use snapshot::FilesSnapshot;
+pub(crate) use snapshot::{FilesSnapshot, SnapshotPipes};
 
 const MAX_OPEN_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_HANDLES: u16 = 64;

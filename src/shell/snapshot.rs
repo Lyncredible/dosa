@@ -4,10 +4,12 @@ use std::error::Error;
 use dosa_dos::MAX_GUEST_SNAPSHOT_BYTES;
 use serde::{Deserialize, Serialize};
 
+use super::pipeline::Pipeline;
 use super::{Batch, QuickLaunch, Shell};
 
 const MAGIC: &[u8; 8] = b"DOSASHL1";
 const REDIRECTED_MAGIC: &[u8; 8] = b"DOSASHL2";
+const PIPELINE_MAGIC: &[u8; 8] = b"DOSASHL3";
 const HEADER_BYTES: usize = 16;
 const MAX_SHELL_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_DESKTOP_SNAPSHOT_BYTES: usize =
@@ -31,24 +33,29 @@ struct SavedStreams {
     bytes: Vec<u8>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct PipelineState<T> {
+    streams: SavedStreams,
+    pipelines: T,
+}
+
 struct PreparedState<'a> {
     shell: SavedState,
     streams: Option<SavedStreams>,
+    pipelines: Vec<Pipeline>,
     guest: &'a [u8],
 }
 
 impl Shell {
     pub(crate) fn supports_save_state(&self) -> bool {
-        self.pipelines.is_empty()
-            && self.pending_input.is_none()
-            && self.pending_redirects.is_none()
+        self.pending_input.is_none() && self.pending_redirects.is_none()
     }
 
     pub(crate) fn save_guest(&self) -> Result<Vec<u8>, Box<dyn Error>> {
         if !self.supports_save_state() {
-            return Err("save state unavailable with a pipeline or pending shell input".into());
+            return Err("save state unavailable with pending shell input".into());
         }
-        if self.batch.is_none() && self.quick_launch.is_none() {
+        if self.batch.is_none() && self.quick_launch.is_none() && self.pipelines.is_empty() {
             return Ok(self.machine.save_guest()?);
         }
         let state = State {
@@ -64,7 +71,27 @@ impl Shell {
             .as_ref()
             .map(Batch::snapshot_streams)
             .unwrap_or_default();
-        let (magic, guest) = if streams.is_empty() {
+        let (magic, guest) = if !self.pipelines.is_empty() {
+            let pending: Vec<_> = self
+                .pipelines
+                .iter()
+                .map(|pipe| pipe.input.as_ref())
+                .collect();
+            let (guest, bytes) = self
+                .machine
+                .save_guest_with_pipeline_io(&streams, &pending)?;
+            metadata = postcard::to_extend(
+                &PipelineState {
+                    streams: SavedStreams {
+                        frame_indices,
+                        bytes,
+                    },
+                    pipelines: &self.pipelines,
+                },
+                metadata,
+            )?;
+            (PIPELINE_MAGIC, guest)
+        } else if streams.is_empty() {
             (MAGIC, self.machine.save_guest()?)
         } else {
             let (guest, bytes) = self.machine.save_guest_with_shell_io(&streams)?;
@@ -93,32 +120,47 @@ impl Shell {
     }
 
     pub(crate) fn load_guest(&mut self, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
-        let redirected = bytes.starts_with(REDIRECTED_MAGIC);
-        let (state, streams, guest) = if redirected || bytes.starts_with(MAGIC) {
-            let PreparedState {
-                shell,
-                streams,
-                guest,
-            } = self.prepare_snapshot(bytes, redirected)?;
-            (Some(shell), streams, guest)
-        } else {
-            (None, None, bytes)
-        };
+        let magic = bytes.first_chunk::<8>();
+        let (state, streams, mut pipelines, guest) =
+            if matches!(magic, Some(MAGIC | REDIRECTED_MAGIC | PIPELINE_MAGIC)) {
+                let PreparedState {
+                    shell,
+                    streams,
+                    pipelines,
+                    guest,
+                } = self.prepare_snapshot(bytes)?;
+                (Some(shell), streams, pipelines, guest)
+            } else {
+                (None, None, Vec::new(), bytes)
+            };
         let restored_io = if let Some(streams) = &streams {
-            self.machine.load_guest_with_shell_io(
-                guest,
-                &streams.bytes,
-                streams.frame_indices.len(),
-            )?
+            if pipelines.is_empty() {
+                self.machine.load_guest_with_shell_io(
+                    guest,
+                    &streams.bytes,
+                    streams.frame_indices.len(),
+                )?
+            } else {
+                let io = self.machine.load_guest_with_pipeline_io(
+                    guest,
+                    &streams.bytes,
+                    streams.frame_indices.len(),
+                    pipelines.len(),
+                )?;
+                for (pipeline, input) in pipelines.iter_mut().zip(io.pipes) {
+                    pipeline.input = input;
+                }
+                io.streams
+            }
         } else {
             self.machine.load_guest(guest)?;
             Vec::new()
         };
         self.pending_input = None;
         self.pending_redirects = None;
-        self.pipelines.clear();
+        self.pipelines = pipelines;
         if let Some(mut state) = state {
-            if let Some(streams) = streams {
+            if let Some(streams) = streams.filter(|streams| !streams.frame_indices.is_empty()) {
                 state
                     .batch
                     .as_mut()
@@ -136,11 +178,7 @@ impl Shell {
         Ok(())
     }
 
-    fn prepare_snapshot<'a>(
-        &self,
-        bytes: &'a [u8],
-        redirected: bool,
-    ) -> Result<PreparedState<'a>, Box<dyn Error>> {
+    fn prepare_snapshot<'a>(&self, bytes: &'a [u8]) -> Result<PreparedState<'a>, Box<dyn Error>> {
         if !(HEADER_BYTES..=MAX_DESKTOP_SNAPSHOT_BYTES).contains(&bytes.len()) {
             return Err(INVALID.into());
         }
@@ -153,24 +191,35 @@ impl Shell {
         let (metadata, guest) = payload.split_at_checked(length).ok_or(INVALID)?;
         let (mut state, trailing): (SavedState, _) =
             postcard::take_from_bytes(metadata).map_err(|_| INVALID)?;
-        let streams = if redirected {
-            let (streams, remaining): (SavedStreams, _) =
+        let (streams, pipelines) = if bytes.starts_with(PIPELINE_MAGIC) {
+            let (saved, remaining): (PipelineState<Vec<Pipeline>>, _) =
                 postcard::take_from_bytes(trailing).map_err(|_| INVALID)?;
             if !remaining.is_empty()
-                || !state
-                    .batch
-                    .as_ref()
-                    .is_some_and(|batch| batch.valid_stream_slots(&streams.frame_indices))
+                || saved.pipelines.is_empty()
+                || !saved.pipelines.iter().all(Pipeline::valid_snapshot)
             {
                 return Err(INVALID.into());
             }
-            Some(streams)
+            (Some(saved.streams), saved.pipelines)
+        } else if bytes.starts_with(REDIRECTED_MAGIC) {
+            let (streams, remaining): (SavedStreams, _) =
+                postcard::take_from_bytes(trailing).map_err(|_| INVALID)?;
+            if !remaining.is_empty() || streams.frame_indices.is_empty() {
+                return Err(INVALID.into());
+            }
+            (Some(streams), Vec::new())
         } else if trailing.is_empty() {
-            None
+            (None, Vec::new())
         } else {
             return Err(INVALID.into());
         };
-        if !state.drive.is_ascii_uppercase()
+        if streams.as_ref().is_some_and(|streams| {
+            !streams.frame_indices.is_empty()
+                && !state
+                    .batch
+                    .as_ref()
+                    .is_some_and(|batch| batch.valid_stream_slots(&streams.frame_indices))
+        }) || !state.drive.is_ascii_uppercase()
             || !state.directories.keys().all(char::is_ascii_uppercase)
             || state.quick_launch.as_ref().is_some_and(|scope| {
                 !scope.drive.is_ascii_uppercase()
@@ -192,6 +241,7 @@ impl Shell {
         Ok(PreparedState {
             shell: state,
             streams,
+            pipelines,
             guest,
         })
     }
