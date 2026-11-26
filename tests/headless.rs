@@ -55,6 +55,52 @@ fn shell_help_lists_one_mount_command_and_keeps_startup_flags_in_cli_help() {
 }
 
 #[test]
+fn loadhigh_falls_back_to_conventional_memory_with_normal_arguments_and_io() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.0.join("BIN")).unwrap();
+    fs::write(
+        fixture.0.join("BIN/PROBE.COM"),
+        [
+            0x0e, 0x58, 0x3d, 0x00, 0xa0, 0x72,
+            0x05, // Verify CS is below the upper-memory area.
+            0xb8, 0x08, 0x4c, 0xcd, 0x21, 0x31, 0xc9, 0x8a, 0x0e, 0x80,
+            0x00, // CX = PSP command-tail length
+            0xba, 0x81, 0x00, 0xbb, 1, 0, 0xb4, 0x40, 0xcd, 0x21, // Write the tail to stdout.
+            0xb8, 7, 0x4c, 0xcd, 0x21,
+        ],
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("START.BAT"),
+        b"@ECHO OFF\r\nPATH C:\\BIN\r\nLOADHIGH /L:1,256;2 /S PROBE batch tail>OUT.TXT\r\nECHO %ERRORLEVEL%\r\n",
+    )
+    .unwrap();
+    let mount = format!("C={}", fixture.0.display());
+    let run = |command| {
+        Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args(["--mount-rw", &mount, "--headless", "--exec", command])
+            .output()
+            .unwrap()
+    };
+    let direct = run(r#"LH "C:\BIN\PROBE.COM" one two"#);
+    assert_eq!(direct.status.code(), Some(7), "{direct:?}");
+    assert_eq!(direct.stdout, b" one two");
+    let batch = run("START.BAT");
+    assert_eq!(batch.status.code(), Some(7), "{batch:?}");
+    assert_eq!(batch.stdout, b"7\r\n");
+    assert_eq!(fs::read(fixture.0.join("OUT.TXT")).unwrap(), b" batch tail");
+    for command in ["LH /S C:\\BIN\\PROBE", "LH /L:1; C:\\BIN\\PROBE", "LH /L:1"] {
+        let invalid = run(command);
+        assert!(!invalid.status.success(), "{command}: {invalid:?}");
+    }
+    for command in ["HELP LOADHIGH", "LH /?"] {
+        let help = run(command);
+        assert!(help.status.success(), "{help:?}");
+        assert!(String::from_utf8_lossy(&help.stdout).contains("conventional memory"));
+    }
+}
+
+#[test]
 fn shell_directory_commands_work_from_batch_and_prompt() {
     let fixture = Fixture::new();
     let path = fixture.0.display();

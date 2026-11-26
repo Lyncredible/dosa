@@ -7,7 +7,7 @@ Add batch execution through the shell and startup command path.
 - Start with ECHO, REM, labels, GOTO, CALL, EXIT /B, argument expansion, and ERRORLEVEL checks. Specify unsupported command syntax with actionable errors.
 - Bound recursive CALL and command execution, and retain useful file and line context on failures.
 - PAUSE waits for a keyboard event in the desktop or a byte from stdin in headless mode. The desktop Ctrl+C shortcut or byte 03h in headless input asks whether to terminate the batch.
-- FOR iterates literal items and DOS filename patterns at the prompt and in batch files. Each body can launch a guest or call another batch frame. Nested FOR in the same frame remains open.
+- FOR iterates literal items and DOS filename patterns at the prompt and in batch files. Each body can launch a guest or call another batch frame. MS-DOS COMMAND.COM excludes direct nesting of FOR commands. A loop can call a separate batch that uses FOR. [Microsoft MS-DOS Encyclopedia](https://msarchive.pcjs.org/mspl13/msdos/encyclopedia/section3/)
 - Verify generated batch fixtures from directory and ZIP mounts, including nested calls, arguments, failing programs, and return to the interactive prompt.
 
 This is planned compatibility work following the desktop controls milestone.
