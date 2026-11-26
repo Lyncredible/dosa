@@ -48,7 +48,8 @@ impl Cpu {
                 }
             }
             Xlatb => {
-                let value = self.read_linear(self.memory_address(ins, false)?, 1)?;
+                let address = self.memory_address(ins, false)?;
+                let value = self.read_linear(address, 1)?;
                 self.set_reg(Register::AL, value)?;
             }
             Add | Adc | Sub | Sbb | And | Or | Xor | Cmp | Test => {
@@ -210,11 +211,13 @@ impl Cpu {
         Some(())
     }
 
-    fn check_near_target(&self, target: u32) -> Option<()> {
+    fn check_near_target(&mut self, target: u32) -> Option<()> {
         if self.control.segments[Register::CS.number()].is_none() && target > 0xffff {
             return None;
         }
-        self.code_address(target, 1)?;
+        if self.code_address(target, 1).is_none() {
+            return self.segment_fault(13, 0);
+        }
         Some(())
     }
 
@@ -273,7 +276,9 @@ impl Cpu {
     fn check_far_target(&mut self, selector: u16, target: u32) -> Option<Option<Segment>> {
         let descriptor = self.descriptor(Register::CS, selector)?;
         if let Some(code) = descriptor {
-            code.address(true, target, 1, false)?;
+            if code.address(true, target, 1, false).is_none() {
+                return self.segment_fault(13, 0);
+            }
         } else if target > 0xffff {
             return None;
         }
@@ -398,7 +403,7 @@ impl Cpu {
             for _ in 1..nesting {
                 parent = parent.wrapping_sub(u32::from(width)) & mask;
                 let address =
-                    self.segment_address(Register::SS, parent, usize::from(width), false)?;
+                    self.segment_access(Register::SS, parent, usize::from(width), false)?;
                 let saved = self.read_linear(address, width)?;
                 self.push(width, saved)?;
             }
@@ -452,7 +457,7 @@ impl Cpu {
         }
         let bytes = usize::from(width);
         let src_addr = if let Some(register) = source {
-            self.segment_address(ins.memory_segment(), self.get_reg(register)?, bytes, false)?
+            self.segment_access(ins.memory_segment(), self.get_reg(register)?, bytes, false)?
         } else {
             0
         };
@@ -461,7 +466,7 @@ impl Cpu {
                 ins.mnemonic(),
                 Movsb | Movsw | Movsd | Stosb | Stosw | Stosd
             );
-            self.segment_address(Register::ES, self.get_reg(register)?, bytes, write)?
+            self.segment_access(Register::ES, self.get_reg(register)?, bytes, write)?
         } else {
             0
         };

@@ -22,6 +22,7 @@ pub(super) struct Segment {
     readable: bool,
     writable: bool,
     usable: bool,
+    expand_down: bool,
     pub(super) wide: bool,
 }
 
@@ -32,6 +33,7 @@ impl Segment {
         readable: false,
         writable: false,
         usable: false,
+        expand_down: false,
         wide: false,
     };
 
@@ -43,10 +45,12 @@ impl Segment {
         write: bool,
     ) -> Option<usize> {
         let end = offset.checked_add(u32::try_from(width.checked_sub(1)?).ok()?)?;
-        if !self.usable
-            || end > self.limit
-            || write && !self.writable
-            || !write && !fetch && !self.readable
+        let outside = if self.expand_down {
+            offset <= self.limit || (!self.wide && end > 0xffff)
+        } else {
+            end > self.limit
+        };
+        if !self.usable || outside || write && !self.writable || !write && !fetch && !self.readable
         {
             return None;
         }
@@ -100,28 +104,42 @@ impl Cpu {
         if !self.protected_mode() {
             return Some(None);
         }
-        if selector < 4 && !matches!(register, Register::CS | Register::SS) {
-            return Some(Some(Segment::NULL));
+        let table_selector = selector & !3;
+        let index = selector & !7;
+        let rpl = (selector & 3) as u8;
+        if selector & 4 != 0 {
+            return None; // The local descriptor table is a separate increment.
         }
-        if selector < 8 || selector & 7 != 0 {
-            return None; // This interpreter currently runs ring 0 with the GDT.
+        if index == 0 {
+            return if matches!(register, Register::CS | Register::SS) {
+                self.segment_fault(13, 0)
+            } else {
+                Some(Some(Segment::NULL))
+            };
         }
-        let address = self.control.gdtr.at(u32::from(selector), 8)?;
+        let Some(address) = self.control.gdtr.at(u32::from(index), 8) else {
+            return self.segment_fault(13, table_selector);
+        };
         let low = self.read_linear(address, 4)?;
         let high = self.read_linear(address + 4, 4)?;
         let access = (high >> 8) as u8;
         let is_386 = self.profile == CpuProfile::I386;
         let wide = high & 0x0040_0000 != 0;
         let code = access & 0x08 != 0;
-        let readable_code_or_writable_data = access & 0x02 != 0;
-        if access & 0xf0 != 0x90 // Present, ring 0, ordinary code or data.
-            || wide && !is_386
-            || access & 0x04 != 0 // Conforming code and expand-down data need their own rules.
-            || register == Register::CS && !code
-            || register == Register::SS && (code || !readable_code_or_writable_data)
-            || register != Register::CS && code && !readable_code_or_writable_data
-        {
-            return None;
+        let conforming = code && access & 0x04 != 0;
+        let read_write = access & 0x02 != 0;
+        let dpl = (access >> 5) & 3;
+        let permitted = match register {
+            Register::CS => code && dpl == 0 && rpl == 0,
+            Register::SS => !code && read_write && dpl == 0 && rpl == 0,
+            _ => (!code || read_write) && (conforming || rpl <= dpl),
+        };
+        if access & 0x10 == 0 || wide && !is_386 || !permitted {
+            return self.segment_fault(13, table_selector);
+        }
+        if access & 0x80 == 0 {
+            let vector = if register == Register::SS { 12 } else { 11 };
+            return self.segment_fault(vector, table_selector);
         }
         let mut base = (low >> 16) | ((high & 0xff) << 16);
         let mut limit = low & 0xffff;
@@ -135,9 +153,10 @@ impl Cpu {
         Some(Some(Segment {
             base,
             limit,
-            readable: !code || readable_code_or_writable_data,
-            writable: !code && readable_code_or_writable_data,
+            readable: !code || read_write,
+            writable: !code && read_write,
             usable: true,
+            expand_down: !code && access & 0x04 != 0,
             wide,
         }))
     }
@@ -152,7 +171,7 @@ impl Cpu {
             0x8e | 0x8f if self.profile == CpuProfile::I386 => 4,
             _ => return None,
         };
-        let selector = (low >> 16) as u16;
+        let selector = (low >> 16) as u16 & !3;
         let offset = (low & 0xffff) | if width == 4 { high & 0xffff_0000 } else { 0 };
         let code = self.descriptor(Register::CS, selector)??;
         code.address(true, offset, 1, false)?;
