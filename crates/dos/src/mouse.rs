@@ -9,7 +9,7 @@ const CALLBACK_RETURN: u16 = 0x3302;
 const BUTTONS: usize = 3;
 const NORMALIZED_MAX: i32 = u16::MAX as i32;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MouseCursor {
     /// Position as a fraction of viewport width and height, from 0 to 65535.
     pub x: u16,
@@ -21,7 +21,7 @@ pub struct MouseCursor {
     pub cursor_mask: [u16; 16],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Axis {
     low: i32,
     high: i32,
@@ -29,6 +29,12 @@ struct Axis {
 }
 
 impl Axis {
+    fn valid_snapshot(&self) -> bool {
+        self.low >= i32::from(i16::MIN)
+            && self.high <= i32::from(u16::MAX)
+            && (self.low..=self.high).contains(&self.position)
+    }
+
     fn new(high: u16) -> Self {
         Self {
             low: 0,
@@ -67,20 +73,21 @@ impl Axis {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 struct ButtonEvent {
     count: u16,
     x: u16,
     y: u16,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 struct Callback {
     mask: u16,
     segment: u16,
     offset: u16,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Mouse {
     active: bool,
     display_depth: i16,
@@ -126,6 +133,10 @@ impl Default for Mouse {
 }
 
 impl Mouse {
+    pub(super) fn valid_snapshot(&self) -> bool {
+        self.x.valid_snapshot() && self.y.valid_snapshot()
+    }
+
     pub(crate) fn install(cpu: &mut Cpu) {
         cpu.write_u16(0, u16::from(VECTOR) * 4, DRIVER_ENTRY);
         cpu.write_u16(0, u16::from(VECTOR) * 4 + 2, ROM_SEGMENT);

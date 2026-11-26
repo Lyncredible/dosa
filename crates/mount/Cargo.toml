@@ -9,6 +9,7 @@ fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc
 cap-fs-ext = "4.0.3"
 cap-std = "4.0.3"
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }
 zip = { version = "9.8.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tempfile = "3"
 

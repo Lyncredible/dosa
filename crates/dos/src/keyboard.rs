@@ -3,12 +3,14 @@ use std::collections::VecDeque;
 pub(super) const KEYBOARD_VECTOR: u8 = 0x09;
 pub(super) const MAX_KEYS: usize = 32;
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Scancode {
     value: u8,
     requested: bool,
     bios_key: Option<(u8, u8)>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct Keyboard {
     output: VecDeque<Scancode>,
     guest_handler: bool,
@@ -34,6 +36,10 @@ impl Default for Keyboard {
 }
 
 impl Keyboard {
+    pub(super) fn valid_snapshot(&self) -> bool {
+        self.output.len() <= MAX_KEYS
+    }
+
     pub fn a20_enabled(&self) -> bool {
         self.output_port & 2 != 0
     }

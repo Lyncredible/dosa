@@ -265,3 +265,73 @@ fn ansi_text_erase_and_wrap_use_current_geometry_and_attributes() {
     assert_eq!(cells[132 * 42 - 1], [b'Z', 0x17]);
     assert_eq!(cells[132 * 43 - 1], [b' ', 0x17]);
 }
+
+#[test]
+fn video_snapshot_rebinds_the_aperture_and_replays_guest_drawing() {
+    for mode in [0x12, 0x13] {
+        let (mut cpu, mut video) = setup();
+        assert!(video.set_mode(&mut cpu, mode));
+        video.port_write(0x3c8, 5);
+        video.port_write(0x3c9, 0x20); // Save a partially updated DAC entry.
+        cpu.write_u8(0xa000, 0x123, 0x31);
+        cpu.read_u8(0xa000, 0x123); // Populate the plane latches.
+        cpu.regs.cs = 0x1000;
+        cpu.regs.ds = 0xa000;
+        cpu.regs.ip = 0x100;
+        cpu.load(0x1000, 0x100, &[0xc6, 0x06, 0x24, 1, 0x73, 0xf4]);
+        video.refresh(&cpu);
+        let cpu_state = cpu.save_snapshot().unwrap();
+        let video_state = postcard::to_allocvec(&video.snapshot()).unwrap();
+
+        let mut restored_cpu = Cpu::new();
+        let state: super::VideoSnapshot = postcard::from_bytes(&video_state).unwrap();
+        let mut restored = Adapter::from_snapshot(state).unwrap();
+        assert!(restored.bind_snapshot_aperture(&mut restored_cpu));
+        restored_cpu.restore_snapshot(&cpu_state).unwrap();
+        restored.refresh(&restored_cpu);
+        assert_eq!(restored.vga.frame(), video.vga.frame());
+        assert_eq!(restored.palette, video.palette);
+        assert_eq!(
+            postcard::to_allocvec(&restored.snapshot()).unwrap(),
+            video_state
+        );
+
+        for (adapter, cpu) in [(&mut video, &mut cpu), (&mut restored, &mut restored_cpu)] {
+            adapter.port_write(0x3c9, 3);
+            adapter.port_write(0x3c9, 0x3f);
+            assert_eq!(cpu.step().unwrap(), dosa_cpu::Step::Continue);
+            assert_eq!(cpu.step().unwrap(), dosa_cpu::Step::Halt);
+            adapter.refresh(cpu);
+        }
+        assert_eq!(video.vga.frame(), restored.vga.frame());
+        assert_eq!(video.palette, restored.palette);
+        assert_eq!(restored_cpu.peek_u8(0xa000, 0x124), Some(0x73));
+    }
+}
+
+#[test]
+fn video_snapshot_restores_text_geometry_and_rejects_invalid_modes() {
+    let (mut cpu, mut video) = setup();
+    assert!(video.set_console_geometry(&mut cpu, 132, 50));
+    video.ansi = Some(crate::ansi::Ansi::default());
+    video.write_dos(&mut cpu, b"\x1b[2;4H\x1b[3");
+    let mut invalid = video.snapshot();
+    invalid.mode = 0xff;
+    assert!(Adapter::from_snapshot(invalid).is_none());
+
+    let state = postcard::to_allocvec(&video.snapshot()).unwrap();
+    let state = postcard::from_bytes(&state).unwrap();
+    let mut restored = Adapter::from_snapshot(state).unwrap();
+    let mut restored_cpu = Cpu::new();
+    assert!(restored.bind_snapshot_aperture(&mut restored_cpu));
+    restored_cpu
+        .restore_snapshot(&cpu.save_snapshot().unwrap())
+        .unwrap();
+    restored.write_dos(&mut restored_cpu, b"1mX");
+    let Video::Text(frame) = restored.frame(&restored_cpu) else {
+        panic!("expected text mode");
+    };
+    assert_eq!((frame.columns, frame.rows), (132, 50));
+    assert_eq!(frame.cursor, Some((4, 1)));
+    assert_eq!(&frame.cells[(132 + 3) * 2..(132 + 4) * 2], b"X\x04");
+}

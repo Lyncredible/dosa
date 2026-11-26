@@ -66,7 +66,7 @@ impl Default for Registers {
 }
 
 /// The complete guest register state saved across a host-serviced callback.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RegisterSnapshot {
     registers: Registers,
     ip_high: u16,

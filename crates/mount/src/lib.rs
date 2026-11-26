@@ -38,7 +38,7 @@ pub mod attributes {
 }
 
 /// A directory entry as it appears from DOS.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Entry {
     /// The DOS 8.3 name, unique among its siblings.
     pub name: String,

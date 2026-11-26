@@ -12,6 +12,19 @@ const CRTC_MODE_13: [u8; 25] = [
     0x9c, 0x8e, 0x8f, 0x28, 0x40, 0x96, 0xb9, 0xa3, 0xff,
 ];
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct VgaSnapshot {
+    planar16: bool,
+    attribute_index: u8,
+    attribute_data: bool,
+    attributes: [u8; 0x15],
+    ram: PlaneRam,
+    sequencer_index: u8,
+    graphics_index: u8,
+    crtc_index: u8,
+    crtc: [u8; CRTC_MODE_13.len()],
+}
+
 pub(crate) struct Vga {
     planar16: bool,
     attribute_index: u8,
@@ -26,6 +39,44 @@ pub(crate) struct Vga {
 }
 
 impl Vga {
+    pub(crate) fn snapshot(&self) -> VgaSnapshot {
+        VgaSnapshot {
+            planar16: self.planar16,
+            attribute_index: self.attribute_index,
+            attribute_data: self.attribute_data,
+            attributes: self.attributes,
+            ram: lock(&self.ram).clone(),
+            sequencer_index: self.sequencer_index,
+            graphics_index: self.graphics_index,
+            crtc_index: self.crtc_index,
+            crtc: self.crtc,
+        }
+    }
+
+    pub(crate) fn from_snapshot(state: VgaSnapshot, mode: u8) -> Option<Self> {
+        if state.ram.cells.len() != PLANE_BYTES
+            || matches!(mode, 0x12 | 0x13) && state.planar16 != (mode == 0x12)
+        {
+            return None;
+        }
+        Some(Self {
+            planar16: state.planar16,
+            attribute_index: state.attribute_index,
+            attribute_data: state.attribute_data,
+            attributes: state.attributes,
+            ram: Arc::new(Mutex::new(state.ram)),
+            sequencer_index: state.sequencer_index,
+            graphics_index: state.graphics_index,
+            crtc_index: state.crtc_index,
+            crtc: state.crtc,
+            frame: Vec::new(),
+        })
+    }
+
+    pub(crate) fn bind_aperture(&self, cpu: &mut Cpu) -> bool {
+        cpu.map_memory(APERTURE, PLANE_BYTES, Box::new(Aperture(self.ram.clone())))
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             planar16: false,
@@ -80,8 +131,7 @@ impl Vga {
             }
         }
         if !already_vga {
-            let mapped =
-                cpu.map_memory(APERTURE, PLANE_BYTES, Box::new(Aperture(self.ram.clone())));
+            let mapped = self.bind_aperture(cpu);
             debug_assert!(mapped);
         }
     }
@@ -286,6 +336,7 @@ impl MemoryDevice for Aperture {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct PlaneRam {
     cells: Box<[[u8; 4]]>,
     latches: [u8; 4],

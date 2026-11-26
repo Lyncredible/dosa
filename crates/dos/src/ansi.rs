@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 enum State {
     #[default]
     Text,
@@ -6,7 +6,7 @@ enum State {
     Parameters,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(super) struct Ansi {
     state: State,
     values: [u16; 16],
@@ -51,6 +51,10 @@ impl Default for Ansi {
 }
 
 impl Ansi {
+    pub(super) fn valid_snapshot(&self) -> bool {
+        (1..=self.values.len()).contains(&self.count) && self.foreground < 8 && self.background < 8
+    }
+
     pub(super) fn consume(&mut self, byte: u8) -> Byte {
         if byte == 27 {
             let previous = std::mem::replace(&mut self.state, State::Escape);

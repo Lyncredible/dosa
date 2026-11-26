@@ -1,7 +1,7 @@
 use crate::{
     CodePage,
     ansi::{Ansi, Byte},
-    vga::Vga,
+    vga::{Vga, VgaSnapshot},
 };
 use dosa_cpu::Cpu;
 
@@ -39,7 +39,7 @@ pub enum Video<'a> {
     },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct TextGeometry {
     columns: usize,
     scan_lines: u16,
@@ -47,6 +47,13 @@ struct TextGeometry {
 }
 
 impl TextGeometry {
+    fn valid_snapshot(self) -> bool {
+        matches!(self.columns, 80 | 132)
+            && matches!(self.scan_lines, 200 | 350 | 400)
+            && matches!(self.character_height, 8 | 14 | 16)
+            && self.text_bytes() <= MAX_TEXT_BYTES
+    }
+
     const VGA_DEFAULT: Self = Self::standard(400);
 
     const fn standard(scan_lines: u16) -> Self {
@@ -88,6 +95,27 @@ impl TextGeometry {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct VideoSnapshot {
+    code_page: CodePage,
+    ansi: Option<Ansi>,
+    mode: u8,
+    col: u16,
+    row: u16,
+    cursor_shape: u16,
+    text: TextGeometry,
+    console: TextGeometry,
+    next_scan_lines: u16,
+    palette: Box<[[u8; 3]]>,
+    dac_read: u16,
+    dac_write: u16,
+    retrace: bool,
+    cga_color: u8,
+    saved_text: Option<Box<[u8]>>,
+    saved_text_cursor: Option<(u16, u16)>,
+    vga: VgaSnapshot,
+}
+
 pub(crate) struct Adapter {
     pub(crate) code_page: CodePage,
     pub(crate) ansi: Option<Ansi>,
@@ -110,6 +138,90 @@ pub(crate) struct Adapter {
 }
 
 impl Adapter {
+    pub(crate) fn snapshot(&self) -> VideoSnapshot {
+        VideoSnapshot {
+            code_page: self.code_page,
+            ansi: self.ansi,
+            mode: self.mode,
+            col: self.col as u16,
+            row: self.row as u16,
+            cursor_shape: self.cursor_shape,
+            text: self.text,
+            console: self.console,
+            next_scan_lines: self.next_scan_lines,
+            palette: Box::new(self.palette),
+            dac_read: self.dac_read as u16,
+            dac_write: self.dac_write as u16,
+            retrace: self.retrace,
+            cga_color: self.cga_color,
+            saved_text: self.saved_text.clone(),
+            saved_text_cursor: self
+                .saved_text_cursor
+                .map(|(col, row)| (col as u16, row as u16)),
+            vga: self.vga.snapshot(),
+        }
+    }
+
+    pub(crate) fn from_snapshot(state: VideoSnapshot) -> Option<Self> {
+        let col = usize::from(state.col);
+        let row = usize::from(state.row);
+        if !matches!(state.mode, 3 | 6 | 0x12 | 0x13)
+            || !state.text.valid_snapshot()
+            || !state.console.valid_snapshot()
+            || !matches!(state.next_scan_lines, 200 | 350 | 400)
+            || state.dac_read >= 768
+            || state.dac_write >= 768
+            || state.cga_color > 15
+            || state.cursor_shape & !0x3f1f != 0
+            || state
+                .ansi
+                .as_ref()
+                .is_some_and(|ansi| !ansi.valid_snapshot())
+            || state.mode == 3 && (col >= state.text.columns || row >= state.text.rows())
+            || col > 255
+            || row > 255
+            || (state.mode == 6) != state.saved_text.is_some()
+            || state
+                .saved_text
+                .as_ref()
+                .is_some_and(|text| text.len() != MAX_TEXT_BYTES)
+        {
+            return None;
+        }
+        let palette = *Box::<[[u8; 3]; 256]>::try_from(state.palette).ok()?;
+        Some(Self {
+            code_page: state.code_page,
+            ansi: state.ansi,
+            mode: state.mode,
+            col,
+            row,
+            cursor_shape: state.cursor_shape,
+            text: state.text,
+            console: state.console,
+            next_scan_lines: state.next_scan_lines,
+            palette,
+            dac_read: state.dac_read.into(),
+            dac_write: state.dac_write.into(),
+            retrace: state.retrace,
+            cga_pixels: vec![0; CGA_WIDTH * CGA_HEIGHT].into_boxed_slice(),
+            cga_color: state.cga_color,
+            saved_text: state.saved_text,
+            saved_text_cursor: state
+                .saved_text_cursor
+                .map(|(col, row)| (col.into(), row.into())),
+            vga: Vga::from_snapshot(state.vga, state.mode)?,
+        })
+    }
+
+    pub(crate) fn bind_snapshot_aperture(&self, cpu: &mut Cpu) -> bool {
+        if matches!(self.mode, 0x12 | 0x13) {
+            self.vga.bind_aperture(cpu)
+        } else {
+            cpu.unmap_memory();
+            true
+        }
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             code_page: CodePage::default(),

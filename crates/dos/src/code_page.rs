@@ -19,7 +19,7 @@ const CP850_HIGH: &str = concat!(
 );
 
 /// OEM character sets available to the built-in DOS console.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CodePage {
     #[default]
     Cp437,

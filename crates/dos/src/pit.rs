@@ -7,6 +7,7 @@ pub(super) fn ticks(elapsed: Duration) -> u64 {
     (elapsed.as_nanos() * FREQUENCY / 1_000_000_000) as u64
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct Pit {
     now: u64,
     counters: [Counter; 2],
@@ -15,6 +16,23 @@ pub(super) struct Pit {
 }
 
 impl Pit {
+    pub(super) fn valid_snapshot(&self, elapsed: Duration) -> bool {
+        let now = ticks(elapsed);
+        let horizon = now.saturating_add(2 * BIOS_DIVISOR + 2);
+        self.now <= now
+            && self.counters.iter().all(|counter| {
+                counter
+                    .period
+                    .is_none_or(|period| period.valid_snapshot(horizon))
+                    && counter
+                        .reload
+                        .is_none_or(|period| period.tick != 0 && period.valid_snapshot(horizon))
+                    && counter
+                        .next_edge
+                        .is_none_or(|edge| edge <= horizon && counter.period.is_some())
+            })
+    }
+
     pub fn new(now: u64) -> Self {
         Self {
             now,
@@ -70,6 +88,7 @@ impl Pit {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Counter {
     control: u8,
     period: Option<Period>,
@@ -265,7 +284,7 @@ impl Counter {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(super) struct Period {
     pub tick: u64,
     pub divisor: u64,
@@ -273,6 +292,10 @@ pub(super) struct Period {
 }
 
 impl Period {
+    pub(super) fn valid_snapshot(self, horizon: u64) -> bool {
+        self.tick <= horizon && (1..=BIOS_DIVISOR).contains(&self.divisor)
+    }
+
     pub fn new(tick: u64, divisor: u64) -> Self {
         Self {
             tick,
@@ -473,5 +496,31 @@ mod tests {
         machine.pit.advance(18);
         machine.step().unwrap();
         assert_eq!(machine.cpu.regs.ax & 0x10, 0x10);
+    }
+
+    #[test]
+    fn timer_snapshot_preserves_latches_and_deferred_reload() {
+        let elapsed = Duration::from_millis(1);
+        let now = ticks(elapsed);
+        let mut original = Pit::new(0);
+        original.advance(now);
+        original.port_write(0x40, 77);
+        original.port_write(0x40, 0);
+        original.port_write(0x43, 0xc2);
+        let state = postcard::to_allocvec(&original).unwrap();
+        let mut restored: Pit = postcard::from_bytes(&state).unwrap();
+        assert!(restored.valid_snapshot(elapsed));
+        restored.counters[0].reload.as_mut().unwrap().divisor = 0;
+        assert!(!restored.valid_snapshot(elapsed));
+        restored = postcard::from_bytes(&state).unwrap();
+
+        for time in [now, now + 19, BIOS_DIVISOR, BIOS_DIVISOR + 200] {
+            original.advance(time);
+            restored.advance(time);
+            assert_eq!(restored.port_read(0x40), original.port_read(0x40));
+            assert_eq!(restored.irq_requested(), original.irq_requested());
+            assert_eq!(restored.refresh_toggle(), original.refresh_toggle());
+        }
+        assert!(restored.irq_requested());
     }
 }

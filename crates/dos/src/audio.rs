@@ -21,7 +21,54 @@ pub(super) struct Audio {
     samples: VecDeque<f32>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct AudioSnapshot {
+    speaker: Speaker,
+    adlib: crate::adlib::AdlibSnapshot,
+    dma: Dma,
+    sound_blaster: SoundBlaster,
+    sample: u64,
+    samples: VecDeque<f32>,
+}
+
 impl Audio {
+    pub(super) fn snapshot(&self) -> Result<AudioSnapshot, &'static str> {
+        if self.mpu.configured() {
+            return Err("MIDI synthesis is configured");
+        }
+        Ok(AudioSnapshot {
+            speaker: self.speaker.clone(),
+            adlib: self.adlib.snapshot().ok_or("AdLib synthesis is active")?,
+            dma: self.dma.clone(),
+            sound_blaster: self.sound_blaster.clone(),
+            sample: self.sample,
+            samples: self.samples.clone(),
+        })
+    }
+
+    pub(super) fn from_snapshot(state: AudioSnapshot, elapsed: Duration) -> Option<Self> {
+        if state.sample > sample_at(elapsed)
+            || state.samples.len() > MAX_SAMPLES
+            || !state
+                .samples
+                .iter()
+                .all(|sample| (-1.0..=1.0).contains(sample))
+            || !state.speaker.valid_snapshot(elapsed)
+            || !state.sound_blaster.valid_snapshot()
+        {
+            return None;
+        }
+        Some(Self {
+            speaker: state.speaker,
+            adlib: Adlib::from_snapshot(state.adlib)?,
+            dma: state.dma,
+            sound_blaster: state.sound_blaster,
+            mpu: Mpu401::default(),
+            sample: state.sample,
+            samples: state.samples,
+        })
+    }
+
     pub fn new(elapsed: Duration) -> Self {
         Self {
             speaker: Speaker::new(pit::ticks(elapsed)),

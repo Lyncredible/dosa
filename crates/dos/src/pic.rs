@@ -1,4 +1,4 @@
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct Pic {
     mask: u8,
     in_service: u8,

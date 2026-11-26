@@ -1,9 +1,9 @@
-﻿use std::time::Duration;
+use std::time::Duration;
 
 pub(crate) const PORT: u16 = 0x201;
 
 /// An analog joystick with two axes from 0 to 255 and two trigger buttons.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JoystickState {
     pub x: u8,
     pub y: u8,
@@ -20,7 +20,7 @@ impl Default for JoystickState {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct GamePort {
     sticks: [Option<JoystickState>; 2],
     deadlines: [[Duration; 2]; 2],

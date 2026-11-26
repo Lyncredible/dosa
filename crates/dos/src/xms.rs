@@ -15,7 +15,7 @@ const OUT_OF_MEMORY: u8 = 0xa0;
 const INVALID_HANDLE: u8 = 0xa2;
 const BLOCK_LOCKED: u8 = 0xab;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Block {
     base: usize,
     bytes: usize,
@@ -24,6 +24,14 @@ struct Block {
 
 pub(super) struct Xms {
     blocks: [Option<Block>; HANDLES as usize],
+    hma: bool,
+    global_a20: bool,
+    local_a20: u16,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct XmsSnapshot {
+    blocks: Vec<Option<Block>>,
     hma: bool,
     global_a20: bool,
     local_a20: u16,
@@ -41,6 +49,43 @@ impl Default for Xms {
 }
 
 impl Xms {
+    pub(super) fn snapshot(&self) -> XmsSnapshot {
+        XmsSnapshot {
+            blocks: self.blocks.to_vec(),
+            hma: self.hma,
+            global_a20: self.global_a20,
+            local_a20: self.local_a20,
+        }
+    }
+
+    pub(super) fn from_snapshot(state: XmsSnapshot, pool_end: usize) -> Option<Self> {
+        let blocks: [Option<Block>; HANDLES as usize] = state.blocks.try_into().ok()?;
+        let mut allocated: Vec<_> = blocks.iter().flatten().copied().collect();
+        allocated.sort_unstable_by_key(|block| block.base);
+        let mut next = POOL_START;
+        for block in allocated {
+            if block.base < POOL_START
+                || !block.base.is_multiple_of(KIB)
+                || !block.bytes.is_multiple_of(KIB)
+                || block.base.checked_add(block.bytes)? > pool_end
+            {
+                return None;
+            }
+            if block.bytes != 0 {
+                if block.base < next {
+                    return None;
+                }
+                next = block.base + block.bytes;
+            }
+        }
+        Some(Self {
+            blocks,
+            hma: state.hma,
+            global_a20: state.global_a20,
+            local_a20: state.local_a20,
+        })
+    }
+
     pub(super) fn install(cpu: &mut Cpu) {
         // The driver ABI reserves five patchable bytes at the far entry point.
         cpu.load(SEGMENT, ENTRY, &[0xeb, 3, 0x90, 0x90, 0x90, 0xcb]);
@@ -304,4 +349,27 @@ fn resize_relocates_an_unlocked_block_and_keeps_live_handles_unchanged() {
     assert!(new >= pinned_address + 2 * KIB);
     assert_eq!(&cpu.memory[new..new + 4], b"data");
     assert_eq!(xms.block(pinned).unwrap().base, pinned_address);
+}
+
+#[cfg(test)]
+#[test]
+fn xms_snapshot_retains_handle_numbers_and_rejects_overlapping_blocks() {
+    let end = Cpu::new().memory.len();
+    let mut xms = Xms::default();
+    let first = xms.allocate(KIB, end).unwrap();
+    let second = xms.allocate(3 * KIB, end).unwrap();
+    let address = xms.lock(second).unwrap();
+    xms.update_a20(5).unwrap();
+
+    let bytes = postcard::to_allocvec(&xms.snapshot()).unwrap();
+    let mut restored = Xms::from_snapshot(postcard::from_bytes(&bytes).unwrap(), end).unwrap();
+    assert_eq!(restored.block(second).unwrap().base, address);
+    assert_eq!(restored.free(second), Err(BLOCK_LOCKED));
+    assert!(restored.a20_enabled());
+    assert_eq!(restored.free(first), Ok(()));
+    assert_eq!(restored.allocate(KIB, end), Ok(first));
+
+    let mut invalid = xms.snapshot();
+    invalid.blocks[1].as_mut().unwrap().base = POOL_START;
+    assert!(Xms::from_snapshot(invalid, end).is_none());
 }

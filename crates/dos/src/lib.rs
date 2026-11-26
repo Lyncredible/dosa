@@ -20,6 +20,7 @@ mod mscdex;
 mod pic;
 mod pit;
 mod services;
+mod snapshot;
 mod sound_blaster;
 mod speaker;
 mod vga;
@@ -37,6 +38,7 @@ mod tests;
 
 pub use gameport::JoystickState;
 pub use mouse::MouseCursor;
+pub use snapshot::GuestSnapshotError;
 pub use video::{TextFrame, Video};
 
 use bios::{Hook, TIMER_VECTOR};
@@ -112,7 +114,7 @@ impl fmt::Display for DosError {
 
 impl std::error::Error for DosError {}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RunState {
     Idle,
     Running,
@@ -170,7 +172,7 @@ impl PausedGuest<'_> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum Pending {
     Bios,
     Console { echo: bool, check_break: bool },
@@ -179,7 +181,7 @@ enum Pending {
     HandleRead,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct PendingCall {
     request: Pending,
     address: (u16, u16),
