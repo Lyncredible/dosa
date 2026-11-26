@@ -11,7 +11,8 @@ mod profile;
 
 pub use profile::CpuProfile;
 
-const MEMORY_SIZE: usize = 1 << 20;
+const A20_LINE: usize = 1 << 20;
+const EXTENDED_MACHINE_RAM: usize = 16 << 20;
 const CF: u16 = 1;
 const PF: u16 = 1 << 2;
 const AF: u16 = 1 << 4;
@@ -152,11 +153,12 @@ struct MemoryMapping {
 
 pub struct Cpu {
     pub regs: Registers,
-    /// Backing RAM with A20 disabled. Direct accesses bypass mapped devices.
+    /// Physical RAM. Direct accesses bypass the A20 gate and mapped devices.
     pub memory: Box<[u8]>,
     mapping: Option<MemoryMapping>,
     profile: CpuProfile,
     control: Control,
+    address_mask: u32,
     ip_high: u16,
     high: [u16; 8],
     fs: u16,
@@ -206,10 +208,19 @@ impl Cpu {
                 flags: profile.normalize_flags(0),
                 ..Registers::default()
             },
-            memory: vec![0; MEMORY_SIZE].into_boxed_slice(),
+            memory: vec![
+                0;
+                if profile == CpuProfile::I8086 {
+                    A20_LINE
+                } else {
+                    EXTENDED_MACHINE_RAM
+                }
+            ]
+            .into_boxed_slice(),
             mapping: None,
             profile,
             control: Control::new(profile),
+            address_mask: Self::bus_mask(profile) & !(A20_LINE as u32),
             ip_high: 0,
             high: [0; 8],
             fs: 0,
@@ -233,13 +244,35 @@ impl Cpu {
         self.halted
     }
 
-    /// Install or replace a device mapping within the 1 MiB physical address
+    /// Whether the machine accepts the A20 gate input.
+    pub fn has_a20(&self) -> bool {
+        self.profile != CpuProfile::I8086
+    }
+
+    pub fn a20_enabled(&self) -> bool {
+        self.address_mask & A20_LINE as u32 != 0
+    }
+
+    pub fn extended_memory_kib(&self) -> u16 {
+        (self.memory.len().saturating_sub(A20_LINE) / 1024) as u16
+    }
+
+    pub fn set_a20(&mut self, enabled: bool) {
+        let gate = if enabled {
+            u32::MAX
+        } else {
+            !(A20_LINE as u32)
+        };
+        self.address_mask = Self::bus_mask(self.profile) & gate;
+    }
+
+    /// Install or replace a device mapping within the installed physical address
     /// space. An empty or out-of-range mapping leaves the current mapping in
     /// place and returns false.
     pub fn map_memory(&mut self, base: usize, len: usize, device: Box<dyn MemoryDevice>) -> bool {
         let Some(end) = base
             .checked_add(len)
-            .filter(|&end| len != 0 && end <= MEMORY_SIZE)
+            .filter(|&end| len != 0 && end <= self.memory.len())
         else {
             return false;
         };
@@ -271,11 +304,11 @@ impl Cpu {
         self.write_mem(Self::linear(segment, offset.into()), 2, value.into());
     }
 
-    /// Copy contiguous bytes through the guest bus with 20-bit wraparound.
+    /// Copy contiguous bytes through the guest bus using the current A20 state.
     pub fn load(&mut self, segment: u16, offset: u16, bytes: &[u8]) {
         let address = Self::linear(segment, offset.into());
         for (index, &byte) in bytes.iter().enumerate() {
-            self.write_byte(address.wrapping_add(index) & (MEMORY_SIZE - 1), byte);
+            self.write_byte(address.wrapping_add(index), byte);
         }
     }
 
@@ -307,16 +340,23 @@ impl Cpu {
             mnemonic: Mnemonic::INVALID,
             kind: CpuErrorKind::InstructionFetch,
         };
-        let address = self.code_address(ip, 1).ok_or(fetch_error)?;
+        let linear = self.code_address(ip, 1).ok_or(fetch_error)?;
+        let address = self.physical(linear);
+        let end = address
+            .checked_add(15)
+            .filter(|&end| end <= self.memory.len());
+        let contiguous = end.is_some_and(|end| self.physical(linear.wrapping_add(14)) == end - 1);
         let unwrapped_ip = code_segment.is_some() || ip <= 0x10000 - 15;
         let ram_only = self
             .mapping
             .as_ref()
-            .is_none_or(|map| address >= map.end || address + 15 <= map.start);
+            .is_none_or(|map| address >= map.end || end.is_some_and(|end| end <= map.start));
         let tail: [u8; 15];
         let readable_window = self.code_address(ip, 15).is_some();
-        let code = if unwrapped_ip && ram_only && readable_window && address + 15 <= MEMORY_SIZE {
-            &self.memory[address..address + 15]
+        let code = if let Some(end) =
+            end.filter(|_| unwrapped_ip && ram_only && readable_window && contiguous)
+        {
+            &self.memory[address..end]
         } else {
             tail = std::array::from_fn(|index| {
                 let offset = ip.wrapping_add(index as u32);
@@ -431,16 +471,29 @@ impl Cpu {
     }
 
     fn linear(segment: u16, offset: u32) -> usize {
-        (((u32::from(segment) << 4).wrapping_add(offset)) as usize) & (MEMORY_SIZE - 1)
+        (u32::from(segment) << 4).wrapping_add(offset) as usize
+    }
+
+    fn bus_mask(profile: CpuProfile) -> u32 {
+        match profile {
+            CpuProfile::I8086 => (A20_LINE - 1) as u32,
+            CpuProfile::I286 => (EXTENDED_MACHINE_RAM - 1) as u32,
+            CpuProfile::I386 => u32::MAX,
+        }
+    }
+
+    fn physical(&self, linear: usize) -> usize {
+        (linear as u32 & self.address_mask) as usize
     }
 
     fn read_byte(&self, address: usize) -> u8 {
+        let address = self.physical(address);
         if let Some(map) = &self.mapping
             && (map.start..map.end).contains(&address)
         {
             map.device.read(address - map.start)
         } else {
-            self.memory[address]
+            self.memory.get(address).copied().unwrap_or(0xff)
         }
     }
 
@@ -485,36 +538,38 @@ impl Cpu {
     }
 
     fn peek_byte(&self, address: usize) -> Option<u8> {
+        let address = self.physical(address);
         if let Some(map) = &self.mapping
             && (map.start..map.end).contains(&address)
         {
             map.device.peek(address - map.start)
         } else {
-            Some(self.memory[address])
+            self.memory.get(address).copied()
         }
     }
 
     fn write_byte(&mut self, address: usize, value: u8) {
+        let address = self.physical(address);
         if let Some(map) = &self.mapping
             && (map.start..map.end).contains(&address)
         {
             map.device.write(address - map.start, value);
-        } else {
-            self.memory[address] = value;
+        } else if let Some(byte) = self.memory.get_mut(address) {
+            *byte = value;
         }
     }
 
     fn read_mem(&self, address: usize, width: u8) -> u32 {
         let mut bytes = [0; 4];
         for (index, byte) in bytes[..usize::from(width)].iter_mut().enumerate() {
-            *byte = self.read_byte((address + index) & (MEMORY_SIZE - 1));
+            *byte = self.read_byte(address.wrapping_add(index));
         }
         u32::from_le_bytes(bytes)
     }
 
     fn write_mem(&mut self, address: usize, width: u8, value: u32) {
         for (index, &byte) in value.to_le_bytes()[..usize::from(width)].iter().enumerate() {
-            self.write_byte((address + index) & (MEMORY_SIZE - 1), byte);
+            self.write_byte(address.wrapping_add(index), byte);
         }
     }
 

@@ -9,15 +9,39 @@ struct Scancode {
     bios_key: Option<(u8, u8)>,
 }
 
-#[derive(Default)]
 pub(super) struct Keyboard {
     output: VecDeque<Scancode>,
     guest_handler: bool,
     system_control: u8,
     interface_disabled: bool,
+    output_port: u8,
+    output_port_pending: bool,
+    controller_reply: Option<u8>,
+}
+
+impl Default for Keyboard {
+    fn default() -> Self {
+        Self {
+            output: VecDeque::new(),
+            guest_handler: false,
+            system_control: 0,
+            interface_disabled: false,
+            output_port: 1,
+            output_port_pending: false,
+            controller_reply: None,
+        }
+    }
 }
 
 impl Keyboard {
+    pub fn a20_enabled(&self) -> bool {
+        self.output_port & 2 != 0
+    }
+
+    pub fn set_a20(&mut self, enabled: bool) {
+        self.output_port = self.output_port & !2 | (u8::from(enabled) << 1);
+    }
+
     pub fn push(&mut self, value: u8, guest_handler: bool, bios_key: Option<(u8, u8)>) {
         if self.guest_handler != guest_handler {
             // BIOS input is delivered separately. Do not replay copies retained for
@@ -50,9 +74,12 @@ impl Keyboard {
 
     pub fn port_read(&mut self, port: u16) -> Option<u8> {
         Some(match port {
-            0x60 => self.output.pop_front().map_or(0, |code| code.value),
+            0x60 => self
+                .controller_reply
+                .take()
+                .unwrap_or_else(|| self.output.pop_front().map_or(0, |code| code.value)),
             0x61 => self.system_control,
-            0x64 => u8::from(!self.output.is_empty()),
+            0x64 => u8::from(self.controller_reply.is_some() || !self.output.is_empty()),
             _ => return None,
         })
     }
@@ -60,11 +87,19 @@ impl Keyboard {
     pub fn port_write(&mut self, port: u16, value: u8) -> bool {
         match port {
             0x61 => self.system_control = value,
-            0x64 => match value {
-                0xad => self.interface_disabled = true,
-                0xae => self.interface_disabled = false,
-                _ => {}
-            },
+            0x60 if self.output_port_pending => {
+                self.output_port = value;
+                self.output_port_pending = false;
+            }
+            0x64 => {
+                self.output_port_pending = value == 0xd1;
+                match value {
+                    0xad => self.interface_disabled = true,
+                    0xae => self.interface_disabled = false,
+                    0xd0 => self.controller_reply = Some(self.output_port),
+                    _ => {}
+                }
+            }
             _ => return false,
         }
         true

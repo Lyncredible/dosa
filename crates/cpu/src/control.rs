@@ -1,4 +1,4 @@
-use super::{Cpu, CpuProfile, Instruction, MEMORY_SIZE, Mnemonic, Register};
+use super::{Cpu, CpuProfile, Instruction, Mnemonic, Register};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Table {
@@ -11,8 +11,7 @@ impl Table {
         if index.checked_add(width - 1)? > u32::from(self.limit) {
             return None;
         }
-        let address = self.base.checked_add(index)? as usize;
-        (address.checked_add(width as usize)? <= MEMORY_SIZE).then_some(address)
+        Some(self.base.wrapping_add(index) as usize)
     }
 }
 
@@ -51,8 +50,7 @@ impl Segment {
         {
             return None;
         }
-        let address = self.base.checked_add(offset)? as usize;
-        (address.checked_add(width)? <= MEMORY_SIZE).then_some(address)
+        Some(self.base.wrapping_add(offset) as usize)
     }
 }
 

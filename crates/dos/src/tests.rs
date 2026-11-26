@@ -950,3 +950,46 @@ fn dos_guest_uses_32_bit_code_stack_and_interrupt_gate_above_64_kib() {
     );
     assert_eq!(&machine.cpu.memory[0x2fffc..0x30000], &[4, 3, 2, 1]);
 }
+
+#[test]
+fn guest_a20_controls_share_the_same_bus_and_preserve_independent_latches() {
+    let folder = Directory::new("a20");
+    let code = [
+        0xb8, 0xff, 0xff, 0x8e, 0xc0, // ES=FFFFh.
+        0x26, 0xc6, 0x06, 0x10, 5, 0x22, // Write 22h to aliased physical 0500h.
+        0xb0, 2, 0xe6, 0x92, // Enable fast A20.
+        0x26, 0xc6, 0x06, 0x10, 5, 0x33, // Write 33h to 100500h.
+        0xb0, 0xd1, 0xe6, 0x64, 0xb0, 3, 0xe6, 0x60, // Enable A20 through the 8042.
+        0x30, 0xc0, 0xe6, 0x92, // Disable fast A20 only.
+        0xe4, 0x92, 0xa2, 0, 2, // Read back fast A20 latch.
+        0x26, 0xa0, 0x10, 5, 0xa2, 1, 2, // Extended RAM remains visible.
+        0xb0, 0xd0, 0xe6, 0x64, 0xe4, 0x64, 0xa2, 2, 2, // Controller data ready.
+        0xe4, 0x60, 0xa2, 3, 2, // Read back 8042 output port.
+        0xb8, 0, 0x24, 0xcd, 0x15, // BIOS disables both A20 paths.
+        0x26, 0xa0, 0x10, 5, 0xa2, 4, 2, // Low alias visible again.
+        0xb8, 2, 0x24, 0xcd, 0x15, 0xa2, 5, 2, // BIOS returns A20 off.
+        0xb8, 1, 0x24, 0xcd, 0x15, // BIOS enables A20.
+        0xb8, 2, 0x24, 0xcd, 0x15, 0xa2, 6, 2, // BIOS returns A20 on.
+        0x26, 0xa0, 0x10, 5, 0xa2, 7, 2, // High data survives toggles.
+        0xb8, 3, 0x24, 0xcd, 0x15, 0x89, 0x1e, 8, 2, // Save supported A20 methods.
+        0xb4, 0x88, 0xcd, 0x15, 0xa3, 0x0a, 2, // Query KiB above 1 MiB.
+        0xb8, 0, 0x4c, 0xcd, 0x21,
+    ];
+    folder.write("A20.COM", &code);
+    folder.write("IDLE.COM", &[0xeb, 0xfe]);
+    for profile in [crate::CpuProfile::I286, crate::CpuProfile::I386] {
+        let mut machine = folder.machine();
+        machine.set_cpu_profile(profile).unwrap();
+        machine.launch('C', "A20.COM", "").unwrap();
+        assert_eq!(machine.run(256).unwrap(), RunState::Exited(0));
+        assert_eq!(
+            &machine.cpu.memory[0x10200..0x1020c],
+            &[0, 0x33, 1, 3, 0x22, 0, 1, 0x33, 3, 0, 0, 60]
+        );
+        assert_eq!(machine.cpu.memory[0x500], 0x22);
+        assert_eq!(machine.cpu.memory[0x100500], 0x33);
+        machine.launch('C', "IDLE.COM", "").unwrap();
+        assert!(!machine.cpu.a20_enabled());
+        assert_eq!(machine.cpu.memory[0x100500], 0);
+    }
+}

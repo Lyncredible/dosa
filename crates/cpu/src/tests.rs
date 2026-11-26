@@ -448,3 +448,71 @@ fn protected_mode_286_keeps_pe_set_and_enforces_segment_bounds() {
     assert_eq!(cpu.regs.ip, fault_ip);
     assert_eq!(cpu.read_u16(0x2200, 3), 0x007a);
 }
+
+#[test]
+fn a20_masks_only_bit_twenty_and_handles_multibyte_access_at_the_boundary() {
+    for profile in [CpuProfile::I286, CpuProfile::I386] {
+        let mut cpu = Cpu::with_profile(profile);
+        cpu.memory[0x100000] = 0x78;
+        cpu.write_u16(0xffff, 0x0f, 0x1234);
+        assert_eq!(cpu.memory[0xfffff], 0x34);
+        assert_eq!(cpu.memory[0], 0x12);
+        assert_eq!(cpu.read_u16(0xffff, 0x0f), 0x1234);
+
+        cpu.memory[0x200000] = 0x45;
+        cpu.memory[0x300000] = 0x67;
+        assert_eq!(cpu.read_byte(0x200000), 0x45);
+        assert_eq!(cpu.read_byte(0x300000), 0x45);
+
+        cpu.set_a20(true);
+        assert_eq!(cpu.read_u16(0xffff, 0x0f), 0x7834);
+        assert_eq!(cpu.read_byte(0x300000), 0x67);
+        cpu.write_u16(0xffff, 0x0f, 0xabcd);
+        assert_eq!(cpu.memory[0xfffff], 0xcd);
+        assert_eq!(cpu.memory[0x100000], 0xab);
+        assert_eq!(cpu.memory[0], 0x12);
+    }
+    let mut cpu = Cpu::with_profile(CpuProfile::I8086);
+    cpu.set_a20(true);
+    assert!(!cpu.a20_enabled());
+    cpu.write_u8(0xffff, 0x10, 0x55);
+    assert_eq!(cpu.memory[0], 0x55);
+}
+
+#[test]
+fn instruction_fetch_crosses_the_a20_gate_byte_by_byte() {
+    for (enabled, expected) in [(false, 0x1234), (true, 0x5678)] {
+        let mut cpu = Cpu::new();
+        cpu.regs.cs = 0xffff;
+        cpu.regs.ip = 0x000f;
+        cpu.memory[0xfffff] = 0xb8;
+        cpu.memory[..2].copy_from_slice(&[0x34, 0x12]);
+        cpu.memory[0x100000..0x100002].copy_from_slice(&[0x78, 0x56]);
+        cpu.set_a20(enabled);
+        advance(&mut cpu, 1);
+        assert_eq!(cpu.regs.ax, expected);
+    }
+}
+
+#[test]
+fn protected_mode_loads_descriptors_and_executes_from_extended_ram() {
+    let mut cpu = program(&[
+        0xfa, 0x0f, 1, 0x16, 0, 2, // CLI; LGDT.
+        0xb8, 1, 0, 0x0f, 1, 0xf0, // Enable PE.
+        0xea, 0, 0, 8, 0, // JMP 0008:0000.
+    ]);
+    cpu.set_a20(true);
+    cpu.load(cpu.regs.ds, 0x200, &[0x17, 0, 0, 0, 0x30, 0]);
+    cpu.memory[0x300008..0x300018].copy_from_slice(&[
+        0xff, 0, 0, 0, 0x31, 0x9a, 0, 0, // Code at 310000h.
+        0xff, 0, 0, 0, 0x24, 0x92, 0, 0, // Data at 240000h.
+    ]);
+    cpu.memory[0x310000..0x31000b].copy_from_slice(&[
+        0xb8, 0x10, 0, 0x8e, 0xd8, // DS=0010h.
+        0xc7, 0x06, 0x30, 0, 0xef, 0xbe,
+    ]);
+    advance(&mut cpu, 8);
+    assert!(cpu.protected_mode());
+    assert_eq!(&cpu.memory[0x240030..0x240032], &[0xef, 0xbe]);
+    assert_eq!(cpu.read_byte(0x20000000), 0xff);
+}

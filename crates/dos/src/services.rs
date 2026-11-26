@@ -34,7 +34,12 @@ impl Machine {
             0x11 => self.cpu.regs.ax = crate::bios::equipment(&self.cpu),
             0x12 => self.cpu.regs.ax = 640,
             0x13 if let Some(disk) = &mut self.boot_disk => disk.interrupt(&mut self.cpu),
+            0x15 if ah == 0x24 => self.a20_interrupt(al),
             0x15 if ah == 0x84 => self.joystick_interrupt(),
+            0x15 if ah == 0x88 => {
+                self.cpu.regs.ax = self.cpu.extended_memory_kib();
+                self.success();
+            }
             0x16 => match ah {
                 0 | 0x10 => self.resume(Pending::Bios),
                 1 | 0x11 => {
@@ -80,6 +85,28 @@ impl Machine {
             _ => return Err(DosError::Interrupt { vector, ax }),
         }
         Ok(())
+    }
+
+    fn a20_interrupt(&mut self, function: u8) {
+        if !self.cpu.has_a20() || function > 3 {
+            self.failure(0x8600);
+            return;
+        }
+        match function {
+            0 => {
+                self.fast_a20 = false;
+                self.keyboard.set_a20(false);
+                self.refresh_a20();
+            }
+            1 => {
+                self.fast_a20 = true;
+                self.refresh_a20();
+            }
+            3 => self.cpu.regs.bx = 3,
+            _ => {}
+        }
+        self.cpu.regs.ax = u16::from(function == 2 && self.cpu.a20_enabled());
+        self.success();
     }
 
     fn joystick_interrupt(&mut self) {
