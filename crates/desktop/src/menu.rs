@@ -1135,11 +1135,11 @@ mod tests {
             };
             let items = options(Tab::StateSlots, &state, 'C', false);
             assert_eq!(items.len(), 6);
-            for (items, slot) in
-                items
-                    .chunks_exact(2)
-                    .zip([StateSlot::One, StateSlot::Two, StateSlot::Three])
-            {
+            for (items, slot) in items.as_chunks::<2>().0.iter().zip([
+                StateSlot::One,
+                StateSlot::Two,
+                StateSlot::Three,
+            ]) {
                 assert_eq!(
                     items[0].command,
                     Command::App(MenuAction::SaveStateSlot(slot))
