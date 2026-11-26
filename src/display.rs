@@ -1,11 +1,16 @@
 use std::collections::VecDeque;
+use std::io::{Read, Write};
+use std::path::Path;
 use std::time::Instant;
 
 use dosa_desktop::{
     App, CpuMode, Frame, GamepadState, Input, Key, MenuAction, MenuState, PointerEvent,
     PointerMode, Scaling, Speed, TextMode, Volume,
 };
-use dosa_dos::{CpuProfile, JoystickState, MouseCursor, RunState, TextFrame, Video};
+use dosa_dos::{
+    CpuProfile, JoystickState, MAX_GUEST_SNAPSHOT_BYTES, Machine, MouseCursor, RunState, TextFrame,
+    Video,
+};
 use dosa_mount::Mount;
 
 use crate::shell::{Command, PAUSE_MESSAGE, Shell};
@@ -674,6 +679,32 @@ impl App for Desktop {
                     Err(error) => format!("Screenshot failed: {error}"),
                 };
             }
+            MenuAction::SaveGuestState(path) if self.running && !self.shell.command_active() => {
+                self.status = match save_guest_file(&self.shell.machine, &path) {
+                    Ok(()) => "State saved".into(),
+                    Err(error) => format!("Save state failed: {error}"),
+                };
+            }
+            MenuAction::LoadGuestState(path) if !self.shell.command_active() => {
+                self.status = match load_guest_file(&mut self.shell.machine, &path) {
+                    Ok(()) => {
+                        self.running = true;
+                        self.paused = self.shell.machine.paused_guest().is_some();
+                        self.inspecting = false;
+                        self.paste.clear();
+                        self.joystick_keys.fill(false);
+                        self.line.clear();
+                        self.settings.cpu = match self.shell.machine.cpu_profile() {
+                            CpuProfile::I8086 => CpuMode::I8086,
+                            CpuProfile::I286 => CpuMode::I286,
+                            CpuProfile::I386 => CpuMode::I386,
+                        };
+                        self.render();
+                        "State loaded".into()
+                    }
+                    Err(error) => format!("Load state failed: {error}"),
+                };
+            }
             MenuAction::Mount {
                 drive,
                 source,
@@ -911,6 +942,34 @@ fn save_screenshot(
     writer.write_image_data(frame.rgba)?;
     writer.finish()?;
     file.persist(path)?;
+    Ok(())
+}
+
+fn save_guest_file(machine: &Machine, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let state = machine.save_guest()?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(&state)?;
+    file.as_file().sync_all()?;
+    file.persist(path)?;
+    Ok(())
+}
+
+fn load_guest_file(machine: &mut Machine, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let file = std::fs::File::open(path)?;
+    if file.metadata()?.len() > MAX_GUEST_SNAPSHOT_BYTES as u64 {
+        return Err("save state file is too large".into());
+    }
+    let mut state = Vec::new();
+    file.take(MAX_GUEST_SNAPSHOT_BYTES as u64 + 1)
+        .read_to_end(&mut state)?;
+    if state.len() > MAX_GUEST_SNAPSHOT_BYTES {
+        return Err("save state file is too large".into());
+    }
+    machine.load_guest(&state)?;
     Ok(())
 }
 
@@ -1833,6 +1892,55 @@ mod tests {
         std::fs::remove_file(script).unwrap();
         std::fs::remove_file(guest).unwrap();
         std::fs::remove_dir(scratch).unwrap();
+    }
+
+    #[test]
+    fn desktop_save_and_load_restores_a_paused_guest() {
+        let media = tempfile::tempdir().unwrap();
+        let states = tempfile::tempdir().unwrap();
+        let path = states.path().join("checkpoint.dosastate");
+        let damaged = states.path().join("damaged.dosastate");
+        std::fs::write(
+            media.path().join("STATE.COM"),
+            [
+                0xb4, 0, 0xcd, 0x16, // Wait for a key.
+                0xb4, 0x4c, 0xcd, 0x21, // Return the key as the exit code.
+            ],
+        )
+        .unwrap();
+        let desktop = || {
+            let mut shell = Shell::new();
+            shell
+                .mount('C', Mount::open(media.path()).unwrap())
+                .unwrap();
+            Desktop::new(shell, None)
+        };
+
+        let mut original = desktop();
+        original.menu_action(MenuAction::SetCpu(CpuMode::I286));
+        original.submit("STATE");
+        original.tick();
+        original.menu_action(MenuAction::SetPaused(true));
+        original.menu_action(MenuAction::SaveGuestState(path.clone()));
+        assert_eq!(original.menu().status, "State saved");
+
+        let mut restored = desktop();
+        restored.menu_action(MenuAction::LoadGuestState(path));
+        let menu = restored.menu();
+        assert!(menu.running && menu.paused);
+        assert_eq!(menu.cpu, CpuMode::I286);
+        assert_eq!(menu.status, "State loaded");
+
+        std::fs::write(&damaged, b"invalid file").unwrap();
+        restored.menu_action(MenuAction::LoadGuestState(damaged));
+        assert!(restored.menu().status.starts_with("Load state failed"));
+        assert!(restored.menu().running && restored.menu().paused);
+
+        restored.menu_action(MenuAction::SetPaused(false));
+        restored.shell.machine.key(b'Y', 0x15);
+        restored.tick();
+        assert!(!restored.menu().running);
+        assert_eq!(restored.shell.errorlevel(), b'Y');
     }
 
     #[test]

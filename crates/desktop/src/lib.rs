@@ -205,6 +205,28 @@ impl<A: App> Desktop<A> {
                     self.app.menu_action(MenuAction::SaveScreenshot(path));
                 }
             }
+            Some(menu::Command::GuestState { save }) => {
+                self.pointer.set_position(None);
+                self.sync_pointer(window, true);
+                let dialog = rfd::FileDialog::new()
+                    .set_parent(window)
+                    .add_filter("Dosa save state", &["dosastate"]);
+                let action = if save {
+                    dialog
+                        .set_title("Save DOS guest state")
+                        .set_file_name("dosa.dosastate")
+                        .save_file()
+                        .map(MenuAction::SaveGuestState)
+                } else {
+                    dialog
+                        .set_title("Load DOS guest state")
+                        .pick_file()
+                        .map(MenuAction::LoadGuestState)
+                };
+                if let Some(action) = action {
+                    self.app.menu_action(action);
+                }
+            }
             Some(menu::Command::RecordAudio) => {
                 self.pointer.set_position(None);
                 self.sync_pointer(window, true);
