@@ -75,6 +75,11 @@ impl Machine {
             0x23 => self.exit(3),
             0x28 => {}
             0x29 => self.emit(&[al]),
+            0x2f if ax == 0x4300 => self.set_al(if self.xms_available() { 0x80 } else { 0 }),
+            0x2f if ax == 0x4310 && self.xms_available() => {
+                self.cpu.regs.es = crate::xms::SEGMENT;
+                self.cpu.regs.bx = crate::xms::ENTRY;
+            }
             0x2f if ah == 0x15 => self.mscdex(al),
             0x2f => self.cpu.regs.ax &= 0xff00,
             0x33 => {
