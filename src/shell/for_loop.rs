@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{collections::VecDeque, error::Error};
 
 use dosa_dos::matches_dos_pattern;
 use dosa_mount::MountError;
@@ -9,10 +9,11 @@ const USAGE: &str = "usage: FOR %variable IN (set) DO command (use %%variable in
 pub(super) const HELP: &str = "FOR %variable IN (set) DO command\r\n\
     Run a command for each item. Use %%variable in a batch file.\r\n";
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct ForLoop {
     variable: String,
     command: String,
-    items: std::vec::IntoIter<String>,
+    items: VecDeque<String>,
 }
 
 impl ForLoop {
@@ -64,12 +65,12 @@ impl ForLoop {
         Ok(Self {
             variable: variable.to_owned(),
             command: command.to_owned(),
-            items: items.into_iter(),
+            items: items.into(),
         })
     }
 
     pub(super) fn next_command(&mut self, byte_limit: usize) -> Result<Option<String>, String> {
-        let Some(item) = self.items.next() else {
+        let Some(item) = self.items.pop_front() else {
             return Ok(None);
         };
         let matches = self.command.matches(&self.variable).count();
@@ -78,6 +79,13 @@ impl ForLoop {
             return Err(format!("FOR command exceeds the {byte_limit}-byte limit"));
         }
         Ok(Some(self.command.replace(&self.variable, &item)))
+    }
+
+    pub(super) fn valid_snapshot(&self, max_lines: usize, max_bytes: usize) -> bool {
+        matches!(self.variable.as_bytes(), [b'%', b'A'..=b'Z' | b'a'..=b'z'])
+            && self.command.len() <= max_bytes
+            && self.items.len() <= max_lines
+            && self.items.iter().all(|item| item.len() <= max_bytes)
     }
 }
 

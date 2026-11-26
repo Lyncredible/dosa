@@ -18,11 +18,13 @@ mod prompt;
 mod redirection;
 mod rename;
 mod search_path;
+mod snapshot;
 mod volume;
 
 use batch::Batch;
 pub use batch::{BatchStep, PAUSE_MESSAGE};
 use pending_input::PendingInput;
+pub(crate) use snapshot::MAX_DESKTOP_SNAPSHOT_BYTES;
 
 const MOUNT_HELP: &str = "MOUNT drive [/ISO | /FAT | /RW | /SESSION] host-path\r\n\
     Files, directories, and ZIPs open read-only by default.\r\n\
@@ -63,6 +65,7 @@ pub struct Shell {
     quick_launch: Option<QuickLaunch>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct QuickLaunch {
     drive: char,
     previous_drive: char,

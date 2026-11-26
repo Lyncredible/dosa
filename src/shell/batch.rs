@@ -22,9 +22,11 @@ pub struct BatchStep {
     pub command: Command,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Script {
     name: String,
     lines: Vec<String>,
+    #[serde(skip)]
     labels: BTreeMap<String, usize>,
 }
 
@@ -41,22 +43,26 @@ impl Script {
                 "{name}: batch file has more than {MAX_BATCH_LINES} lines"
             ));
         }
-        let mut labels = BTreeMap::new();
-        for (index, line) in lines.iter().enumerate() {
+        let mut script = Self {
+            name,
+            lines,
+            labels: BTreeMap::new(),
+        };
+        script.index_labels();
+        Ok(script)
+    }
+
+    fn index_labels(&mut self) {
+        for (index, line) in self.lines.iter().enumerate() {
             if let Some(label) = line.trim().strip_prefix(':')
                 && !label.is_empty()
                 && !label.starts_with(':')
             {
-                labels
+                self.labels
                     .entry(label.to_ascii_uppercase())
                     .or_insert(index + 1);
             }
         }
-        Ok(Self {
-            name,
-            lines,
-            labels,
-        })
     }
 
     fn label(&self, name: &str) -> Result<usize, String> {
@@ -67,12 +73,14 @@ impl Script {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Frame {
     script: Arc<Script>,
     next_line: usize,
     args: VecDeque<String>,
     tail: String,
     for_loop: Option<(ForLoop, bool)>,
+    #[serde(skip)]
     io: Option<ShellIo>,
 }
 
@@ -150,6 +158,7 @@ impl Frame {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Batch {
     frames: Vec<Frame>,
     remaining: usize,
@@ -159,7 +168,7 @@ pub(super) struct Batch {
     pause: Option<Pause>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum Pause {
     Key,
     ConfirmAbort,
@@ -171,6 +180,33 @@ struct Line {
 }
 
 impl Batch {
+    pub(super) fn supports_snapshot(&self) -> bool {
+        self.frames.iter().all(|frame| frame.io.is_none())
+    }
+
+    pub(super) fn prepare_snapshot(&mut self) -> bool {
+        if self.frames.is_empty()
+            || self.frames.len() > MAX_CALL_DEPTH
+            || self.remaining > MAX_BATCH_LINES
+        {
+            return false;
+        }
+        for frame in &mut self.frames {
+            let script = Arc::make_mut(&mut frame.script);
+            if script.lines.len() > MAX_BATCH_LINES
+                || frame.next_line > script.lines.len()
+                || frame.tail.len() > MAX_COMMAND_BYTES
+                || frame.for_loop.as_ref().is_some_and(|(state, _)| {
+                    !state.valid_snapshot(MAX_BATCH_LINES, MAX_COMMAND_BYTES)
+                })
+            {
+                return false;
+            }
+            script.index_labels();
+        }
+        true
+    }
+
     fn new(frame: Frame) -> Self {
         Self {
             frames: vec![frame],

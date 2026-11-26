@@ -14,7 +14,9 @@ dosa-dos = { path = "crates/dos" }
 dosa-mount = { path = "crates/mount" }
 png = "0.18"
 tempfile = "3"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
+postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }
+crc32fast = "1"
 toml = { version = "1.2", default-features = false, features = ["parse", "serde", "std"] }
 arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }
 

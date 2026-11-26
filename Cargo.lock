@@ -552,11 +552,13 @@ name = "dosa"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "crc32fast",
  "dosa-desktop",
  "dosa-dos",
  "dosa-mount",
  "fatfs",
  "png",
+ "postcard",
  "serde",
  "tempfile",
  "toml",
