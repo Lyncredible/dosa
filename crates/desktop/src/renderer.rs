@@ -396,6 +396,9 @@ fn matte(srgb_target: bool) -> wgpu::Color {
     wgpu::Color { r, g, b, a: 1.0 }
 }
 
+#[cfg(all(test, windows))]
+mod window_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
