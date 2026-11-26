@@ -14,7 +14,7 @@ Complete the remaining roadmap and verification requirements with focused implem
 | Sound Blaster | Standard and high-speed 8-bit PCM playback through DMA channel 1 and IRQ7 verified with generated COM programs. Extended commands and native program playback verification remain in [task 22](22-sound-blaster.md). |
 | Protected mode | 16-bit and 32-bit ring 0 transitions, GDT/IDT, and segment access supported. 286 and 386 have extended RAM, A20, and built-in XMS 2.0 services. The 386 has initial ring 0 paging. See [task 26](26-protected-mode.md) for paging permissions, exception delivery, privilege, and DPMI. |
 | DPMI | Host services exercised by a reproducible protected-mode workload |
-| Snapshots | Versioned CPU/device state, mount identity, save/restore and invalid-state tests |
+| Snapshots | Versioned CPU payload and restore validation implemented. See [task 27](27-save-states.md) for device and mount state, file integrity, and desktop actions. |
 | Platforms | CI and native Windows/Linux/macOS desktop, input, resizing, fullscreen and mount verification |
 | Complete game test | Play through the local test game, record completion evidence privately, turn emulator failures into public synthetic regressions |
 

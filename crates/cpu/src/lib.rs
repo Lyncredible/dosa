@@ -9,8 +9,10 @@ mod control;
 mod execute;
 mod paging;
 mod profile;
+mod snapshot;
 
 pub use profile::CpuProfile;
+pub use snapshot::SnapshotError;
 
 const A20_LINE: usize = 1 << 20;
 const EXTENDED_MACHINE_RAM: usize = 16 << 20;
@@ -24,7 +26,7 @@ const IF: u16 = 1 << 9;
 const DF: u16 = 1 << 10;
 const OF: u16 = 1 << 11;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Registers {
     pub ax: u16,
     pub bx: u16,

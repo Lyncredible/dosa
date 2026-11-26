@@ -2,7 +2,7 @@ use iced_x86::{CpuidFeature, Instruction};
 
 /// Selects the supported instruction generation and real-mode FLAGS behavior.
 /// Every profile shares Dosa's partial interpreter and device model.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CpuProfile {
     I8086,
     I286,

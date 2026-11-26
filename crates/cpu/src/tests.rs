@@ -595,6 +595,16 @@ fn i386_paging_restarts_a_cross_page_write_after_the_guest_installs_the_page() {
     assert_eq!(cpu.read_mem(0x52000, 4) & 0x60, 0x60);
     assert_eq!(cpu.read_mem(0x52004, 4) & 0x60, 0x60);
     assert_eq!(cpu.read_mem(0x50004, 4) & 0x20, 0x20);
+
+    let snapshot = cpu.save_snapshot().unwrap();
+    let mut restored = Cpu::new();
+    restored.restore_snapshot(&snapshot).unwrap();
+    assert!(restored.protected_mode() && restored.paging());
+    assert_eq!(restored.control.cr2, 0x401000);
+    assert_eq!(restored.control.cr3, 0x50000);
+    assert_eq!(restored.read_linear(0x400ffe, 4), Some(0x44332211));
+    assert_eq!(restored.instruction_pointer(), cpu.instruction_pointer());
+    assert_eq!(restored.stack_pointer(), cpu.stack_pointer());
 }
 
 #[test]
@@ -781,4 +791,85 @@ fn protected_mode_local_descriptors_are_selectable_and_queryable_on_286_and_386(
         assert_eq!(cpu.regs.sp, 0xf0);
         assert_eq!(cpu.regs.es, 0x1400);
     }
+}
+
+#[test]
+fn cpu_snapshot_restores_a_halted_guest_and_extended_ram() {
+    let mut cpu = program(&[0xfb, 0x66, 0xb8, 0x78, 0x56, 0x34, 0x12, 0xf4]);
+    cpu.set_a20(true);
+    cpu.write_u8(0xffff, 0x10, 0x47);
+    advance(&mut cpu, 1);
+    assert!(!cpu.can_accept_maskable_interrupt()); // STI shadow.
+
+    let snapshot = cpu.save_snapshot().unwrap();
+    let mut restored = Cpu::new();
+    restored.restore_snapshot(&snapshot).unwrap();
+    assert_eq!(restored.save_registers(), cpu.save_registers());
+    assert_eq!(restored.read_u8(0xffff, 0x10), 0x47);
+    assert!(!restored.can_accept_maskable_interrupt());
+    advance(&mut restored, 1);
+    assert!(restored.can_accept_maskable_interrupt());
+    assert_eq!(restored.get_reg(Register::EAX), Some(0x12345678));
+    assert_eq!(restored.step().unwrap(), Step::Halt);
+
+    let halted = restored.save_snapshot().unwrap();
+    cpu.restore_snapshot(&halted).unwrap();
+    assert!(cpu.is_halted());
+    assert_eq!(cpu.instruction_pointer(), restored.instruction_pointer());
+    assert_eq!(cpu.step().unwrap(), Step::Halt);
+}
+
+#[test]
+fn rejected_cpu_snapshots_leave_registers_and_memory_intact() {
+    let mut cpu = program_for(CpuProfile::I8086, &[0x90, 0xf4]);
+    let snapshot = cpu.save_snapshot().unwrap();
+    advance(&mut cpu, 1);
+    cpu.memory[0x12345] = 0x6b;
+    let current = cpu.save_snapshot().unwrap();
+    let mut corrupt = snapshot.clone();
+    corrupt[8..10].copy_from_slice(&999_u16.to_le_bytes());
+    assert_eq!(
+        cpu.restore_snapshot(&corrupt),
+        Err(SnapshotError::Version(999))
+    );
+    corrupt[8..10].copy_from_slice(&1_u16.to_le_bytes());
+    corrupt[10..12].copy_from_slice(&u16::MAX.to_le_bytes());
+    assert_eq!(cpu.restore_snapshot(&corrupt), Err(SnapshotError::Metadata));
+    assert_eq!(
+        cpu.restore_snapshot(&snapshot[..3]),
+        Err(SnapshotError::Header)
+    );
+    assert_eq!(
+        cpu.restore_snapshot(&snapshot[..snapshot.len() - 1]),
+        Err(SnapshotError::MemorySize)
+    );
+    assert_eq!(cpu.save_snapshot().unwrap(), current);
+
+    let mut incompatible = Cpu::new();
+    assert_eq!(
+        incompatible.restore_snapshot(&snapshot),
+        Err(SnapshotError::Profile)
+    );
+}
+
+#[test]
+fn restoring_cpu_state_requires_the_saved_device_aperture() {
+    let mut cpu = Cpu::new();
+    let device = TestDevice(Default::default());
+    cpu.memory[0xa0000] = 0xa1;
+    assert!(cpu.map_memory(0xa0000, 4, Box::new(device.clone())));
+    cpu.write_u8(0xa000, 0, 0x35);
+    let snapshot = cpu.save_snapshot().unwrap();
+    let mut restored = Cpu::new();
+    assert_eq!(
+        restored.restore_snapshot(&snapshot),
+        Err(SnapshotError::Mapping)
+    );
+    let rebound = TestDevice(Default::default());
+    assert!(restored.map_memory(0xa0000, 4, Box::new(rebound.clone())));
+    restored.write_u8(0xa000, 0, 0x76);
+    restored.restore_snapshot(&snapshot).unwrap();
+    assert_eq!(restored.memory[0xa0000], 0xa1);
+    assert_eq!(restored.read_u8(0xa000, 0), 0x76);
+    assert_eq!(cpu.read_u8(0xa000, 0), 0x35);
 }
