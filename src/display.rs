@@ -7,13 +7,10 @@ use dosa_desktop::{
     App, CpuMode, Frame, GamepadState, Input, Key, MenuAction, MenuState, PointerEvent,
     PointerMode, Scaling, Speed, TextMode, Volume,
 };
-use dosa_dos::{
-    CpuProfile, JoystickState, MAX_GUEST_SNAPSHOT_BYTES, Machine, MouseCursor, RunState, TextFrame,
-    Video,
-};
+use dosa_dos::{CpuProfile, JoystickState, MouseCursor, RunState, TextFrame, Video};
 use dosa_mount::Mount;
 
-use crate::shell::{Command, PAUSE_MESSAGE, Shell};
+use crate::shell::{Command, MAX_DESKTOP_SNAPSHOT_BYTES, PAUSE_MESSAGE, Shell};
 use crate::wav::Recording;
 
 const VGA: [[u8; 3]; 16] = [
@@ -634,6 +631,7 @@ impl App for Desktop {
             scaling: self.scaling,
             running: self.running,
             batch_active: self.shell.command_active(),
+            save_state_blocked: !self.shell.supports_save_state(),
             text_visible: matches!(self.shell.machine.video(), Video::Text(_)),
             paste_pending: !self.paste.is_empty(),
             paused: self.paused,
@@ -679,14 +677,14 @@ impl App for Desktop {
                     Err(error) => format!("Screenshot failed: {error}"),
                 };
             }
-            MenuAction::SaveGuestState(path) if self.running && !self.shell.command_active() => {
-                self.status = match save_guest_file(&self.shell.machine, &path) {
+            MenuAction::SaveGuestState(path) if self.running => {
+                self.status = match save_guest_file(&self.shell, &path) {
                     Ok(()) => "State saved".into(),
                     Err(error) => format!("Save state failed: {error}"),
                 };
             }
-            MenuAction::LoadGuestState(path) if !self.shell.command_active() => {
-                self.status = match load_guest_file(&mut self.shell.machine, &path) {
+            MenuAction::LoadGuestState(path) => {
+                self.status = match load_guest_file(&mut self.shell, &path) {
                     Ok(()) => {
                         self.running = true;
                         self.paused = self.shell.machine.paused_guest().is_some();
@@ -945,8 +943,8 @@ fn save_screenshot(
     Ok(())
 }
 
-fn save_guest_file(machine: &Machine, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let state = machine.save_guest()?;
+fn save_guest_file(shell: &Shell, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let state = shell.save_guest()?;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -958,18 +956,18 @@ fn save_guest_file(machine: &Machine, path: &Path) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-fn load_guest_file(machine: &mut Machine, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn load_guest_file(shell: &mut Shell, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::open(path)?;
-    if file.metadata()?.len() > MAX_GUEST_SNAPSHOT_BYTES as u64 {
+    if file.metadata()?.len() > MAX_DESKTOP_SNAPSHOT_BYTES as u64 {
         return Err("save state file is too large".into());
     }
     let mut state = Vec::new();
-    file.take(MAX_GUEST_SNAPSHOT_BYTES as u64 + 1)
+    file.take(MAX_DESKTOP_SNAPSHOT_BYTES as u64 + 1)
         .read_to_end(&mut state)?;
-    if state.len() > MAX_GUEST_SNAPSHOT_BYTES {
+    if state.len() > MAX_DESKTOP_SNAPSHOT_BYTES {
         return Err("save state file is too large".into());
     }
-    machine.load_guest(&state)?;
+    shell.load_guest(&state)?;
     Ok(())
 }
 
@@ -1941,6 +1939,61 @@ mod tests {
         restored.tick();
         assert!(!restored.menu().running);
         assert_eq!(restored.shell.errorlevel(), b'Y');
+    }
+
+    #[test]
+    fn desktop_restores_a_guest_and_resumes_its_nested_batch_loop() {
+        let media = tempfile::tempdir().unwrap();
+        let states = tempfile::tempdir().unwrap();
+        let snapshot = states.path().join("batch.dosastate");
+        std::fs::write(
+            media.path().join("WAIT.COM"),
+            [0xb4, 0, 0xcd, 0x16, 0xb4, 0x4c, 0xcd, 0x21],
+        )
+        .unwrap();
+        std::fs::write(
+            media.path().join("OUTER.BAT"),
+            b"@ECHO OFF\r\nFOR %%I IN (FIRST SECOND) DO CALL CHILD %%I\r\nECHO OUTER-DONE\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            media.path().join("CHILD.BAT"),
+            b"IF \"%1\"==\"FIRST\" WAIT.COM\r\nGOTO RESUME\r\nECHO SKIPPED\r\n:RESUME\r\nECHO CHILD-%1\r\n",
+        ).unwrap();
+        let desktop = |command: Option<&str>| {
+            let mut shell = Shell::new();
+            shell
+                .mount('C', Mount::open(media.path()).unwrap())
+                .unwrap();
+            Desktop::new(shell, command)
+        };
+        let mut original = desktop(Some("OUTER"));
+        for _ in 0..3 {
+            original.tick();
+        }
+        assert!(original.menu().running && original.menu().batch_active);
+        original.menu_action(MenuAction::SetPaused(true));
+        original.menu_action(MenuAction::SaveGuestState(snapshot.clone()));
+        assert_eq!(original.menu().status, "State saved");
+
+        let mut restored = desktop(None);
+        restored.menu_action(MenuAction::LoadGuestState(snapshot));
+        assert!(restored.menu().running && restored.menu().paused && restored.menu().batch_active);
+        restored.menu_action(MenuAction::SetPaused(false));
+        restored.shell.machine.key(b'Y', 0x15);
+        for _ in 0..3 {
+            restored.tick();
+        }
+        assert!(!restored.menu().running && !restored.menu().batch_active);
+        let Video::Text(frame) = restored.shell.machine.video() else {
+            panic!("expected the text console");
+        };
+        let text = screen_text(frame);
+        assert!(
+            text.contains("CHILD-FIRST\nCHILD-SECOND\nOUTER-DONE"),
+            "{text}"
+        );
+        assert!(!text.contains("SKIPPED"), "{text}");
     }
 
     #[test]

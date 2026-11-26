@@ -123,6 +123,7 @@ pub struct MenuState {
     pub scaling: Scaling,
     pub running: bool,
     pub batch_active: bool,
+    pub save_state_blocked: bool,
     pub text_visible: bool,
     pub paste_pending: bool,
     pub paused: bool,
@@ -146,6 +147,7 @@ impl Default for MenuState {
             scaling: Scaling::default(),
             running: false,
             batch_active: false,
+            save_state_blocked: false,
             text_visible: false,
             paste_pending: false,
             paused: false,
@@ -881,13 +883,13 @@ pub(crate) fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool
             items.push(item(
                 "Save state...",
                 Command::GuestState { save: true },
-                state.running && !state.batch_active,
+                state.running && !state.save_state_blocked,
                 false,
             ));
             items.push(item(
                 "Load state...",
                 Command::GuestState { save: false },
-                !state.batch_active,
+                true,
                 false,
             ));
             items.push(item("Save screenshot...", Command::Screenshot, true, false));
@@ -1050,15 +1052,17 @@ mod tests {
     }
 
     #[test]
-    fn save_and_load_commands_follow_the_guest_and_batch_state() {
-        for (running, batch_active, enabled) in [
-            (false, false, [false, true]),
-            (true, false, [true, true]),
-            (true, true, [false, false]),
+    fn save_and_load_commands_follow_the_guest_and_supported_io() {
+        for (running, batch_active, save_state_blocked, enabled) in [
+            (false, false, false, [false, true]),
+            (true, false, false, [true, true]),
+            (true, true, false, [true, true]),
+            (true, true, true, [false, true]),
         ] {
             let state = MenuState {
                 running,
                 batch_active,
+                save_state_blocked,
                 ..Default::default()
             };
             let commands: Vec<_> = options(Tab::View, &state, 'C', false)
