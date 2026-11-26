@@ -1,12 +1,20 @@
 //! Versioned snapshots of the DOS runtime. Mounted files remain host-owned.
 
 use super::*;
-use crate::{audio::AudioSnapshot, files::FilesSnapshot, video::VideoSnapshot, xms::XmsSnapshot};
+use crate::{
+    adlib::SynthReplay,
+    audio::AudioSnapshot,
+    boot_disk::{BootDisk, DiskSnapshot},
+    files::FilesSnapshot,
+    video::VideoSnapshot,
+    xms::XmsSnapshot,
+};
 use serde::{Deserialize, Serialize};
 
 const MAGIC: &[u8; 8] = b"DOSAGST\0";
 const VERSION_LEGACY: u16 = 1;
 const VERSION_ADLIB_REPLAY: u16 = 2;
+const VERSION_BOOT_MEDIA: u16 = 3;
 const HEADER_BYTES: usize = 18;
 /// Maximum size in bytes of a serialized guest save state.
 pub const MAX_GUEST_SNAPSHOT_BYTES: usize = 300 * 1024 * 1024;
@@ -27,6 +35,8 @@ pub enum GuestSnapshotError {
     MediaChanged,
     #[error("could not inspect mounted media: {0}")]
     Media(#[from] MountError),
+    #[error("could not inspect the boot disk: {0}")]
+    BootMedia(#[from] std::io::Error),
     #[error("could not restore the guest CPU: {0}")]
     Cpu(#[from] dosa_cpu::SnapshotError),
 }
@@ -63,11 +73,11 @@ struct State<'a> {
 }
 
 impl Machine {
-    /// Save an active DOS process and its devices at an instruction boundary.
+    /// Save an active guest and its devices at an instruction boundary.
     pub fn save_guest(&self) -> Result<Vec<u8>, GuestSnapshotError> {
         use GuestSnapshotError::{Invalid, Unavailable};
-        if !self.state.is_active() || self.boot_disk.is_some() {
-            return Err(Unavailable("an active DOS process is required"));
+        if !self.state.is_active() {
+            return Err(Unavailable("an active guest is required"));
         }
         let elapsed = self.elapsed();
         if elapsed > MAX_ELAPSED {
@@ -79,7 +89,10 @@ impl Machine {
             elapsed,
             paused: self.paused_since.is_some(),
             session_clock: self.session_clock.snapshot(),
-            media: fingerprints(&self.mounts)?,
+            media: fingerprints(
+                &self.mounts,
+                self.boot_disk.as_ref().map_or(0, BootDisk::media_bytes),
+            )?,
             state: self.state,
             pending: self.pending.clone(),
             files: self.files.snapshot(&self.mounts).map_err(Unavailable)?,
@@ -108,12 +121,17 @@ impl Machine {
             line: self.line.clone(),
         };
         let mut metadata = postcard::to_allocvec(&state).map_err(|_| Invalid)?;
-        let version = match replay {
-            Some(replay) => {
+        let version = match (&self.boot_disk, replay) {
+            (Some(disk), replay) => {
+                metadata = postcard::to_extend(&(disk.snapshot()?, replay), metadata)
+                    .map_err(|_| Invalid)?;
+                VERSION_BOOT_MEDIA
+            }
+            (None, Some(replay)) => {
                 metadata = postcard::to_extend(replay, metadata).map_err(|_| Invalid)?;
                 VERSION_ADLIB_REPLAY
             }
-            None => VERSION_LEGACY,
+            (None, None) => VERSION_LEGACY,
         };
         let cpu = self.cpu.save_snapshot()?;
         let metadata_len = u32::try_from(metadata.len()).map_err(|_| Invalid)?;
@@ -133,7 +151,7 @@ impl Machine {
         Ok(bytes)
     }
 
-    /// Load a saved DOS process once the entire state and mounted media validate.
+    /// Load a saved guest once the entire state and mounted media validate.
     pub fn load_guest(&mut self, bytes: &[u8]) -> Result<(), GuestSnapshotError> {
         use GuestSnapshotError::{Invalid, MediaChanged, Unavailable};
         if self.audio.mpu.configured() {
@@ -144,7 +162,10 @@ impl Machine {
             return Err(Invalid);
         }
         let version = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
-        if !matches!(version, VERSION_LEGACY | VERSION_ADLIB_REPLAY) {
+        if !matches!(
+            version,
+            VERSION_LEGACY | VERSION_ADLIB_REPLAY | VERSION_BOOT_MEDIA
+        ) {
             return Err(GuestSnapshotError::Version(version));
         }
         let metadata_len = u32::from_le_bytes(bytes[10..14].try_into().unwrap()) as usize;
@@ -156,16 +177,15 @@ impl Machine {
         }
         let (state, trailing): (State<'static>, _) =
             postcard::take_from_bytes(metadata).map_err(|_| Invalid)?;
-        let replay = if version == VERSION_ADLIB_REPLAY {
-            let (replay, remainder) = postcard::take_from_bytes(trailing).map_err(|_| Invalid)?;
-            if !remainder.is_empty() {
-                return Err(Invalid);
+        let (boot, replay) = match version {
+            VERSION_LEGACY if trailing.is_empty() => (None, None),
+            VERSION_ADLIB_REPLAY => (None, Some(decode_extension::<SynthReplay>(trailing)?)),
+            VERSION_BOOT_MEDIA => {
+                let (boot, replay) =
+                    decode_extension::<(DiskSnapshot, Option<SynthReplay>)>(trailing)?;
+                (Some(boot), replay)
             }
-            Some(replay)
-        } else if trailing.is_empty() {
-            None
-        } else {
-            return Err(Invalid);
+            _ => return Err(Invalid),
         };
         if !state.state.is_active()
             || state.elapsed > MAX_ELAPSED
@@ -177,9 +197,20 @@ impl Machine {
         {
             return Err(Invalid);
         }
-        if fingerprints(&self.mounts)? != state.media {
+        if fingerprints(
+            &self.mounts,
+            self.boot_disk.as_ref().map_or(0, BootDisk::media_bytes),
+        )? != state.media
+        {
             return Err(MediaChanged);
         }
+        let boot_status = match (boot, &self.boot_disk) {
+            (None, None) => None,
+            (Some(saved), Some(disk)) if disk.snapshot()?.media == saved.media => {
+                Some(saved.status)
+            }
+            _ => return Err(MediaChanged),
+        };
         let mut environment = Environment::default();
         environment.set("COMSPEC", "").map_err(|_| Invalid)?;
         environment.set("BLASTER", "").map_err(|_| Invalid)?;
@@ -201,12 +232,16 @@ impl Machine {
         video.refresh(&cpu);
         let now = Instant::now();
         let clock = now.checked_sub(state.elapsed).ok_or(Invalid)?;
+        let mut boot_disk = self.boot_disk.take();
+        if let Some((disk, status)) = boot_disk.as_mut().zip(boot_status) {
+            disk.restore_status(status);
+        }
         *self = Self {
             cpu,
             cpu_profile: state.profile,
             video,
             mounts: std::mem::take(&mut self.mounts),
-            boot_disk: None,
+            boot_disk,
             environment,
             files,
             state: state.state,
@@ -236,8 +271,20 @@ impl Machine {
     }
 }
 
-fn fingerprints(mounts: &BTreeMap<char, Mount>) -> Result<BTreeMap<char, u32>, GuestSnapshotError> {
-    let mut total = 0;
+fn decode_extension<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, GuestSnapshotError> {
+    let (value, remainder) =
+        postcard::take_from_bytes(bytes).map_err(|_| GuestSnapshotError::Invalid)?;
+    if !remainder.is_empty() {
+        return Err(GuestSnapshotError::Invalid);
+    }
+    Ok(value)
+}
+
+fn fingerprints(
+    mounts: &BTreeMap<char, Mount>,
+    boot_bytes: u64,
+) -> Result<BTreeMap<char, u32>, GuestSnapshotError> {
+    let mut total = checked_media_size(0, boot_bytes)?;
     let mut entry_count = 0;
     let mut media = BTreeMap::new();
     for (&drive, mount) in mounts {

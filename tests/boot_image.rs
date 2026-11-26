@@ -46,6 +46,66 @@ fn boots_raw_floppy_and_hard_disk_to_a_second_stage() {
 }
 
 #[test]
+fn restores_boot_disk_status_and_reads_the_second_stage() {
+    use dosa_dos::{BootDrive, GuestSnapshotError, Machine, RunState};
+    use std::fs::{self, File};
+
+    let scratch = tempfile::tempdir().unwrap();
+    for (drive, sectors) in [(BootDrive::Floppy, 2880), (BootDrive::HardDisk, 4)] {
+        let original = scratch.path().join(format!("{drive:?}.img"));
+        let altered = scratch.path().join(format!("{drive:?}-altered.img"));
+        let mut image = vec![0; 512 * sectors];
+        let code = [
+            0x31, 0xc9, 0xb8, 1, 2, 0xcd, 0x13, // Read invalid sector zero.
+            0x30, 0xe4, 0xcd, 0x16, // Wait for a key before querying status.
+            0xb4, 1, 0xcd, 0x13, 0x80, 0xfc, 4, // Expect the saved sector-not-found error.
+            0x75, 18, // Jump to INT 18h if the status differs.
+            0xbb, 0, 0x7e, 0xb9, 2, 0, 0xb8, 1, 2, 0xcd, 0x13, // Read sector two.
+            0x72, 5, 0xea, 0, 0x7e, 0, 0, // Jump to the loaded stage on success.
+            0xcd, 0x18, // Stop booting.
+        ];
+        image[..code.len()].copy_from_slice(&code);
+        image[510..512].copy_from_slice(&[0x55, 0xaa]);
+        image[512..519].copy_from_slice(&[0xb8, b'K', 0x0e, 0xcd, 0x10, 0xcd, 0x18]);
+        fs::write(&original, &image).unwrap();
+        image[513] = b'Z';
+        fs::write(&altered, &image).unwrap();
+
+        let boot = |path: &std::path::Path| {
+            let mut machine = Machine::new();
+            machine.boot(File::open(path).unwrap(), drive).unwrap();
+            machine
+        };
+        let mut running = boot(&original);
+        assert_eq!(running.run(200).unwrap(), RunState::WaitingForKey);
+        running.set_paused(true);
+        let saved = running.save_guest().unwrap();
+
+        let mut restored = boot(&original);
+        restored.load_guest(&saved).unwrap();
+        assert_eq!(
+            restored.paused_guest().unwrap().state,
+            RunState::WaitingForKey
+        );
+        restored.set_paused(false);
+        restored.key(b' ', 0x39);
+        assert_eq!(restored.run(200).unwrap(), RunState::Exited(1));
+        assert_eq!(restored.take_output(), b"K");
+
+        let mut changed = boot(&altered);
+        assert!(matches!(
+            changed.load_guest(&saved),
+            Err(GuestSnapshotError::MediaChanged)
+        ));
+        assert_eq!(changed.run(200).unwrap(), RunState::WaitingForKey);
+        assert!(matches!(
+            Machine::new().load_guest(&saved),
+            Err(GuestSnapshotError::MediaChanged)
+        ));
+    }
+}
+
+#[test]
 fn rejects_a_raw_image_without_the_boot_signature() {
     let file = tempfile::NamedTempFile::new().unwrap();
     file.as_file().set_len(512).unwrap();
