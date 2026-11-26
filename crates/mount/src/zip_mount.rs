@@ -3,6 +3,7 @@ use crate::{
     names::{Child, assign_aliases, find_child, valid_component},
     read_bounded,
 };
+use cap_fs_ext::{DirExt, SystemTimeSpec};
 use cap_std::fs::Dir;
 use std::{
     collections::BTreeMap,
@@ -218,6 +219,13 @@ impl ZipMount {
                     target.create(name)?.write_all(&data)?;
                 }
             }
+            let modified = child.entry.modified.unwrap_or(DosTimestamp::EPOCH);
+            target.set_mtime(
+                name,
+                SystemTimeSpec::Absolute(cap_std::time::SystemTime::from_std(
+                    modified.to_system_time(),
+                )),
+            )?;
         }
         Ok(())
     }
