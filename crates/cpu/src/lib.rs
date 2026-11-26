@@ -7,6 +7,7 @@ use control::{Control, Segment};
 mod arithmetic;
 mod control;
 mod execute;
+mod paging;
 mod profile;
 
 pub use profile::CpuProfile;
@@ -98,6 +99,7 @@ pub enum CpuErrorKind {
     Unsupported,
     UnavailableOnProfile(CpuProfile),
     InstructionFetch,
+    PageFault { linear: u32, write: bool },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,6 +116,11 @@ impl fmt::Display for CpuError {
             CpuErrorKind::Unsupported => {
                 write!(f, "unsupported {:?} instruction or operand", self.mnemonic)?;
             }
+            CpuErrorKind::PageFault { linear, write } => write!(
+                f,
+                "undeliverable page fault at linear {linear:08X}h during {}",
+                if write { "write" } else { "read" },
+            )?,
             CpuErrorKind::InstructionFetch => {
                 f.write_str("invalid protected-mode instruction fetch")?
             }
@@ -159,6 +166,7 @@ pub struct Cpu {
     profile: CpuProfile,
     control: Control,
     address_mask: u32,
+    page_fault: Option<paging::PageFault>,
     ip_high: u16,
     high: [u16; 8],
     fs: u16,
@@ -221,6 +229,7 @@ impl Cpu {
             profile,
             control: Control::new(profile),
             address_mask: Self::bus_mask(profile) & !(A20_LINE as u32),
+            page_fault: None,
             ip_high: 0,
             high: [0; 8],
             fs: 0,
@@ -326,6 +335,7 @@ impl Cpu {
         if self.halted {
             return Ok(Step::Halt);
         }
+        self.page_fault = None;
         let cs = self.regs.cs;
         let ip = self.instruction_pointer();
         let code_segment = self.control.segments[Register::CS.number()];
@@ -353,7 +363,33 @@ impl Cpu {
             .is_none_or(|map| address >= map.end || end.is_some_and(|end| end <= map.start));
         let tail: [u8; 15];
         let readable_window = self.code_address(ip, 15).is_some();
-        let code = if let Some(end) =
+        let mut fetch_fault = None;
+        let code = if self.paging() {
+            let mut mapped = [0; 15];
+            let mut length = 0;
+            let mut current_page = None;
+            for (index, byte) in mapped.iter_mut().enumerate() {
+                let offset = ip.wrapping_add(index as u32);
+                let Some(current) = self.code_address(offset, 1).map(|linear| linear as u32) else {
+                    break;
+                };
+                let index = current >> 12;
+                if current_page.is_none_or(|(previous, _)| previous != index) {
+                    current_page = self.walk_page(current).map(|page| (index, page));
+                }
+                let Some((_, page)) = current_page else {
+                    fetch_fault = Some(paging::PageFault {
+                        linear: current,
+                        write: false,
+                    });
+                    break;
+                };
+                *byte = self.read_byte(page.address(current));
+                length += 1;
+            }
+            tail = mapped;
+            &tail[..length]
+        } else if let Some(end) =
             end.filter(|_| unwrapped_ip && ram_only && readable_window && contiguous)
         {
             &self.memory[address..end]
@@ -371,8 +407,14 @@ impl Cpu {
             &tail
         };
         // Prior to SSE2, the PAUSE encoding was a REP NOP.
-        let instruction =
-            Decoder::with_ip(bitness, code, u64::from(ip), DecoderOptions::NO_PAUSE).decode();
+        let mut decoder = Decoder::with_ip(bitness, code, u64::from(ip), DecoderOptions::NO_PAUSE);
+        let instruction = decoder.decode();
+        if self.paging() && decoder.last_error() == iced_x86::DecoderError::NoMoreBytes {
+            return match fetch_fault {
+                Some(fault) => self.deliver_page_fault(fault, cs, ip, instruction.mnemonic()),
+                None => Err(fetch_error),
+            };
+        }
         if code_segment.is_some() && self.code_address(ip, instruction.len()).is_none() {
             return Err(fetch_error);
         }
@@ -404,22 +446,66 @@ impl Cpu {
         } else {
             u32::from(instruction.next_ip16())
         };
+        let saved = if self.paging() {
+            // Only the bytes consumed by the decoder contribute an accessed bit.
+            for offset in [0, instruction.len().saturating_sub(1)] {
+                if let Some(page) = self.walk_page(linear.wrapping_add(offset) as u32) {
+                    self.touch_page(page, false);
+                }
+            }
+            Some(self.save_registers())
+        } else {
+            None
+        };
         self.set_ip(next);
-        let step = self.execute(&instruction, ip).ok_or_else(|| {
-            self.set_ip(ip);
-            CpuError {
+        let Some(step) = self.execute(&instruction, ip) else {
+            if let Some(saved) = saved {
+                self.restore_registers(saved);
+            } else {
+                self.set_ip(ip);
+            }
+            if let Some(fault) = self.page_fault.take() {
+                return self.deliver_page_fault(fault, cs, ip, instruction.mnemonic());
+            }
+            return Err(CpuError {
                 cs,
                 ip,
                 mnemonic: instruction.mnemonic(),
                 kind: CpuErrorKind::Unsupported,
-            }
-        })?;
+            });
+        };
         self.interrupt_shadow = new_shadow;
         self.halted = step == Step::Halt;
         Ok(step)
     }
 
+    fn deliver_page_fault(
+        &mut self,
+        fault: paging::PageFault,
+        cs: u16,
+        ip: u32,
+        mnemonic: Mnemonic,
+    ) -> Result<Step, CpuError> {
+        self.control.cr2 = fault.linear;
+        let error_code = u32::from(fault.write) << 1;
+        self.enter_interrupt_frame(14, Some(error_code))
+            .map(|()| Step::Continue)
+            .ok_or(CpuError {
+                cs,
+                ip,
+                mnemonic,
+                kind: CpuErrorKind::PageFault {
+                    linear: fault.linear,
+                    write: fault.write,
+                },
+            })
+    }
+
     pub fn enter_interrupt(&mut self, vector: u8) -> Option<()> {
+        self.enter_interrupt_frame(vector, None)
+    }
+
+    fn enter_interrupt_frame(&mut self, vector: u8, error_code: Option<u32>) -> Option<()> {
         let (target_ip, target_cs, descriptor, width, disable_irq) = if self.protected_mode() {
             let gate = self.interrupt_gate(vector)?;
             (
@@ -439,13 +525,16 @@ impl Cpu {
                 true,
             )
         };
-        self.check_stack_push(width, 3)?;
+        self.check_stack_push(width, 3 + u8::from(error_code.is_some()))?;
         self.push(
             width,
             u32::from(self.profile.normalize_flags(self.regs.flags)),
         )?;
         self.push(width, u32::from(self.regs.cs))?;
         self.push(width, self.instruction_pointer())?;
+        if let Some(error_code) = error_code {
+            self.push(width, error_code)?;
+        }
         self.regs.flags &= !(TF | if disable_irq { IF } else { 0 });
         self.interrupt_shadow = false;
         self.halted = false;
@@ -506,12 +595,12 @@ impl Cpu {
         if self.control.segments[Register::CS.number()].is_none() {
             offset &= 0xffff;
         }
-        self.peek_byte(self.code_address(offset, 1)?)
+        self.peek_linear_byte(self.code_address(offset, 1)?)
     }
 
     /// Inspect the stack without changing SP, ESP or mapped device state.
     pub fn peek_stack_byte(&self, relative: u8) -> Option<u8> {
-        self.peek_byte(self.segment_address(
+        self.peek_linear_byte(self.segment_address(
             Register::SS,
             self.stack_offset(relative.into()),
             1,
@@ -533,11 +622,20 @@ impl Cpu {
         if self.control.segments[Register::DS.number()].is_none() {
             offset &= 0xffff;
         }
-        self.peek_byte(self.segment_address(Register::DS, offset, 1, false)?)
+        self.peek_linear_byte(self.segment_address(Register::DS, offset, 1, false)?)
     }
 
     pub fn peek_u8(&self, segment: u16, offset: u16) -> Option<u8> {
         self.peek_byte(Self::linear(segment, offset.into()))
+    }
+
+    fn peek_linear_byte(&self, address: usize) -> Option<u8> {
+        let physical = if self.paging() {
+            self.walk_page(address as u32)?.address(address as u32)
+        } else {
+            address
+        };
+        self.peek_byte(physical)
     }
 
     fn peek_byte(&self, address: usize) -> Option<u8> {
@@ -614,6 +712,36 @@ impl Cpu {
         }
     }
 
+    fn read_linear(&mut self, address: usize, width: u8) -> Option<u32> {
+        if !self.paging() {
+            return Some(self.read_mem(address, width));
+        }
+        let addresses = self.paged_span(address, width, false, true)?;
+        let mut bytes = [0; 4];
+        for (byte, address) in bytes.iter_mut().zip(addresses).take(usize::from(width)) {
+            *byte = self.read_byte(address);
+        }
+        Some(u32::from_le_bytes(bytes))
+    }
+
+    fn write_linear(&mut self, address: usize, width: u8, value: u32) -> Option<()> {
+        self.write_linear_bytes(address, &value.to_le_bytes()[..usize::from(width)])
+    }
+
+    fn write_linear_bytes(&mut self, address: usize, bytes: &[u8]) -> Option<()> {
+        if self.paging() {
+            let addresses = self.paged_span(address, bytes.len() as u8, true, true)?;
+            for (&byte, address) in bytes.iter().zip(addresses) {
+                self.write_byte(address, byte);
+            }
+        } else {
+            for (offset, &byte) in bytes.iter().enumerate() {
+                self.write_byte(address.wrapping_add(offset), byte);
+            }
+        }
+        Some(())
+    }
+
     fn offset(&self, ins: &Instruction) -> Option<u32> {
         let reg = |r| {
             if r == Register::None {
@@ -674,11 +802,11 @@ impl Cpu {
         matches!(width, 1 | 2 | 4).then_some(width as u8)
     }
 
-    fn read_op(&self, ins: &Instruction, index: u32) -> Option<u32> {
+    fn read_op(&mut self, ins: &Instruction, index: u32) -> Option<u32> {
         Some(match ins.op_kind(index) {
             OpKind::Register => self.get_reg(ins.op_register(index))?,
             OpKind::Memory => {
-                self.read_mem(self.memory_address(ins, false)?, Self::width(ins, index)?)
+                self.read_linear(self.memory_address(ins, false)?, Self::width(ins, index)?)?
             }
             OpKind::Immediate8 => ins.immediate8().into(),
             OpKind::Immediate8_2nd => ins.immediate8_2nd().into(),
@@ -693,11 +821,11 @@ impl Cpu {
     fn write_op(&mut self, ins: &Instruction, index: u32, value: u32) -> Option<()> {
         match ins.op_kind(index) {
             OpKind::Register => self.set_reg(ins.op_register(index), value)?,
-            OpKind::Memory => self.write_mem(
+            OpKind::Memory => self.write_linear(
                 self.memory_address(ins, true)?,
                 Self::width(ins, index)?,
                 value,
-            ),
+            )?,
             _ => return None,
         }
         Some(())
@@ -738,6 +866,8 @@ impl Cpu {
             FS => self.fs.into(),
             GS => self.gs.into(),
             CR0 if self.profile == CpuProfile::I386 => self.control.cr0,
+            CR2 if self.profile == CpuProfile::I386 => self.control.cr2,
+            CR3 if self.profile == CpuProfile::I386 => self.control.cr3,
             _ => {
                 let (index, shift, mask) = Self::register_slice(register)?;
                 let lows = [
@@ -768,6 +898,8 @@ impl Cpu {
             FS => self.fs = value as u16,
             GS => self.gs = value as u16,
             CR0 if self.profile == CpuProfile::I386 => self.write_cr0(value)?,
+            CR2 if self.profile == CpuProfile::I386 => self.control.cr2 = value,
+            CR3 if self.profile == CpuProfile::I386 => self.control.cr3 = value & !0xfff,
             _ => {
                 let (index, shift, mask) = Self::register_slice(register)?;
                 let low = self.gpr(index);
@@ -815,13 +947,16 @@ impl Cpu {
         self.set_stack_pointer(self.stack_offset(change));
     }
 
-    fn check_stack_push(&self, width: u8, count: u8) -> Option<()> {
-        if self.control.segments[Register::SS.number()].is_none() {
+    fn check_stack_push(&mut self, width: u8, count: u8) -> Option<()> {
+        if self.control.segments[Register::SS.number()].is_none() && !self.paging() {
             return Some(());
         }
         for word in 1..=count {
             let offset = self.stack_offset(0u32.wrapping_sub(u32::from(word) * u32::from(width)));
-            self.segment_address(Register::SS, offset, usize::from(width), true)?;
+            let address = self.segment_address(Register::SS, offset, usize::from(width), true)?;
+            if self.paging() {
+                self.paged_span(address, width, true, false)?;
+            }
         }
         Some(())
     }
@@ -829,15 +964,15 @@ impl Cpu {
     fn push(&mut self, width: u8, value: u32) -> Option<()> {
         let offset = self.stack_offset(0u32.wrapping_sub(width.into()));
         let address = self.segment_address(Register::SS, offset, usize::from(width), true)?;
-        self.write_mem(address, width, value);
+        self.write_linear(address, width, value)?;
         self.set_stack_pointer(offset);
         Some(())
     }
 
-    fn peek_stack(&self, width: u8, relative: u32) -> Option<u32> {
+    fn peek_stack(&mut self, width: u8, relative: u32) -> Option<u32> {
         let offset = self.stack_offset(relative);
         let address = self.segment_address(Register::SS, offset, usize::from(width), false)?;
-        Some(self.read_mem(address, width))
+        self.read_linear(address, width)
     }
 
     fn pop(&mut self, width: u8) -> Option<u32> {

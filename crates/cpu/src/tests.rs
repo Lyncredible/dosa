@@ -516,3 +516,106 @@ fn protected_mode_loads_descriptors_and_executes_from_extended_ram() {
     assert_eq!(&cpu.memory[0x240030..0x240032], &[0xef, 0xbe]);
     assert_eq!(cpu.read_byte(0x20000000), 0xff);
 }
+
+#[test]
+fn i386_paging_restarts_a_cross_page_write_after_the_guest_installs_the_page() {
+    let mut cpu = program(&[
+        0xfa, 0x0f, 1, 0x16, 0, 2, 0x0f, 1, 0x1e, 6, 2, // CLI; LGDT; LIDT.
+        0xb8, 1, 0, 0x0f, 1, 0xf0, // LMSW AX.
+        0x66, 0xea, 0, 0x80, 1, 0, 8, 0, // JMP 0008:00018000h.
+    ]);
+    cpu.set_a20(true);
+    cpu.load(
+        cpu.regs.ds,
+        0x200,
+        &[0x17, 0, 0, 0x40, 1, 0, 0x77, 0, 0, 0x60, 1, 0],
+    );
+    cpu.load(
+        0x1400,
+        8,
+        &[
+            0xff, 0xff, 0, 0, 0, 0x9a, 0xcf, 0, // Flat 32-bit code.
+            0xff, 0xff, 0, 0, 0, 0x92, 0xcf, 0, // Flat 32-bit data and stack.
+        ],
+    );
+    cpu.load(0x1600, 14 * 8, &[0, 0x81, 8, 0, 0, 0x8e, 1, 0]);
+    cpu.load(
+        0x1800,
+        0,
+        &[
+            0x66, 0xb8, 0x10, 0, 0x8e, 0xd8, 0x8e, 0xd0, // DS and SS.
+            0xbc, 0, 0, 2, 0, // ESP=00020000h.
+            0xb8, 0, 0, 5, 0, 0x0f, 0x22, 0xd8, // CR3=50000h.
+            0x0f, 0x20, 0xc0, 0x0d, 0, 0, 0, 0x80, 0x0f, 0x22, 0xc0, // Enable PG.
+            0xa1, 0, 0, 0x40, 0, // Read virtual 400000h, backed by physical 180000h.
+            0xc7, 0x05, 0xfe, 0x0f, 0x40, 0, 0x11, 0x22, 0x33, 0x44, // Cross-page write.
+            0xf4,
+        ],
+    );
+    cpu.load(
+        0x1800,
+        0x100,
+        &[
+            0x0f, 0x20, 0xd3, // MOV EBX,CR2.
+            0x59, // POP ECX (page-fault error code).
+            0x8b, 0x14, 0x24, // MOV EDX,[ESP] (faulting EIP).
+            0xc7, 0x05, 4, 0x20, 5, 0, 3, 0, 0x1a, 0,    // Map page 401000h.
+            0xcf, // IRETD.
+        ],
+    );
+    cpu.write_mem(0x50000, 4, 0x51003); // Identity map 0..4 MiB.
+    cpu.write_mem(0x50004, 4, 0x52003);
+    for page in 0..1024 {
+        cpu.write_mem(0x51000 + page * 4, 4, ((page as u32) << 12) | 3);
+    }
+    cpu.write_mem(0x52000, 4, 0x180001); // Ring 0 can write a read-only page on the 386.
+    cpu.write_mem(0x180000, 4, 0xdeed_cafe);
+
+    let mut saw_fault = false;
+    for _ in 0..96 {
+        let step = cpu.step().unwrap();
+        if cpu.instruction_pointer() == 0x18100 {
+            assert!(!saw_fault);
+            saw_fault = true;
+            assert_eq!(cpu.stack_pointer(), 0x1fff0);
+            assert_eq!(&cpu.memory[0x180ffe..0x181000], &[0, 0]);
+        }
+        if step == Step::Halt {
+            break;
+        }
+    }
+    assert!(saw_fault && cpu.is_halted());
+    assert_eq!(cpu.get_reg(Register::EAX), Some(0xdeed_cafe));
+    assert_eq!(cpu.get_reg(Register::EBX), Some(0x401000));
+    assert_eq!(cpu.get_reg(Register::ECX), Some(2));
+    assert_eq!(cpu.get_reg(Register::EDX), Some(0x18025));
+    assert_eq!(cpu.stack_pointer(), 0x20000);
+    assert_eq!(&cpu.memory[0x180ffe..0x181000], &[0x11, 0x22]);
+    assert_eq!(&cpu.memory[0x1a0000..0x1a0002], &[0x33, 0x44]);
+    assert_eq!(cpu.read_mem(0x52000, 4) & 0x60, 0x60);
+    assert_eq!(cpu.read_mem(0x52004, 4) & 0x60, 0x60);
+    assert_eq!(cpu.read_mem(0x50004, 4) & 0x20, 0x20);
+}
+
+#[test]
+fn i386_paging_faults_only_when_fetch_needs_bytes_on_the_unmapped_page() {
+    let mut cpu = program(&[]);
+    cpu.regs.ip = 0x0fff;
+    cpu.control.cr3 = 0x50000;
+    cpu.write_cr0(0x8000_0001).unwrap();
+    cpu.write_mem(0x50000, 4, 0x51003);
+    cpu.write_mem(0x51000 + 0x12 * 4, 4, 0x25003);
+    cpu.memory[0x25fff] = 0x90;
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.control.cr2, 0);
+    let fault = cpu.step().unwrap_err();
+    assert_eq!(fault.ip, 0x1000);
+    assert_eq!(
+        fault.kind,
+        CpuErrorKind::PageFault {
+            linear: 0x13000,
+            write: false
+        }
+    );
+    assert_eq!(cpu.control.cr2, 0x13000);
+}

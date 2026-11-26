@@ -31,8 +31,8 @@ impl Cpu {
                 };
                 let width = Self::width(ins, 0)?;
                 let address = self.memory_address(ins, false)?;
-                let offset = self.read_mem(address, width);
-                let selector = self.read_mem(address + usize::from(width), 2);
+                let offset = self.read_linear(address, width)?;
+                let selector = self.read_linear(address + usize::from(width), 2)?;
                 self.set_reg(segment, selector)?;
                 self.write_op(ins, 0, offset)?;
             }
@@ -48,7 +48,7 @@ impl Cpu {
                 }
             }
             Xlatb => {
-                let value = self.read_mem(self.memory_address(ins, false)?, 1);
+                let value = self.read_linear(self.memory_address(ins, false)?, 1)?;
                 self.set_reg(Register::AL, value)?;
             }
             Add | Adc | Sub | Sbb | And | Or | Xor | Cmp | Test => {
@@ -240,8 +240,8 @@ impl Cpu {
                     4
                 };
                 let address = self.memory_address(ins, false)?;
-                let segment = self.read_mem(address + usize::from(width), 2) as u16;
-                (self.read_mem(address, width), Some(segment), width)
+                let segment = self.read_linear(address + usize::from(width), 2)? as u16;
+                (self.read_linear(address, width)?, Some(segment), width)
             }
             OpKind::Register | OpKind::Memory => {
                 (self.read_op(ins, 0)?, None, Self::width(ins, 0)?)
@@ -270,7 +270,7 @@ impl Cpu {
         Some(())
     }
 
-    fn check_far_target(&self, selector: u16, target: u32) -> Option<Option<Segment>> {
+    fn check_far_target(&mut self, selector: u16, target: u32) -> Option<Option<Segment>> {
         let descriptor = self.descriptor(Register::CS, selector)?;
         if let Some(code) = descriptor {
             code.address(true, target, 1, false)?;
@@ -399,7 +399,7 @@ impl Cpu {
                 parent = parent.wrapping_sub(u32::from(width)) & mask;
                 let address =
                     self.segment_address(Register::SS, parent, usize::from(width), false)?;
-                let saved = self.read_mem(address, width);
+                let saved = self.read_linear(address, width)?;
                 self.push(width, saved)?;
             }
             self.push(width, frame)?;
@@ -472,25 +472,24 @@ impl Cpu {
         );
         match ins.mnemonic() {
             Movsb | Movsw | Movsd => {
-                self.write_mem(dst_addr, width, self.read_mem(src_addr, width))
+                let value = self.read_linear(src_addr, width)?;
+                self.write_linear(dst_addr, width, value)?;
             }
             Cmpsb | Cmpsw | Cmpsd => {
-                self.binary(
-                    Cmp,
-                    self.read_mem(src_addr, width),
-                    self.read_mem(dst_addr, width),
-                    width,
-                );
+                let left = self.read_linear(src_addr, width)?;
+                let right = self.read_linear(dst_addr, width)?;
+                self.binary(Cmp, left, right, width);
             }
-            Lodsb | Lodsw | Lodsd => self.set_reg(accumulator, self.read_mem(src_addr, width))?,
-            Stosb | Stosw | Stosd => self.write_mem(dst_addr, width, self.get_reg(accumulator)?),
+            Lodsb | Lodsw | Lodsd => {
+                let value = self.read_linear(src_addr, width)?;
+                self.set_reg(accumulator, value)?;
+            }
+            Stosb | Stosw | Stosd => {
+                self.write_linear(dst_addr, width, self.get_reg(accumulator)?)?;
+            }
             Scasb | Scasw | Scasd => {
-                self.binary(
-                    Cmp,
-                    self.get_reg(accumulator)?,
-                    self.read_mem(dst_addr, width),
-                    width,
-                );
+                let value = self.read_linear(dst_addr, width)?;
+                self.binary(Cmp, self.get_reg(accumulator)?, value, width);
             }
             _ => return None,
         }
