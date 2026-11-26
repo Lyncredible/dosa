@@ -99,6 +99,7 @@ pub enum CpuErrorKind {
     Unsupported,
     UnavailableOnProfile(CpuProfile),
     InstructionFetch,
+    SegmentFault { vector: u8, code: u16 },
     PageFault { linear: u32, write: bool },
 }
 
@@ -120,6 +121,10 @@ impl fmt::Display for CpuError {
                 f,
                 "undeliverable page fault at linear {linear:08X}h during {}",
                 if write { "write" } else { "read" },
+            )?,
+            CpuErrorKind::SegmentFault { vector, code } => write!(
+                f,
+                "undeliverable segment fault {vector:02X}h with error code {code:04X}h"
             )?,
             CpuErrorKind::InstructionFetch => {
                 f.write_str("invalid protected-mode instruction fetch")?
@@ -167,6 +172,7 @@ pub struct Cpu {
     control: Control,
     address_mask: u32,
     page_fault: Option<paging::PageFault>,
+    segment_fault: Option<(u8, u16)>,
     ip_high: u16,
     high: [u16; 8],
     fs: u16,
@@ -230,6 +236,7 @@ impl Cpu {
             control: Control::new(profile),
             address_mask: Self::bus_mask(profile) & !(A20_LINE as u32),
             page_fault: None,
+            segment_fault: None,
             ip_high: 0,
             high: [0; 8],
             fs: 0,
@@ -336,6 +343,7 @@ impl Cpu {
             return Ok(Step::Halt);
         }
         self.page_fault = None;
+        self.segment_fault = None;
         let cs = self.regs.cs;
         let ip = self.instruction_pointer();
         let code_segment = self.control.segments[Register::CS.number()];
@@ -350,7 +358,9 @@ impl Cpu {
             mnemonic: Mnemonic::INVALID,
             kind: CpuErrorKind::InstructionFetch,
         };
-        let linear = self.code_address(ip, 1).ok_or(fetch_error)?;
+        let Some(linear) = self.code_address(ip, 1) else {
+            return self.bad_code_fetch(fetch_error);
+        };
         let address = self.physical(linear);
         let end = address
             .checked_add(15)
@@ -412,11 +422,11 @@ impl Cpu {
         if self.paging() && decoder.last_error() == iced_x86::DecoderError::NoMoreBytes {
             return match fetch_fault {
                 Some(fault) => self.deliver_page_fault(fault, cs, ip, instruction.mnemonic()),
-                None => Err(fetch_error),
+                None => self.bad_code_fetch(fetch_error),
             };
         }
         if code_segment.is_some() && self.code_address(ip, instruction.len()).is_none() {
-            return Err(fetch_error);
+            return self.bad_code_fetch(fetch_error);
         }
         if !instruction.is_invalid()
             && !self
@@ -446,17 +456,15 @@ impl Cpu {
         } else {
             u32::from(instruction.next_ip16())
         };
-        let saved = if self.paging() {
+        if self.paging() {
             // Only the bytes consumed by the decoder contribute an accessed bit.
             for offset in [0, instruction.len().saturating_sub(1)] {
                 if let Some(page) = self.walk_page(linear.wrapping_add(offset) as u32) {
                     self.touch_page(page, false);
                 }
             }
-            Some(self.save_registers())
-        } else {
-            None
-        };
+        }
+        let saved = self.protected_mode().then(|| self.save_registers());
         self.set_ip(next);
         let Some(step) = self.execute(&instruction, ip) else {
             if let Some(saved) = saved {
@@ -466,6 +474,9 @@ impl Cpu {
             }
             if let Some(fault) = self.page_fault.take() {
                 return self.deliver_page_fault(fault, cs, ip, instruction.mnemonic());
+            }
+            if let Some((vector, code)) = self.segment_fault.take() {
+                return self.deliver_segment_fault(vector, code, cs, ip, instruction.mnemonic());
             }
             return Err(CpuError {
                 cs,
@@ -477,6 +488,39 @@ impl Cpu {
         self.interrupt_shadow = new_shadow;
         self.halted = step == Step::Halt;
         Ok(step)
+    }
+
+    fn bad_code_fetch(&mut self, error: CpuError) -> Result<Step, CpuError> {
+        if self.protected_mode() {
+            self.deliver_segment_fault(13, 0, error.cs, error.ip, error.mnemonic)
+        } else {
+            Err(error)
+        }
+    }
+
+    fn segment_fault<T>(&mut self, vector: u8, code: u16) -> Option<T> {
+        if self.protected_mode() {
+            self.segment_fault = Some((vector, code));
+        }
+        None
+    }
+
+    fn deliver_segment_fault(
+        &mut self,
+        vector: u8,
+        code: u16,
+        cs: u16,
+        ip: u32,
+        mnemonic: Mnemonic,
+    ) -> Result<Step, CpuError> {
+        self.enter_interrupt_frame(vector, Some(u32::from(code)))
+            .map(|()| Step::Continue)
+            .ok_or(CpuError {
+                cs,
+                ip,
+                mnemonic,
+                kind: CpuErrorKind::SegmentFault { vector, code },
+            })
     }
 
     fn deliver_page_fault(
@@ -759,8 +803,8 @@ impl Cpu {
         Some(if address32 { offset } else { offset & 0xffff })
     }
 
-    fn memory_address(&self, ins: &Instruction, write: bool) -> Option<usize> {
-        self.segment_address(
+    fn memory_address(&mut self, ins: &Instruction, write: bool) -> Option<usize> {
+        self.segment_access(
             ins.memory_segment(),
             self.offset(ins)?,
             ins.memory_size().size(),
@@ -790,6 +834,21 @@ impl Cpu {
         }
     }
 
+    fn segment_access(
+        &mut self,
+        register: Register,
+        offset: u32,
+        width: usize,
+        write: bool,
+    ) -> Option<usize> {
+        if let Some(address) = self.segment_address(register, offset, width, write) {
+            Some(address)
+        } else {
+            let vector = if register == Register::SS { 12 } else { 13 };
+            self.segment_fault(vector, 0)
+        }
+    }
+
     fn width(ins: &Instruction, index: u32) -> Option<u8> {
         let width = match ins.op_kind(index) {
             OpKind::Register => ins.op_register(index).size(),
@@ -806,7 +865,8 @@ impl Cpu {
         Some(match ins.op_kind(index) {
             OpKind::Register => self.get_reg(ins.op_register(index))?,
             OpKind::Memory => {
-                self.read_linear(self.memory_address(ins, false)?, Self::width(ins, index)?)?
+                let address = self.memory_address(ins, false)?;
+                self.read_linear(address, Self::width(ins, index)?)?
             }
             OpKind::Immediate8 => ins.immediate8().into(),
             OpKind::Immediate8_2nd => ins.immediate8_2nd().into(),
@@ -821,11 +881,10 @@ impl Cpu {
     fn write_op(&mut self, ins: &Instruction, index: u32, value: u32) -> Option<()> {
         match ins.op_kind(index) {
             OpKind::Register => self.set_reg(ins.op_register(index), value)?,
-            OpKind::Memory => self.write_linear(
-                self.memory_address(ins, true)?,
-                Self::width(ins, index)?,
-                value,
-            )?,
+            OpKind::Memory => {
+                let address = self.memory_address(ins, true)?;
+                self.write_linear(address, Self::width(ins, index)?, value)?;
+            }
             _ => return None,
         }
         Some(())
@@ -953,7 +1012,7 @@ impl Cpu {
         }
         for word in 1..=count {
             let offset = self.stack_offset(0u32.wrapping_sub(u32::from(word) * u32::from(width)));
-            let address = self.segment_address(Register::SS, offset, usize::from(width), true)?;
+            let address = self.segment_access(Register::SS, offset, usize::from(width), true)?;
             if self.paging() {
                 self.paged_span(address, width, true, false)?;
             }
@@ -963,7 +1022,7 @@ impl Cpu {
 
     fn push(&mut self, width: u8, value: u32) -> Option<()> {
         let offset = self.stack_offset(0u32.wrapping_sub(width.into()));
-        let address = self.segment_address(Register::SS, offset, usize::from(width), true)?;
+        let address = self.segment_access(Register::SS, offset, usize::from(width), true)?;
         self.write_linear(address, width, value)?;
         self.set_stack_pointer(offset);
         Some(())
@@ -971,7 +1030,7 @@ impl Cpu {
 
     fn peek_stack(&mut self, width: u8, relative: u32) -> Option<u32> {
         let offset = self.stack_offset(relative);
-        let address = self.segment_address(Register::SS, offset, usize::from(width), false)?;
+        let address = self.segment_access(Register::SS, offset, usize::from(width), false)?;
         self.read_linear(address, width)
     }
 

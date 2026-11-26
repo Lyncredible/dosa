@@ -619,3 +619,89 @@ fn i386_paging_faults_only_when_fetch_needs_bytes_on_the_unmapped_page() {
     );
     assert_eq!(cpu.control.cr2, 0x13000);
 }
+
+#[test]
+fn protected_mode_segment_faults_push_error_codes_and_resume_guest_execution() {
+    let mut cpu = program_for(
+        CpuProfile::I286,
+        &[
+            0xfa, 0x0f, 1, 0x16, 0, 2, 0x0f, 1, 0x1e, 6, 2, // CLI; LGDT; LIDT.
+            0xb8, 1, 0, 0x0f, 1, 0xf0, // Enter protected mode.
+            0xea, 0, 0, 8, 0,
+        ],
+    );
+    cpu.load(
+        cpu.regs.ds,
+        0x200,
+        &[0x27, 0, 0, 0x71, 1, 0, 0x6f, 0, 0, 0x60, 1, 0],
+    );
+    cpu.load(
+        0x1700,
+        0x108,
+        &[
+            0xff, 0, 0, 0x80, 1, 0x9a, 0, 0, // Code at 18000h.
+            0xff, 2, 0, 0x70, 1, 0x92, 0, 0, // Writable data and stack at 17000h.
+            0xff, 0, 0, 0x90, 1, 0x12, 0, 0, // Initially absent, at 19000h.
+            0, 3, 0, 0x70, 1, 0x96, 0, 0, // Expand-down stack starts above 0300h.
+        ],
+    );
+    for (vector, offset) in [(11, 0x40), (12, 0x80), (13, 0x60)] {
+        cpu.load(0x1600, vector * 8, &[offset, 0, 8, 0, 0, 0x86, 0, 0]);
+    }
+    cpu.load(
+        0x1800,
+        0,
+        &[
+            0xb8, 0x10, 0, 0x8e, 0xc0, 0x8e, 0xd0, 0xbc, 0, 3, // ES=SS=0010h.
+            0xb8, 0x18, 0, 0x8e, 0xd8, // MOV DS,AX faults with #NP.
+            0xa1, 0xff, 0, 0x89, 0xc2, // Read crosses limit, then succeeds after #GP.
+            0xb8, 0x20, 0, 0x8e, 0xd0, 0xbc, 0, 4, // Load the expand-down stack.
+            0x36, 0xa0, 0, 3, // SS:0300h lies below the expand-down range.
+            0xf4,
+        ],
+    );
+    cpu.load(0x1900, 0xff, &[0xef, 0xbe]);
+    cpu.load(
+        0x1800,
+        0x40,
+        &[
+            0x5b, 0x26, 0x89, 0x1e, 0, 2, // Save the selector from the #NP frame.
+            0x26, 0xc6, 0x06, 0x1d, 1, 0x92, // Mark the data descriptor present.
+            0xcf,
+        ],
+    );
+    cpu.load(
+        0x1800,
+        0x60,
+        &[
+            0x5b, 0x26, 0x89, 0x1e, 2, 2, // Save the #GP error code.
+            0x26, 0xc6, 0x06, 0x19, 1, 1, // Grow the limit.
+            0xb8, 0x18, 0, 0x8e, 0xd8, // Reload DS to refresh the cached descriptor.
+            0xcf,
+        ],
+    );
+    cpu.load(
+        0x1800,
+        0x80,
+        &[
+            0x5b, 0x26, 0x89, 0x1e, 4, 2, // Save the #SS error code.
+            0x58, 0x83, 0xc0, 4, 0x50, // Skip the faulting access.
+            0xcf,
+        ],
+    );
+    for offset in [0x200, 0x202, 0x204] {
+        cpu.write_u16(0x1700, offset, 0xffff);
+    }
+    for _ in 0..100 {
+        if cpu.step().unwrap() == Step::Halt {
+            break;
+        }
+    }
+    assert!(cpu.is_halted());
+    assert_eq!(cpu.regs.dx, 0xbeef);
+    assert_eq!(cpu.regs.ss, 0x20);
+    assert_eq!(cpu.regs.sp, 0x400);
+    assert_eq!(cpu.read_u16(0x1700, 0x200), 0x18);
+    assert_eq!(cpu.read_u16(0x1700, 0x202), 0);
+    assert_eq!(cpu.read_u16(0x1700, 0x204), 0);
+}
