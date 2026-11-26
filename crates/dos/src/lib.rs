@@ -233,6 +233,7 @@ pub struct Machine {
     pending: Vec<PendingCall>,
     keys: VecDeque<(u8, u8)>,
     keyboard: Keyboard,
+    fast_a20: bool,
     gameport: gameport::GamePort,
     mouse: Mouse,
     pic: Pic,
@@ -276,6 +277,7 @@ impl Machine {
             pending: Vec::new(),
             keys: VecDeque::new(),
             keyboard: Keyboard::default(),
+            fast_a20: false,
             gameport: gameport::GamePort::default(),
             mouse: Mouse::default(),
             pic: Pic::default(),
@@ -641,6 +643,7 @@ impl Machine {
         self.pending.clear();
         self.keys.clear();
         self.keyboard = Keyboard::default();
+        self.fast_a20 = false;
         self.gameport.reset_timers();
         self.mouse = Mouse::default();
         self.pic = Pic::default();
@@ -903,6 +906,10 @@ impl Machine {
                         .port_read(port, requests)
                         .or_else(|| self.audio.read_port(port, elapsed))
                         .or_else(|| self.pit.port_read(port))
+                        .or_else(|| {
+                            (port == 0x92 && self.cpu.has_a20())
+                                .then_some(u8::from(self.fast_a20) << 1)
+                        })
                         .or_else(|| self.keyboard.port_read(port))
                         .or_else(|| (port == gameport::PORT).then(|| self.gameport.read(elapsed)))
                         .or_else(|| self.video.port_read(port))
@@ -920,6 +927,11 @@ impl Machine {
                     let value = (value >> (byte * 8)) as u8;
                     let elapsed = self.elapsed();
                     self.audio.advance(elapsed, &self.cpu);
+                    if port == 0x92 && self.cpu.has_a20() {
+                        self.fast_a20 = value & 2 != 0;
+                        self.refresh_a20();
+                        continue;
+                    }
                     if port == gameport::PORT {
                         self.gameport.strobe(elapsed);
                         continue;
@@ -927,15 +939,25 @@ impl Machine {
                     if !self.audio.write_port(port, value, elapsed, &mut self.cpu)
                         && !self.pic.port_write(port, value)
                         && !self.pit.port_write(port, value)
-                        && !self.keyboard.port_write(port, value)
                     {
-                        self.video.port_write(port, value);
+                        if self.keyboard.port_write(port, value) {
+                            if port == 0x60 {
+                                self.refresh_a20();
+                            }
+                        } else {
+                            self.video.port_write(port, value);
+                        }
                     }
                 }
             }
             Step::Halt => self.state = RunState::WaitingForInterrupt,
         }
         Ok(())
+    }
+
+    fn refresh_a20(&mut self) {
+        self.cpu
+            .set_a20(self.fast_a20 || self.keyboard.a20_enabled());
     }
 
     fn run_firmware_hooks(&mut self) {
