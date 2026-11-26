@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::*;
@@ -32,15 +34,89 @@ enum Source<'a> {
         readable: bool,
         writable: bool,
     },
+    Shared(u16),
 }
 
 impl DosFiles {
+    pub(crate) fn snapshot_shell_io<'a>(
+        &'a self,
+        mounts: &BTreeMap<char, Mount>,
+        streams: &[&'a crate::ShellIo],
+    ) -> Result<Vec<u8>, &'static str> {
+        if streams.len() > 16 {
+            return Err("too many shell file tables");
+        }
+        let mut files = HashMap::new();
+        for file in self.open_files.values() {
+            let next = files.len() as u16;
+            if files.insert(Arc::as_ptr(file), next).is_some() {
+                return Err("duplicate guest file slot");
+            }
+        }
+        let states = streams
+            .iter()
+            .map(|stream| stream.files.capture(mounts, Some(&mut files)))
+            .collect::<Result<Vec<_>, _>>()?;
+        postcard::to_allocvec(&states).map_err(|_| "shell file tables could not be encoded")
+    }
+
+    pub(crate) fn restore_shell_io(
+        &self,
+        mounts: &BTreeMap<char, Mount>,
+        bytes: &[u8],
+        count: usize,
+    ) -> Option<Vec<crate::ShellIo>> {
+        if count > 16 {
+            return None;
+        }
+        let (states, trailing): (Vec<FilesSnapshot<'static>>, _) =
+            postcard::take_from_bytes(bytes).ok()?;
+        if states.len() != count || !trailing.is_empty() {
+            return None;
+        }
+        let mut shared: Vec<_> = self.open_files.values().cloned().collect();
+        states
+            .into_iter()
+            .map(|state| {
+                Self::restore(state, mounts, Some(&mut shared))
+                    .map(|files| crate::ShellIo { files })
+            })
+            .collect()
+    }
+
     pub(crate) fn snapshot(
         &self,
         mounts: &BTreeMap<char, Mount>,
     ) -> Result<FilesSnapshot<'_>, &'static str> {
+        self.capture(mounts, None)
+    }
+
+    fn capture(
+        &self,
+        mounts: &BTreeMap<char, Mount>,
+        mut shared: Option<&mut HashMap<*const File, u16>>,
+    ) -> Result<FilesSnapshot<'_>, &'static str> {
         let mut open_files = BTreeMap::new();
         for (&slot, file) in &self.open_files {
+            if let Some(shared) = shared.as_deref_mut() {
+                let next = shared.len() as u16;
+                match shared.entry(Arc::as_ptr(file)) {
+                    std::collections::hash_map::Entry::Occupied(id) => {
+                        open_files.insert(
+                            slot,
+                            OpenFile {
+                                source: Source::Shared(*id.get()),
+                                position: 0,
+                                device_info: 0,
+                            },
+                        );
+                        continue;
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(next);
+                    }
+                }
+            }
             let source = match &file.source {
                 FileSource::Device(channel) => Source::Device(*channel),
                 FileSource::UnavailableDevice => Source::UnavailableDevice,
@@ -94,6 +170,14 @@ impl DosFiles {
         state: FilesSnapshot<'_>,
         mounts: &BTreeMap<char, Mount>,
     ) -> Option<Self> {
+        Self::restore(state, mounts, None)
+    }
+
+    fn restore(
+        state: FilesSnapshot<'_>,
+        mounts: &BTreeMap<char, Mount>,
+        mut shared: Option<&mut Vec<Arc<File>>>,
+    ) -> Option<Self> {
         if !state.drive.is_ascii_uppercase()
             || state
                 .denied_write_drive
@@ -144,15 +228,24 @@ impl DosFiles {
                         writable,
                     }
                 }
+                Source::Shared(id) => {
+                    if file.position != 0 || file.device_info != 0 {
+                        return None;
+                    }
+                    let existing = shared.as_ref()?.get(usize::from(id))?;
+                    open_files.insert(slot, Arc::clone(existing));
+                    continue;
+                }
             };
-            open_files.insert(
-                slot,
-                Arc::new(File {
-                    source,
-                    position: Mutex::new(file.position),
-                    device_info: file.device_info,
-                }),
-            );
+            let file = Arc::new(File {
+                source,
+                position: Mutex::new(file.position),
+                device_info: file.device_info,
+            });
+            if let Some(shared) = shared.as_deref_mut() {
+                shared.push(Arc::clone(&file));
+            }
+            open_files.insert(slot, file);
         }
 
         Some(Self {

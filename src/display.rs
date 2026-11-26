@@ -1997,6 +1997,61 @@ mod tests {
     }
 
     #[test]
+    fn desktop_restores_a_shared_batch_output_position() {
+        let media = tempfile::tempdir().unwrap();
+        let states = tempfile::tempdir().unwrap();
+        let snapshot = states.path().join("redirected.dosastate");
+        let result = media.path().join("RESULT.TXT");
+        let mut program = vec![
+            0xba, 0x20, 0x01, 0xb4, 9, 0xcd, 0x21, // Write BEFORE.
+            0x30, 0xe4, 0xcd, 0x16, // Wait for a key.
+            0xba, 0x27, 0x01, 0xb4, 9, 0xcd, 0x21, // Write AFTER.
+            0xb8, 0, 0x4c, 0xcd, 0x21,
+        ];
+        program.resize(0x20, 0);
+        program.extend(b"BEFORE$AFTER$");
+        std::fs::write(media.path().join("WAIT.COM"), program).unwrap();
+        std::fs::write(
+            media.path().join("OUTER.BAT"),
+            b"@ECHO OFF\r\nCALL CHILD >RESULT.TXT\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            media.path().join("CHILD.BAT"),
+            b"WAIT.COM\r\nECHO FINAL\r\n",
+        )
+        .unwrap();
+        let desktop = |command: Option<&str>| {
+            let mut shell = Shell::new();
+            shell
+                .mount('C', Mount::open_writable_directory(media.path()).unwrap())
+                .unwrap();
+            Desktop::new(shell, command)
+        };
+        let mut original = desktop(Some("OUTER"));
+        for _ in 0..3 {
+            original.tick();
+        }
+        assert!(original.menu().running && original.menu().batch_active);
+        assert_eq!(std::fs::read(&result).unwrap(), b"BEFORE");
+        original.menu_action(MenuAction::SetPaused(true));
+        original.menu_action(MenuAction::SaveGuestState(snapshot.clone()));
+        assert_eq!(original.menu().status, "State saved");
+
+        let mut restored = desktop(None);
+        restored.menu_action(MenuAction::LoadGuestState(snapshot));
+        assert_eq!(restored.menu().status, "State loaded");
+        assert_eq!(std::fs::read(&result).unwrap(), b"BEFORE");
+        restored.menu_action(MenuAction::SetPaused(false));
+        restored.shell.machine.key(b'Y', 0x15);
+        for _ in 0..3 {
+            restored.tick();
+        }
+        assert!(!restored.menu().running && !restored.menu().batch_active);
+        assert_eq!(std::fs::read(result).unwrap(), b"BEFOREAFTERFINAL\r\n");
+    }
+
+    #[test]
     fn mounted_guest_uses_mouse_and_can_pause_and_resume() {
         let scratch = std::env::temp_dir().join(format!("dosa-pointer-{}", std::process::id()));
         std::fs::create_dir(&scratch).unwrap();
