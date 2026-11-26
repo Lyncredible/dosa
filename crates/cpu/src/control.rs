@@ -64,6 +64,8 @@ pub(super) struct InterruptGate {
 
 pub(super) struct Control {
     pub(super) cr0: u32,
+    pub(super) cr2: u32,
+    pub(super) cr3: u32,
     gdtr: Table,
     idtr: Table,
     pub(super) segments: [Option<Segment>; 6],
@@ -73,6 +75,8 @@ impl Control {
     pub(super) fn new(profile: CpuProfile) -> Self {
         Self {
             cr0: if profile == CpuProfile::I386 { 0x10 } else { 0 },
+            cr2: 0,
+            cr3: 0,
             gdtr: Table { base: 0, limit: 0 },
             idtr: Table {
                 base: 0,
@@ -88,7 +92,11 @@ impl Cpu {
         self.control.cr0 & 1 != 0
     }
 
-    pub(super) fn descriptor(&self, register: Register, selector: u16) -> Option<Option<Segment>> {
+    pub(super) fn descriptor(
+        &mut self,
+        register: Register,
+        selector: u16,
+    ) -> Option<Option<Segment>> {
         if !self.protected_mode() {
             return Some(None);
         }
@@ -99,8 +107,8 @@ impl Cpu {
             return None; // This interpreter currently runs ring 0 with the GDT.
         }
         let address = self.control.gdtr.at(u32::from(selector), 8)?;
-        let low = self.read_mem(address, 4);
-        let high = self.read_mem(address + 4, 4);
+        let low = self.read_linear(address, 4)?;
+        let high = self.read_linear(address + 4, 4)?;
         let access = (high >> 8) as u8;
         let is_386 = self.profile == CpuProfile::I386;
         let wide = high & 0x0040_0000 != 0;
@@ -134,10 +142,10 @@ impl Cpu {
         }))
     }
 
-    pub(super) fn interrupt_gate(&self, vector: u8) -> Option<InterruptGate> {
+    pub(super) fn interrupt_gate(&mut self, vector: u8) -> Option<InterruptGate> {
         let address = self.control.idtr.at(u32::from(vector) * 8, 8)?;
-        let low = self.read_mem(address, 4);
-        let high = self.read_mem(address + 4, 4);
+        let low = self.read_linear(address, 4)?;
+        let high = self.read_linear(address + 4, 4)?;
         let gate = ((high >> 8) as u8) & !0x60;
         let width = match gate {
             0x86 | 0x87 => 2,
@@ -168,13 +176,13 @@ impl Cpu {
         );
         match op {
             Lgdt | Lidt => {
-                let mut base = self.read_mem(address + 2, 4);
+                let mut base = self.read_linear(address + 2, 4)?;
                 if !wide {
                     base &= 0x00ff_ffff;
                 }
                 let table = Table {
                     base,
-                    limit: self.read_mem(address, 2) as u16,
+                    limit: self.read_linear(address, 2)? as u16,
                 };
                 if op == Lgdt {
                     self.control.gdtr = table;
@@ -193,8 +201,10 @@ impl Cpu {
                 } else {
                     table.base
                 };
-                self.write_mem(address, 2, u32::from(table.limit));
-                self.write_mem(address + 2, 4, base);
+                let mut bytes = [0; 6];
+                bytes[..2].copy_from_slice(&table.limit.to_le_bytes());
+                bytes[2..].copy_from_slice(&base.to_le_bytes());
+                self.write_linear_bytes(address, &bytes)?;
             }
             _ => return None,
         }
@@ -213,10 +223,10 @@ impl Cpu {
     }
 
     pub(super) fn write_cr0(&mut self, value: u32) -> Option<()> {
-        if value & 0x8000_0000 != 0 {
-            return None; // Paging is a separate MMU increment.
+        if value & super::paging::PG != 0 && value & 1 == 0 {
+            return None;
         }
-        self.control.cr0 = (value & 0x0f) | 0x10;
+        self.control.cr0 = (value & (super::paging::PG | 0x0f)) | 0x10;
         Some(())
     }
 }
