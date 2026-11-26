@@ -1771,6 +1771,75 @@ fn writable_zip_copy_allows_dos_read_write_access_without_changing_archive() {
 }
 
 #[test]
+fn writable_zip_snapshot_restores_an_open_file_without_changing_the_archive() {
+    use dosa_dos::{Machine, RunState};
+    use dosa_mount::{DosTimestamp, Mount};
+
+    let fixture = Fixture::new();
+    let zip = fixture.0.join("checkpoint.zip");
+    let mut program = vec![
+        0xba, 0x40, 1, 0xb8, 2, 0x3d, 0xcd, 0x21, // Open the file read/write.
+        0x89, 0xc3, 0xba, 0x50, 1, 0xb9, 2, 0, 0xb4, 0x3f, 0xcd, 0x21, // Read two bytes.
+        0x30, 0xe4, 0xcd, 0x16, // Wait for a key.
+        0xba, 0x52, 1, 0xb9, 1, 0, 0xb4, 0x40, 0xcd, 0x21, // Write at the saved offset.
+        0x72, 2, 0x30, 0xc0, 0xb4, 0x4c, 0xcd, 0x21, // Return the write status.
+    ];
+    program.resize(0x40, 0);
+    program.extend(b"SUB\\STATE.DAT\0");
+    program.resize(0x52, 0);
+    program.push(b'Z');
+
+    let mut archive = zip::ZipWriter::new(fs::File::create(&zip).unwrap());
+    let archive_time = zip::DateTime::from_date_and_time(1995, 3, 26, 14, 30, 0).unwrap();
+    let options = zip::write::SimpleFileOptions::default().last_modified_time(archive_time);
+    for (name, data) in [("EDIT.COM", program.as_slice()), ("SUB/STATE.DAT", b"ABCD")] {
+        archive.start_file(name, options).unwrap();
+        archive.write_all(data).unwrap();
+    }
+    archive.finish().unwrap();
+    let original_zip = fs::read(&zip).unwrap();
+    let original_mount = Mount::open(&zip).unwrap();
+    let timestamp = original_mount.metadata("SUB/STATE.DAT").unwrap().modified;
+    assert_ne!(timestamp, Some(DosTimestamp::EPOCH));
+    assert!(timestamp.is_some());
+    let new_machine = || {
+        let mut machine = Machine::new();
+        machine
+            .mount('C', Mount::open_session_zip(&zip).unwrap())
+            .unwrap();
+        assert_eq!(
+            machine
+                .drive('C')
+                .unwrap()
+                .metadata("SUB/STATE.DAT")
+                .unwrap()
+                .modified,
+            timestamp
+        );
+        machine
+    };
+    let mut original = new_machine();
+    original.launch('C', "EDIT.COM", "").unwrap();
+    assert_eq!(original.run(200).unwrap(), RunState::WaitingForKey);
+    let state = original.save_guest().unwrap();
+
+    let mut restored = new_machine();
+    restored.load_guest(&state).unwrap();
+    let read_live = |machine: &Machine| machine.drive('C').unwrap().read("SUB/STATE.DAT").unwrap();
+    assert_eq!(read_live(&restored), b"ABCD");
+    restored.key(b' ', 0x39);
+    assert_eq!(restored.run(200).unwrap(), RunState::Exited(0));
+    assert_eq!(read_live(&restored), b"ABZD");
+    assert!(matches!(
+        restored.load_guest(&state),
+        Err(dosa_dos::GuestSnapshotError::MediaChanged)
+    ));
+    assert_eq!(read_live(&restored), b"ABZD");
+    assert_eq!(read_live(&original), b"ABCD");
+    assert_eq!(fs::read(&zip).unwrap(), original_zip);
+}
+
+#[test]
 fn cpu_fault_reports_an_earlier_read_only_open_failure() {
     let dir = Fixture::new();
     let zip = dir.0.join("program.zip");

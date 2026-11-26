@@ -117,7 +117,7 @@ Choose **Audio → Record audio to WAV** to capture guest audio as 48 kHz, 16-bi
 
 On Windows, click **Dosa ▾** or right-click the title bar to open the emulator menu. The same title bar shows the active CPU, speed, and DOS drive. In fullscreen and on other platforms, use the menu button in the upper left of the app. F10 opens the emulator menu from the DOS prompt. Use the arrow keys and Enter to navigate and Esc to close. Audio offers master volume and mute while a guest runs.
 
-Use **View → Save state** during a standalone DOS program and **View → Load state** to resume it. Store the `.dosastate` file outside mounted folders and keep the mounted media as they were when you saved. Support for batches, disk boot, optical media, open files on writable mounts, and live AdLib or MIDI audio is tracked in [Guest save states](docs/tasks/27-save-states.md).
+Use **View → Save state** during a standalone DOS program and **View → Load state** to resume it. Store the `.dosastate` file outside mounted folders and keep the mounted media as they were when you saved. Open files on writable mounts retain their positions and access modes. If a guest changes the mounted files after a save, loading that save requires a copy of the media that matches the saved contents. Support for batches, disk boot, optical media, and live AdLib or MIDI audio is tracked in [Guest save states](docs/tasks/27-save-states.md).
 
 **Edit** copies the visible DOS text screen or pastes up to 4,096 characters. At the shell prompt, pasted line breaks become spaces and Enter submits the edited command. In a running program, paste feeds the DOS BIOS keyboard queue one character at a time, including Enter for line breaks. Choose **Stop pasting** to discard the remaining paste.
 

@@ -27,10 +27,18 @@ enum Source<'a> {
         contents: Cow<'a, [u8]>,
         modified: Option<DosTimestamp>,
     },
+    WritableMount {
+        target: String,
+        readable: bool,
+        writable: bool,
+    },
 }
 
 impl DosFiles {
-    pub(crate) fn snapshot(&self) -> Result<FilesSnapshot<'_>, &'static str> {
+    pub(crate) fn snapshot(
+        &self,
+        mounts: &BTreeMap<char, Mount>,
+    ) -> Result<FilesSnapshot<'_>, &'static str> {
         let mut open_files = BTreeMap::new();
         for (&slot, file) in &self.open_files {
             let source = match &file.source {
@@ -41,7 +49,26 @@ impl DosFiles {
                     modified: *modified,
                 },
                 FileSource::Spool { .. } => return Err("a shell pipeline is active"),
-                FileSource::Writable { .. } => return Err("a writable mount has open files"),
+                FileSource::Writable {
+                    file: live,
+                    readable,
+                    writable,
+                } => {
+                    let target = live.target_path();
+                    let mount = file_mount(mounts, file.device_info)
+                        .ok_or("an open file's drive is unavailable")?;
+                    let reopened = mount
+                        .reopen_live_file(&target, *writable)
+                        .map_err(|_| "an open file could not be reopened")?;
+                    if !live.same_target(&reopened) {
+                        return Err("an open file's drive has changed");
+                    }
+                    Source::WritableMount {
+                        target,
+                        readable: *readable,
+                        writable: *writable,
+                    }
+                }
             };
             let position = *file.position.lock().map_err(|_| "open file lock failed")?;
             open_files.insert(
@@ -63,7 +90,10 @@ impl DosFiles {
         })
     }
 
-    pub(crate) fn from_snapshot(state: FilesSnapshot<'_>) -> Option<Self> {
+    pub(crate) fn from_snapshot(
+        state: FilesSnapshot<'_>,
+        mounts: &BTreeMap<char, Mount>,
+    ) -> Option<Self> {
         if !state.drive.is_ascii_uppercase()
             || state
                 .denied_write_drive
@@ -98,6 +128,22 @@ impl DosFiles {
                         modified,
                     }
                 }
+                Source::WritableMount {
+                    target,
+                    readable,
+                    writable,
+                } => {
+                    if !readable && !writable {
+                        return None;
+                    }
+                    let mount = file_mount(mounts, file.device_info)?;
+                    let file = mount.reopen_live_file(&target, writable).ok()?;
+                    FileSource::Writable {
+                        file,
+                        readable,
+                        writable,
+                    }
+                }
             };
             open_files.insert(
                 slot,
@@ -120,6 +166,13 @@ impl DosFiles {
     }
 }
 
+fn file_mount(mounts: &BTreeMap<char, Mount>, device_info: u16) -> Option<&Mount> {
+    if device_info >= 26 {
+        return None;
+    }
+    mounts.get(&char::from(b'A' + device_info as u8))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,9 +191,10 @@ mod tests {
         let duplicate = files.duplicate(5).unwrap();
         assert_eq!(files.seek(5, 0, 2), Ok(2));
 
-        let bytes = postcard::to_allocvec(&files.snapshot().unwrap()).unwrap();
+        let mounts = BTreeMap::new();
+        let bytes = postcard::to_allocvec(&files.snapshot(&mounts).unwrap()).unwrap();
         let snapshot: FilesSnapshot<'static> = postcard::from_bytes(&bytes).unwrap();
-        let mut restored = DosFiles::from_snapshot(snapshot).unwrap();
+        let mut restored = DosFiles::from_snapshot(snapshot, &mounts).unwrap();
         assert_eq!(restored.directory('C'), "\\GUEST");
         assert_eq!(restored.read(duplicate, 2).unwrap().as_ref(), b"cd");
         assert_eq!(restored.read(5, 2).unwrap().as_ref(), b"ef");
@@ -149,6 +203,6 @@ mod tests {
 
         let mut snapshot: FilesSnapshot<'static> = postcard::from_bytes(&bytes).unwrap();
         snapshot.handles.insert(63, 63);
-        assert!(DosFiles::from_snapshot(snapshot).is_none());
+        assert!(DosFiles::from_snapshot(snapshot, &mounts).is_none());
     }
 }

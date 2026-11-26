@@ -13,7 +13,7 @@ use super::{
     DosTimestamp, Entry, MAX_FILE_BYTES, Mount, MountError, Result, Source, host_children, lock,
     read_bounded,
 };
-use crate::names::{canonical_name, find_child, guest_components};
+use crate::names::{canonical_name, find_child, guest_components, valid_component};
 
 /// Metadata and read-back options for a guest file write.
 #[derive(Clone, Copy, Default)]
@@ -52,6 +52,16 @@ pub struct WritableFile {
 }
 
 impl WritableFile {
+    /// The exact path relative to its mounted root, with DOS separators.
+    pub fn target_path(&self) -> String {
+        let mut path = self.parents.join("\\");
+        if !path.is_empty() {
+            path.push('\\');
+        }
+        path.push_str(&self.name);
+        path
+    }
+
     /// Whether two handles opened through the same mount address the same file.
     pub fn same_target(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.root, &other.root)
@@ -206,6 +216,49 @@ fn set_modified(file: &File, modified: Option<SystemTime>) -> io::Result<()> {
 }
 
 impl Mount {
+    /// Reopen a previously resolved path without resolving aliases or modifying the file.
+    pub fn reopen_live_file(&self, path: &str, writable: bool) -> Result<WritableFile> {
+        let directory = self.writable()?;
+        let components = guest_components(path)?;
+        if !path.split('\\').all(valid_component) {
+            return Err(MountError::InvalidPath(path.to_owned()));
+        }
+        let Some((&name, parents)) = components.split_last() else {
+            return Err(MountError::InvalidPath(path.to_owned()));
+        };
+        let _guard = lock(&directory.transaction)?;
+        let mut parent = directory.root.try_clone()?;
+        for &component in parents {
+            if !host_children(&parent)?
+                .iter()
+                .any(|child| child.entry.is_dir && child.entry.host_name == component)
+            {
+                return Err(MountError::NotFound(path.to_owned()));
+            }
+            parent = parent.open_dir_nofollow(component)?;
+        }
+        if !host_children(&parent)?
+            .iter()
+            .any(|child| !child.entry.is_dir && child.entry.host_name == name)
+        {
+            return Err(MountError::NotFound(path.to_owned()));
+        }
+        let file = WritableFile {
+            root: Arc::clone(&directory.root),
+            parents: parents.iter().map(|name| (*name).to_owned()).collect(),
+            name: name.to_owned(),
+            transaction: Arc::clone(&directory.transaction),
+            writable,
+            _session: directory.session.clone(),
+        };
+        if writable {
+            writable_file_metadata(&parent, name)?;
+        } else {
+            file.open_reader()?;
+        }
+        Ok(file)
+    }
+
     /// Open a live read-only handle in a directory with explicitly enabled writes.
     pub fn open_readable_file(&self, path: &str) -> Result<WritableFile> {
         let directory = self.writable()?;

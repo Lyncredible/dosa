@@ -80,7 +80,7 @@ impl Machine {
             media: fingerprints(&self.mounts)?,
             state: self.state,
             pending: self.pending.clone(),
-            files: self.files.snapshot().map_err(Unavailable)?,
+            files: self.files.snapshot(&self.mounts).map_err(Unavailable)?,
             environment: self
                 .environment
                 .variables()
@@ -169,7 +169,7 @@ impl Machine {
         }
         let session_clock =
             clock::SessionClock::from_snapshot(state.session_clock).ok_or(Invalid)?;
-        let files = DosFiles::from_snapshot(state.files).ok_or(Invalid)?;
+        let files = DosFiles::from_snapshot(state.files, &self.mounts).ok_or(Invalid)?;
         let audio = audio::Audio::from_snapshot(state.audio, state.elapsed).ok_or(Invalid)?;
         let mut video = Adapter::from_snapshot(state.video).ok_or(Invalid)?;
         let mut cpu = Cpu::with_profile(state.profile);
