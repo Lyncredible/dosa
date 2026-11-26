@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use dosa_desktop::{
-    App, CpuMode, Frame, GamepadState, Input, Key, MenuAction, MenuState, PointerEvent,
-    PointerMode, Scaling, Speed, StateSlot, TextMode, Volume,
+    App, AudioDevice, CpuMode, Frame, GamepadState, Input, Key, MenuAction, MenuState,
+    PointerEvent, PointerMode, Scaling, Speed, StateSlot, TextMode, Volume,
 };
-use dosa_dos::{CpuProfile, JoystickState, MouseCursor, RunState, TextFrame, Video};
+use dosa_dos::{AudioLevels, CpuProfile, JoystickState, MouseCursor, RunState, TextFrame, Video};
 use dosa_mount::Mount;
 
 use crate::shell::{Command, MAX_DESKTOP_SNAPSHOT_BYTES, PAUSE_MESSAGE, Shell};
@@ -43,6 +43,7 @@ pub struct Desktop {
     paused: bool,
     inspecting: bool,
     volume: Volume,
+    device_volumes: [Volume; 4],
     muted: bool,
     recording: Option<Recording>,
     scaling: Scaling,
@@ -117,6 +118,7 @@ impl Desktop {
             paused: false,
             inspecting: false,
             volume: Volume::default(),
+            device_volumes: [Volume::Full; 4],
             muted: false,
             recording: None,
             scaling: Scaling::default(),
@@ -692,6 +694,7 @@ impl App for Desktop {
             cpu: self.settings.cpu,
             speed: self.settings.speed,
             volume: self.volume,
+            device_volumes: self.device_volumes,
             muted: self.muted,
             recording: self.recording.is_some(),
             text_mode: self.settings.text_mode,
@@ -831,6 +834,15 @@ impl App for Desktop {
             }
             MenuAction::SetSpeed(speed) => self.settings.speed = speed,
             MenuAction::SetVolume(volume) => self.volume = volume,
+            MenuAction::SetDeviceVolume(device, volume) => {
+                self.device_volumes[device as usize] = volume;
+                self.shell.machine.set_audio_levels(AudioLevels {
+                    speaker: self.device_volumes[AudioDevice::Speaker as usize] as u8,
+                    adlib: self.device_volumes[AudioDevice::AdLib as usize] as u8,
+                    sound_blaster: self.device_volumes[AudioDevice::SoundBlaster as usize] as u8,
+                    midi: self.device_volumes[AudioDevice::Midi as usize] as u8,
+                });
+            }
             MenuAction::SetMuted(muted) => self.muted = muted,
             MenuAction::StartRecording(path) if self.recording.is_none() => {
                 match Recording::start(path) {
@@ -1745,6 +1757,16 @@ mod tests {
         desktop.menu_action(MenuAction::SetMuted(false));
         assert!(!desktop.menu().muted);
         assert_eq!(desktop.menu().volume, Volume::Half);
+        desktop.menu_action(MenuAction::SetDeviceVolume(AudioDevice::AdLib, Volume::Off));
+        desktop.menu_action(MenuAction::ResetGuest);
+        assert_eq!(
+            desktop.menu().device_volumes[AudioDevice::AdLib as usize],
+            Volume::Off
+        );
+        assert_eq!(
+            desktop.menu().device_volumes[AudioDevice::Midi as usize],
+            Volume::Full
+        );
     }
 
     #[test]

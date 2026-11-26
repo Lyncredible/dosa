@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use dosa::display::Desktop;
 use dosa::shell::Shell;
 use dosa_desktop::{
-    App, Frame, Input, Key, MenuAction, MenuState, MountKind, PointerEvent, PointerMode, Scaling,
+    App, AudioDevice, Frame, Input, Key, MenuAction, MenuState, MountKind, PointerEvent,
+    PointerMode, Scaling, Volume,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -97,6 +98,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some(path) = &wav_path {
         desktop.menu_action(MenuAction::SetMuted(true));
+        desktop.menu_action(MenuAction::SetDeviceVolume(
+            AudioDevice::SoundBlaster,
+            Volume::Half,
+        ));
         desktop.menu_action(MenuAction::StartRecording(path.clone()));
         assert!(desktop.menu().recording);
     }
@@ -134,7 +139,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             wav[44..]
                 .as_chunks::<2>()
                 .0
-                .contains(&(-8192i16).to_le_bytes())
+                .contains(&(-4096i16).to_le_bytes())
         );
     }
     println!(

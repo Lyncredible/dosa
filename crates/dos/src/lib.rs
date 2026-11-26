@@ -3,6 +3,7 @@
 mod adlib;
 mod ansi;
 mod audio;
+pub use audio::AudioLevels;
 mod bios;
 mod boot_disk;
 mod clock;
@@ -314,6 +315,7 @@ impl Machine {
     /// Reset the guest CPU and devices while retaining media, the profile, and the shell environment.
     pub fn reset(&mut self) {
         let ansi = self.video.ansi.is_some();
+        let audio_levels = self.audio.levels;
         let mut mpu = std::mem::take(&mut self.audio.mpu);
         mpu.reset();
         let mut gameport = std::mem::take(&mut self.gameport);
@@ -328,6 +330,7 @@ impl Machine {
         };
         self.set_ansi_text(ansi);
         self.audio.mpu = mpu;
+        self.audio.set_levels(audio_levels);
     }
 
     /// Configure the MPU-401 UART and its SoundFont synthesizer while the guest is idle.
@@ -826,6 +829,11 @@ impl Machine {
     /// Drain mono PC audio at 48 kHz. The queue retains at most 200 milliseconds.
     pub fn take_audio(&mut self) -> Vec<f32> {
         self.audio.drain()
+    }
+
+    /// Adjust the host mix without modifying the guest audio devices.
+    pub fn set_audio_levels(&mut self, levels: AudioLevels) {
+        self.audio.set_levels(levels);
     }
 
     pub fn stop(&mut self) {

@@ -8,7 +8,7 @@ Dosa already has drive mounting, CPU and speed menus, TOML launch profiles, full
 | --- | --- |
 | Drive information and unmount | Implemented. The Drives menu shows source type and access mode and allows unmounting while idle. Regressions verify keyboard selection, batch locking, prompt fallback, and remounting. |
 | Quick launch | Implemented. Pick a COM, EXE, or BAT from Drives. Its folder is temporarily mounted read-only on an unused drive. Tests cover sibling resources, nested batch calls, guest errors, and prompt restoration. Native picker interaction remains in [task 14](14-integration.md). |
-| Sound controls | Master mute and volume implemented through the Audio menu. Callback tests verify gain changes on queued audio and that mute keeps the sample queue advancing. Per-device levels remain planned. |
+| Sound controls | Master mute and volume implemented through the Audio menu. Callback tests verify gain changes on queued audio and that mute keeps the sample queue advancing. The Audio menu also cycles PC speaker, AdLib, Sound Blaster, and MIDI levels independently. These gains apply before recording and native output. The mixer keeps the guest devices running at every level. |
 | Text clipboard | Implemented. Edit copies the visible CP437 text screen and pastes through the BIOS keyboard queue with backpressure. Tests cover clipboard text conversion, editable shell paste, queue bounds, cancellation, and guest exit cleanup. |
 | Display scaling | Implemented. View selects aspect-corrected fit or whole-pixel scaling with a fit fallback. The pointer uses the last presented viewport. Tests cover high-DPI geometry, mouse edges, and small surfaces. |
 
