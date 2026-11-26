@@ -88,6 +88,8 @@ pub enum MenuAction {
     LoadGuestState(PathBuf),
     SaveStateSlot(StateSlot),
     LoadStateSlot(StateSlot),
+    SetAutomaticSave(bool),
+    LoadAutomaticSave,
     StartRecording(PathBuf),
     StopRecording,
     Mount {
@@ -127,6 +129,7 @@ pub struct MenuState {
     pub batch_active: bool,
     pub save_state_blocked: bool,
     pub state_slots_available: bool,
+    pub automatic_save: bool,
     pub text_visible: bool,
     pub paste_pending: bool,
     pub paused: bool,
@@ -152,6 +155,7 @@ impl Default for MenuState {
             batch_active: false,
             save_state_blocked: false,
             state_slots_available: false,
+            automatic_save: false,
             text_visible: false,
             paste_pending: false,
             paused: false,
@@ -739,6 +743,20 @@ pub(crate) fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool
                 ),
             ]
         })
+        .chain([
+            item(
+                "Automatic save",
+                Command::App(MenuAction::SetAutomaticSave(!state.automatic_save)),
+                state.state_slots_available,
+                state.automatic_save,
+            ),
+            item(
+                "Load automatic save",
+                Command::App(MenuAction::LoadAutomaticSave),
+                state.state_slots_available,
+                false,
+            ),
+        ])
         .collect(),
         Tab::Edit => vec![
             item(
@@ -1134,8 +1152,8 @@ mod tests {
                 ..Default::default()
             };
             let items = options(Tab::StateSlots, &state, 'C', false);
-            assert_eq!(items.len(), 6);
-            for (items, slot) in items.as_chunks::<2>().0.iter().zip([
+            assert_eq!(items.len(), 8);
+            for (items, slot) in items[..6].as_chunks::<2>().0.iter().zip([
                 StateSlot::One,
                 StateSlot::Two,
                 StateSlot::Three,
