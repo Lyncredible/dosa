@@ -12,6 +12,7 @@ mod copy;
 mod delete;
 mod directory;
 mod for_loop;
+mod loadhigh;
 mod pending_input;
 mod pipeline;
 mod prompt;
@@ -341,6 +342,9 @@ impl Shell {
             "HELP" if args.eq_ignore_ascii_case("VOL") => volume::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("DIR") => directory::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("COPY") => copy::HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("LH") || args.eq_ignore_ascii_case("LOADHIGH") => {
+                loadhigh::HELP.as_bytes().to_vec()
+            }
             "HELP" if args.eq_ignore_ascii_case("DEL") || args.eq_ignore_ascii_case("ERASE") => {
                 delete::HELP.as_bytes().to_vec()
             }
@@ -357,6 +361,7 @@ impl Shell {
                 TYPE file                  Print a file\r\n\
                 SET [variable=[value]]     Display or change environment variables\r\n\
                 PATH [directories]         Set the executable search path\r\n\
+                LH program [arguments]     Run a program (LOADHIGH)\r\n\
                 PROMPT [text]               Customize the DOS prompt\r\n\
                 MOUNT drive path           Mount host files or images (see HELP MOUNT)\r\n\
                 IMGSWAP [drive]            Advance to the next ISO in the set\r\n\
@@ -462,6 +467,7 @@ impl Shell {
             "DEL" | "ERASE" => return self.delete(args),
             "MOUNT" => self.mount_command(args, false)?,
             "IMGMOUNT" => self.mount_command(args, true)?,
+            "LH" | "LOADHIGH" => return self.load_high(args, io),
             "IMGSWAP" => {
                 if args == "/?" {
                     IMGSWAP_HELP.as_bytes().to_vec()
@@ -497,27 +503,36 @@ impl Shell {
                     self.drive = drive;
                     return Ok(Command::Prompt);
                 }
-                let (drive, executable) = self.find_program(word, &["COM", "EXE", "BAT"])?;
-                if batch::is_batch(&executable) {
-                    self.launch_batch(drive, &executable, word, args, false, io.take())?;
-                    return Ok(Command::Prompt);
-                }
-                if let Some(io) = io.take() {
-                    self.machine
-                        .launch_with_shell_io(drive, &executable, args, io)?;
-                } else {
-                    self.machine.launch_from_shell(
-                        drive,
-                        &executable,
-                        args,
-                        self.drive,
-                        &self.directories,
-                    )?;
-                }
-                return Ok(Command::Launched);
+                return self.launch_program(word, args, io);
             }
         };
         Ok(Command::Print(output))
+    }
+
+    fn launch_program(
+        &mut self,
+        name: &str,
+        args: &str,
+        io: &mut Option<ShellIo>,
+    ) -> Result<Command, Box<dyn Error>> {
+        let (drive, executable) = self.find_program(name, &["COM", "EXE", "BAT"])?;
+        if batch::is_batch(&executable) {
+            self.launch_batch(drive, &executable, name, args, false, io.take())?;
+            return Ok(Command::Prompt);
+        }
+        if let Some(io) = io.take() {
+            self.machine
+                .launch_with_shell_io(drive, &executable, args, io)?;
+        } else {
+            self.machine.launch_from_shell(
+                drive,
+                &executable,
+                args,
+                self.drive,
+                &self.directories,
+            )?;
+        }
+        Ok(Command::Launched)
     }
 
     fn set_variable(&mut self, args: &str) -> Result<Command, Box<dyn Error>> {
