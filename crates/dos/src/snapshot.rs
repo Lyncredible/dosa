@@ -545,8 +545,8 @@ mod tests {
         directory.write("LOOP.COM", &[0xeb, 0xfe]);
         let mut machine = directory.machine();
         machine.launch('C', "LOOP.COM", "").unwrap();
-        machine.clock = Instant::now() - Duration::from_millis(40);
-        let start = Duration::from_millis(1);
+        let started = machine.elapsed();
+        let start = started + Duration::from_millis(1);
         let write = |m: &mut Machine, address, value, at| {
             assert!(m.audio.write_port(0x388, address, at, &mut m.cpu));
             assert!(m.audio.write_port(0x389, value, at, &mut m.cpu));
@@ -565,19 +565,19 @@ mod tests {
         ] {
             write(&mut machine, register, value, start);
         }
-        let change = Duration::from_millis(20);
+        let change = started + Duration::from_millis(20);
         write(&mut machine, 0xa0, 0xcc, change);
         machine
             .audio
-            .advance(Duration::from_millis(35), &machine.cpu);
+            .advance(started + Duration::from_millis(35), &machine.cpu);
         machine.take_audio();
-        machine.set_paused(true);
+        machine.paused_since = Some(machine.clock + started + Duration::from_millis(40));
         let state = machine.save_guest().unwrap();
         assert_eq!(&state[8..10], &VERSION_ADLIB_REPLAY.to_le_bytes());
 
         let mut restored = directory.machine();
         restored.load_guest(&state).unwrap();
-        let end = Duration::from_millis(46);
+        let end = started + Duration::from_millis(46);
         machine.audio.advance(end, &machine.cpu);
         restored.audio.advance(end, &restored.cpu);
         let expected = machine.take_audio();
