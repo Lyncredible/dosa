@@ -15,6 +15,10 @@ pub(super) struct Mpu401 {
 }
 
 impl Mpu401 {
+    pub(super) fn configured(&self) -> bool {
+        self.synth.is_some()
+    }
+
     pub(super) fn load(&mut self, source: &mut impl Read) -> Result<(), Box<dyn Error>> {
         let font = Arc::new(SoundFont::new(source)?);
         let settings = SynthesizerSettings::new(crate::AUDIO_SAMPLE_RATE as i32);

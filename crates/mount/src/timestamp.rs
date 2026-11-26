@@ -1,10 +1,30 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A DOS-compatible modification date and time, with two-second precision.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "(u16, u16)", into = "(u16, u16)")]
 pub struct DosTimestamp {
     date: u16,
     time: u16,
+}
+
+impl TryFrom<(u16, u16)> for DosTimestamp {
+    type Error = &'static str;
+
+    fn try_from((date, time): (u16, u16)) -> Result<Self, Self::Error> {
+        let packed = Self { date, time };
+        let (year, month, day) = packed.date();
+        let (hour, minute, second) = packed.time();
+        Self::from_fields(year, month, day, hour, minute, second).ok_or("invalid DOS timestamp")
+    }
+}
+
+impl From<DosTimestamp> for (u16, u16) {
+    fn from(timestamp: DosTimestamp) -> Self {
+        timestamp.packed()
+    }
 }
 
 impl DosTimestamp {

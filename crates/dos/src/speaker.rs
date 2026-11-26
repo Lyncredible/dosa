@@ -2,6 +2,7 @@
 
 use crate::pit::{BIOS_DIVISOR, Period, decode_count, encode_bcd, read_back_selects};
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct Speaker {
     now: u64,
     period: Option<Period>,
@@ -15,6 +16,18 @@ pub(super) struct Speaker {
 }
 
 impl Speaker {
+    pub(super) fn valid_snapshot(&self, elapsed: std::time::Duration) -> bool {
+        let now = crate::pit::ticks(elapsed);
+        let horizon = now.saturating_add(BIOS_DIVISOR + 1);
+        self.now <= now
+            && self
+                .period
+                .is_none_or(|period| period.valid_snapshot(horizon))
+            && self
+                .reload
+                .is_none_or(|period| period.valid_snapshot(horizon))
+    }
+
     pub fn new(now: u64) -> Self {
         Self {
             now,

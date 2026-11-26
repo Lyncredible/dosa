@@ -10,7 +10,31 @@ pub(super) struct Adlib {
     synth: Option<Opl2>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct AdlibSnapshot {
+    address: u8,
+    timers: [Timer; 2],
+}
+
 impl Adlib {
+    pub(super) fn snapshot(&self) -> Option<AdlibSnapshot> {
+        self.synth.is_none().then_some(AdlibSnapshot {
+            address: self.address,
+            timers: self.timers,
+        })
+    }
+
+    pub(super) fn from_snapshot(state: AdlibSnapshot) -> Option<Self> {
+        if state.timers[0].quantum != 80 || state.timers[1].quantum != 320 {
+            return None;
+        }
+        Some(Self {
+            address: state.address,
+            timers: state.timers,
+            synth: None,
+        })
+    }
+
     pub fn new() -> Self {
         Self {
             address: 0,
@@ -75,6 +99,7 @@ impl Adlib {
     }
 }
 
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Timer {
     quantum: u64,
     counter: u8,

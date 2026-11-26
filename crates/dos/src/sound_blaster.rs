@@ -9,6 +9,7 @@ use crate::{audio::SAMPLE_RATE, dma::Dma};
 pub(super) const IRQ: u8 = 7;
 pub(super) const ENVIRONMENT: &str = "BLASTER=A220 I7 D1 T3";
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct SoundBlaster {
     reset: bool,
     response: VecDeque<u8>,
@@ -27,6 +28,7 @@ pub(super) struct SoundBlaster {
     identification_pending: bool,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Command {
     opcode: u8,
     args: [u8; 2],
@@ -34,6 +36,7 @@ struct Command {
     length: usize,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Transfer {
     remaining: u64,
     auto_init: bool,
@@ -64,6 +67,20 @@ impl Default for SoundBlaster {
 }
 
 impl SoundBlaster {
+    pub(super) fn valid_snapshot(&self) -> bool {
+        (1..=256).contains(&self.period_us)
+            && (1..=65_536).contains(&self.block_size)
+            && self.phase < 256 * SAMPLE_RATE
+            && self.response.len() <= 2
+            && self.pending.as_ref().is_none_or(|command| {
+                command.length <= command.args.len() && command.received < command.length
+            })
+            && self
+                .transfer
+                .as_ref()
+                .is_none_or(|transfer| (1..=65_536).contains(&transfer.remaining))
+    }
+
     pub fn read_port(&mut self, port: u16) -> Option<u8> {
         match port {
             0x22a => Some(self.response.pop_front().unwrap_or(0xff)),

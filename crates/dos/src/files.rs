@@ -8,6 +8,10 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+#[path = "file_snapshot.rs"]
+mod snapshot;
+pub(crate) use snapshot::FilesSnapshot;
+
 const MAX_OPEN_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_HANDLES: u16 = 64;
 
@@ -26,7 +30,7 @@ struct File {
     device_info: u16,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DosDevice {
     Console,
     Null,
@@ -54,7 +58,7 @@ impl DosDevice {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DeviceHandle {
     pub(crate) device: DosDevice,
     pub(crate) readable: bool,

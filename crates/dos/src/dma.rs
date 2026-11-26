@@ -2,6 +2,7 @@
 
 use dosa_cpu::Cpu;
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct Dma {
     address: u16,
     count: u16,

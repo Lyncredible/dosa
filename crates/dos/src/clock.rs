@@ -7,6 +7,21 @@ const SECONDS_PER_DAY: u64 = 86_400;
 pub(crate) struct SessionClock(Option<(DosClock, Instant)>);
 
 impl SessionClock {
+    pub(super) fn snapshot(self) -> Option<Duration> {
+        self.0.map(|_| self.now().0)
+    }
+
+    pub(super) fn from_snapshot(base: Option<Duration>) -> Option<Self> {
+        let mut clock = Self::default();
+        if let Some(base) = base {
+            if base.as_secs() >= 4_200_000_000 {
+                return None;
+            }
+            clock.set(base);
+        }
+        Some(clock)
+    }
+
     pub(crate) fn now(self) -> DosClock {
         match self.0 {
             Some((base, anchor)) => DosClock(base.0 + anchor.elapsed()),
