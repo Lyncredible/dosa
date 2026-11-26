@@ -3,7 +3,7 @@ use std::process::Command;
 
 use dosa::display::Desktop;
 use dosa::shell::{Command as ShellCommand, Shell};
-use dosa_desktop::{App, MenuAction, MountKind};
+use dosa_desktop::{App, Input, Key, MenuAction, MountKind};
 use dosa_mount::Mount;
 
 const SECTOR: usize = 2048;
@@ -389,4 +389,95 @@ fn dos_program_sends_mscdex_driver_requests_to_the_selected_iso() {
 
 fn expect(program: &mut Vec<u8>, jump_if_passed: u8, error: u8) {
     program.extend([jump_if_passed, 5, 0xb8, error, 0x4c, 0xcd, 0x21]);
+}
+
+#[test]
+fn desktop_swaps_iso_during_a_guest_and_reports_media_change_once() {
+    let scratch = tempfile::tempdir().unwrap();
+    let first = scratch.path().join("first.iso");
+    let second = scratch.path().join("second.iso");
+    let before = fixture();
+    let mut after = before.clone();
+    after[24 * SECTOR..24 * SECTOR + 3].copy_from_slice(b"NEW");
+    fs::write(&first, &before).unwrap();
+    fs::write(&second, &after).unwrap();
+    fs::write(scratch.path().join("invalid.iso"), b"truncated").unwrap();
+
+    fn expect_media(program: &mut Vec<u8>, value: u8, error: u8) {
+        program.extend([
+            0xb8, 0x10, 0x15, 0xbb, 0, 0x10, 0xb9, 3, 0, 0xcd, 0x2f, // Packet at ES:1000h
+            0x80, 0x3e, 1, 0x20, value, // CMP byte [2001h],value
+        ]);
+        expect(program, 0x74, error);
+    }
+    fn expect_sector(program: &mut Vec<u8>, value: [u8; 2], error: u8) {
+        program.extend([
+            0xb8, 8, 0x15, 0xbb, 0, 0x30, 0xb9, 3, 0, 0xba, 1, 0, 0x31, 0xf6, 0xbf, 24, 0, 0xcd,
+            0x2f, // Read sector 24 to ES:3000h
+            0x81, 0x3e, 0, 0x30, value[0], value[1],
+        ]);
+        expect(program, 0x74, error);
+    }
+    let mut probe = vec![
+        0xc7, 0x06, 0, 0x10, 26, 0, // Packet length
+        0xc6, 0x06, 2, 0x10, 3, // IOCTL input
+        0xc7, 0x06, 14, 0x10, 0, 0x20, // Control buffer at DS:2000h
+        0x8c, 0x1e, 16, 0x10, // MOV [1010h],DS
+        0xc7, 0x06, 18, 0x10, 2, 0, // Two control bytes
+        0xc6, 0x06, 0, 0x20, 9, // Query media change
+    ];
+    expect_sector(&mut probe, *b"IS", 1);
+    expect_media(&mut probe, 1, 2);
+    probe.extend([0x31, 0xc0, 0xcd, 0x16]); // Wait for host swap and Enter.
+    expect_media(&mut probe, 0xff, 3);
+    expect_media(&mut probe, 1, 4);
+    expect_sector(&mut probe, *b"NE", 5);
+    probe.extend([0xb8, 0, 0x4c, 0xcd, 0x21]);
+    fs::write(scratch.path().join("PROBE.COM"), probe).unwrap();
+    fs::write(
+        scratch.path().join("SWAP.BAT"),
+        b"@ECHO OFF\r\nPROBE\r\nIF ERRORLEVEL 1 GOTO FAIL\r\nECHO SWAPPED>RESULT.TXT\r\nGOTO END\r\n:FAIL\r\nECHO FAILED AT CHECK %ERRORLEVEL%>RESULT.TXT\r\n:END\r\n",
+    )
+    .unwrap();
+    let mut shell = Shell::new();
+    shell
+        .mount('C', Mount::open_writable_directory(scratch.path()).unwrap())
+        .unwrap();
+    shell
+        .mount('D', Mount::open_iso_image(&first).unwrap())
+        .unwrap();
+    let mut desktop = Desktop::new(shell, Some("SWAP.BAT"));
+    desktop.tick();
+    desktop.tick();
+    assert!(desktop.menu().running && desktop.menu().iso_drives.contains(&'D'));
+    desktop.menu_action(MenuAction::Mount {
+        drive: 'D',
+        source: scratch.path().join("invalid.iso"),
+        kind: MountKind::SwapIso,
+    });
+    assert!(desktop.menu().status.starts_with("ISO swap failed"));
+    assert!(desktop.menu().running);
+    desktop.menu_action(MenuAction::Mount {
+        drive: 'D',
+        source: second.clone(),
+        kind: MountKind::SwapIso,
+    });
+    assert_eq!(desktop.menu().status, "Swapped ISO in D:");
+    desktop.input(Input {
+        key: Key::Enter,
+        pressed: true,
+        text: None,
+        scan_code: 0x1c,
+        modifiers: Default::default(),
+    });
+    for _ in 0..4 {
+        desktop.tick();
+    }
+    assert!(!desktop.menu().running);
+    assert_eq!(
+        fs::read_to_string(scratch.path().join("RESULT.TXT")).unwrap(),
+        "SWAPPED\r\n"
+    );
+    assert_eq!(fs::read(first).unwrap(), before);
+    assert_eq!(fs::read(second).unwrap(), after);
 }

@@ -165,7 +165,13 @@ impl Machine {
                 (1, 4)
             }
             9 if fits(2) => {
-                result[0] = 1; // The guest cannot swap the mounted ISO.
+                let drive = 1 << regs.cx;
+                result[0] = if self.iso_media_changed & drive != 0 {
+                    0xff
+                } else {
+                    1
+                };
+                self.iso_media_changed &= !drive;
                 (1, 1)
             }
             6..=9 => return Err(BAD_REQUEST_LENGTH),

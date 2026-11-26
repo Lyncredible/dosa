@@ -120,6 +120,13 @@ impl Shell {
         Ok(())
     }
 
+    pub(crate) fn swap_iso(&mut self, drive: char, mount: Mount) -> Result<(), dosa_dos::DosError> {
+        let drive = drive.to_ascii_uppercase();
+        self.machine.swap_iso(drive, mount)?;
+        self.directories.insert(drive, String::new());
+        Ok(())
+    }
+
     pub(crate) fn command_active(&self) -> bool {
         self.batch_active() || self.input_waiting() || !self.pipelines.is_empty()
     }
