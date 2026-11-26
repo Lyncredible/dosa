@@ -11,7 +11,7 @@ const SECTOR_NOT_FOUND: u8 = 4;
 const DMA_BOUNDARY: u8 = 9;
 const READ_FAILURE: u8 = 0x20;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BootDrive {
     Floppy,
     HardDisk,
@@ -37,7 +37,58 @@ pub(super) struct BootDisk {
     status: u8,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct DiskSnapshot {
+    pub media: DiskIdentity,
+    pub status: u8,
+}
+
+#[derive(PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct DiskIdentity {
+    drive: BootDrive,
+    sectors: u64,
+    checksum: u32,
+}
+
 impl BootDisk {
+    pub(super) fn media_bytes(&self) -> u64 {
+        self.sectors * SECTOR_BYTES as u64
+    }
+
+    pub(super) fn snapshot(&self) -> io::Result<DiskSnapshot> {
+        let length = self.media_bytes();
+        let mut file = self.file.try_clone()?;
+        if file.metadata()?.len() != length {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "boot image length changed",
+            ));
+        }
+        file.rewind()?;
+        let mut hasher = crc32fast::Hasher::new();
+        let mut buffer = [0; 64 * 1024];
+        let mut remaining = length;
+        while remaining != 0 {
+            let count = remaining.min(buffer.len() as u64) as usize;
+            let chunk = &mut buffer[..count];
+            file.read_exact(chunk)?;
+            hasher.update(chunk);
+            remaining -= count as u64;
+        }
+        Ok(DiskSnapshot {
+            media: DiskIdentity {
+                drive: self.drive,
+                sectors: self.sectors,
+                checksum: hasher.finalize(),
+            },
+            status: self.status,
+        })
+    }
+
+    pub(super) fn restore_status(&mut self, status: u8) {
+        self.status = status;
+    }
+
     pub fn open(mut file: File, drive: BootDrive) -> io::Result<(Self, [u8; SECTOR_BYTES])> {
         let metadata = file.metadata()?;
         let length = metadata.len();
