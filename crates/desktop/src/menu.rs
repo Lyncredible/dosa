@@ -84,6 +84,8 @@ pub enum MenuAction {
     StopPaste,
     QuickLaunch(PathBuf),
     SaveScreenshot(PathBuf),
+    SaveGuestState(PathBuf),
+    LoadGuestState(PathBuf),
     StartRecording(PathBuf),
     StopRecording,
     Mount {
@@ -206,6 +208,7 @@ impl Panel {
 pub(crate) enum Command {
     QuickLaunch,
     Screenshot,
+    GuestState { save: bool },
     RecordAudio,
     Mount(MountKind, char),
     Fullscreen,
@@ -875,6 +878,18 @@ pub(crate) fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool
                 state.running,
                 false,
             ));
+            items.push(item(
+                "Save state...",
+                Command::GuestState { save: true },
+                state.running && !state.batch_active,
+                false,
+            ));
+            items.push(item(
+                "Load state...",
+                Command::GuestState { save: false },
+                !state.batch_active,
+                false,
+            ));
             items.push(item("Save screenshot...", Command::Screenshot, true, false));
             items.push(item("Exit", Command::App(MenuAction::Exit), true, false));
             items
@@ -1032,6 +1047,29 @@ mod tests {
             (true, Some(Command::Mount(MountKind::SessionZip, 'Z')))
         );
         assert!(!menu.blocks_pointer());
+    }
+
+    #[test]
+    fn save_and_load_commands_follow_the_guest_and_batch_state() {
+        for (running, batch_active, enabled) in [
+            (false, false, [false, true]),
+            (true, false, [true, true]),
+            (true, true, [false, false]),
+        ] {
+            let state = MenuState {
+                running,
+                batch_active,
+                ..Default::default()
+            };
+            let commands: Vec<_> = options(Tab::View, &state, 'C', false)
+                .into_iter()
+                .filter_map(|item| match item.command {
+                    Command::GuestState { save } => Some((save, item.enabled)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(commands, [(true, enabled[0]), (false, enabled[1])]);
+        }
     }
 
     #[test]

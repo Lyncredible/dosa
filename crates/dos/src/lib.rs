@@ -38,7 +38,7 @@ mod tests;
 
 pub use gameport::JoystickState;
 pub use mouse::MouseCursor;
-pub use snapshot::GuestSnapshotError;
+pub use snapshot::{GuestSnapshotError, MAX_GUEST_SNAPSHOT_BYTES};
 pub use video::{TextFrame, Video};
 
 use bios::{Hook, TIMER_VECTOR};
@@ -427,6 +427,10 @@ impl Machine {
         }
         self.cpu_profile = profile;
         Ok(())
+    }
+
+    pub fn cpu_profile(&self) -> CpuProfile {
+        self.cpu_profile
     }
 
     pub fn set_paused(&mut self, paused: bool) {

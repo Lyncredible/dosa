@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 const MAGIC: &[u8; 8] = b"DOSAGST\0";
 const VERSION: u16 = 1;
 const HEADER_BYTES: usize = 18;
-const MAX_BYTES: usize = 300 * 1024 * 1024;
+/// Maximum size in bytes of a serialized guest save state.
+pub const MAX_GUEST_SNAPSHOT_BYTES: usize = 300 * 1024 * 1024;
 const MAX_ELAPSED: Duration = Duration::from_secs(366 * 86_400);
 const MAX_MEDIA_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_MEDIA_ENTRIES: usize = 32_768;
@@ -107,7 +108,7 @@ impl Machine {
         let mut metadata = postcard::to_allocvec(&state).map_err(|_| Invalid)?;
         let cpu = self.cpu.save_snapshot()?;
         let metadata_len = u32::try_from(metadata.len()).map_err(|_| Invalid)?;
-        if HEADER_BYTES + metadata.len() + cpu.len() > MAX_BYTES {
+        if HEADER_BYTES + metadata.len() + cpu.len() > MAX_GUEST_SNAPSHOT_BYTES {
             return Err(Unavailable("the guest save state is too large"));
         }
         let mut checksum = crc32fast::Hasher::new();
@@ -129,7 +130,8 @@ impl Machine {
         if self.audio.mpu.configured() {
             return Err(Unavailable("MIDI synthesis is configured"));
         }
-        if !(HEADER_BYTES..=MAX_BYTES).contains(&bytes.len()) || &bytes[..8] != MAGIC {
+        if !(HEADER_BYTES..=MAX_GUEST_SNAPSHOT_BYTES).contains(&bytes.len()) || &bytes[..8] != MAGIC
+        {
             return Err(Invalid);
         }
         let version = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
