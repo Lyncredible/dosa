@@ -17,6 +17,7 @@ const VERSION_LEGACY: u16 = 1;
 const VERSION_ADLIB_REPLAY: u16 = 2;
 const VERSION_BOOT_MEDIA: u16 = 3;
 const VERSION_MIDI: u16 = 4;
+const VERSION_OPTICAL_CHANGE: u16 = 5;
 const HEADER_BYTES: usize = 18;
 /// Maximum size in bytes of a serialized guest save state.
 pub const MAX_GUEST_SNAPSHOT_BYTES: usize = 300 * 1024 * 1024;
@@ -195,21 +196,26 @@ impl Machine {
             .as_ref()
             .map(BootDisk::snapshot)
             .transpose()?;
-        let version = match (boot, replay, midi) {
-            (boot, replay, Some(midi)) => {
+        let version = match (boot, replay, midi, self.iso_media_changed) {
+            (boot, replay, midi, changed) if changed != 0 => {
+                metadata = postcard::to_extend(&(boot, replay, midi, changed), metadata)
+                    .map_err(|_| Invalid)?;
+                VERSION_OPTICAL_CHANGE
+            }
+            (boot, replay, Some(midi), _) => {
                 metadata =
                     postcard::to_extend(&(boot, replay, midi), metadata).map_err(|_| Invalid)?;
                 VERSION_MIDI
             }
-            (Some(disk), replay, None) => {
+            (Some(disk), replay, None, _) => {
                 metadata = postcard::to_extend(&(disk, replay), metadata).map_err(|_| Invalid)?;
                 VERSION_BOOT_MEDIA
             }
-            (None, Some(replay), None) => {
+            (None, Some(replay), None, _) => {
                 metadata = postcard::to_extend(replay, metadata).map_err(|_| Invalid)?;
                 VERSION_ADLIB_REPLAY
             }
-            (None, None, None) => VERSION_LEGACY,
+            (None, None, None, _) => VERSION_LEGACY,
         };
         let cpu = self.cpu.save_snapshot()?;
         let metadata_len = u32::try_from(metadata.len()).map_err(|_| Invalid)?;
@@ -290,7 +296,11 @@ impl Machine {
         let version = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
         if !matches!(
             version,
-            VERSION_LEGACY | VERSION_ADLIB_REPLAY | VERSION_BOOT_MEDIA | VERSION_MIDI
+            VERSION_LEGACY
+                | VERSION_ADLIB_REPLAY
+                | VERSION_BOOT_MEDIA
+                | VERSION_MIDI
+                | VERSION_OPTICAL_CHANGE
         ) {
             return Err(GuestSnapshotError::Version(version));
         }
@@ -303,13 +313,18 @@ impl Machine {
         }
         let (state, trailing): (State<'static>, _) =
             postcard::take_from_bytes(metadata).map_err(|_| Invalid)?;
-        let (boot, replay, midi) = match version {
-            VERSION_LEGACY if trailing.is_empty() => (None, None, None),
-            VERSION_ADLIB_REPLAY => (None, Some(decode_extension::<SynthReplay>(trailing)?), None),
+        let (boot, replay, midi, iso_media_changed) = match version {
+            VERSION_LEGACY if trailing.is_empty() => (None, None, None, 0),
+            VERSION_ADLIB_REPLAY => (
+                None,
+                Some(decode_extension::<SynthReplay>(trailing)?),
+                None,
+                0,
+            ),
             VERSION_BOOT_MEDIA => {
                 let (boot, replay) =
                     decode_extension::<(DiskSnapshot, Option<SynthReplay>)>(trailing)?;
-                (Some(boot), replay, None)
+                (Some(boot), replay, None, 0)
             }
             VERSION_MIDI => {
                 let (boot, replay, midi) = decode_extension::<(
@@ -317,8 +332,14 @@ impl Machine {
                     Option<SynthReplay>,
                     MidiSnapshot<MidiReplay>,
                 )>(trailing)?;
-                (boot, replay, Some(midi))
+                (boot, replay, Some(midi), 0)
             }
+            VERSION_OPTICAL_CHANGE => decode_extension::<(
+                Option<DiskSnapshot>,
+                Option<SynthReplay>,
+                Option<MidiSnapshot<MidiReplay>>,
+                u32,
+            )>(trailing)?,
             _ => return Err(Invalid),
         };
         if !state.state.is_active()
@@ -337,6 +358,16 @@ impl Machine {
         )? != state.media
         {
             return Err(MediaChanged);
+        }
+        let iso_drives = self.mounts.iter().fold(0, |mask, (&drive, mount)| {
+            if mount.iso_sector_count().is_some() {
+                mask | (1 << (drive as u8 - b'A'))
+            } else {
+                mask
+            }
+        });
+        if iso_media_changed & !iso_drives != 0 {
+            return Err(Invalid);
         }
         let boot_status = match (boot, &self.boot_disk) {
             (None, None) => None,
@@ -383,7 +414,7 @@ impl Machine {
             cpu_profile: state.profile,
             video,
             mounts: std::mem::take(&mut self.mounts),
-            iso_media_changed: self.iso_media_changed,
+            iso_media_changed,
             boot_disk,
             environment,
             files,

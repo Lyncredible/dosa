@@ -463,21 +463,31 @@ fn desktop_swaps_iso_during_a_guest_and_reports_media_change_once() {
         kind: MountKind::SwapIso,
     });
     assert_eq!(desktop.menu().status, "Swapped ISO in D:");
-    desktop.input(Input {
-        key: Key::Enter,
-        pressed: true,
-        text: None,
-        scan_code: 0x1c,
-        modifiers: Default::default(),
-    });
-    for _ in 0..4 {
-        desktop.tick();
-    }
-    assert!(!desktop.menu().running);
-    assert_eq!(
-        fs::read_to_string(scratch.path().join("RESULT.TXT")).unwrap(),
-        "SWAPPED\r\n"
-    );
+    let states = tempfile::tempdir().unwrap();
+    let save = states.path().join("pending.dosastate");
+    desktop.menu_action(MenuAction::SaveGuestState(save.clone()));
+    assert_eq!(desktop.menu().status, "State saved");
+
+    let result = scratch.path().join("RESULT.TXT");
+    let finish_probe = |desktop: &mut Desktop| {
+        desktop.input(Input {
+            key: Key::Enter,
+            pressed: true,
+            text: None,
+            scan_code: 0x1c,
+            modifiers: Default::default(),
+        });
+        for _ in 0..4 {
+            desktop.tick();
+        }
+        assert!(!desktop.menu().running);
+        assert_eq!(fs::read_to_string(&result).unwrap(), "SWAPPED\r\n");
+    };
+    finish_probe(&mut desktop);
+    fs::remove_file(&result).unwrap();
+    desktop.menu_action(MenuAction::LoadGuestState(save));
+    assert_eq!(desktop.menu().status, "State loaded");
+    finish_probe(&mut desktop);
     assert_eq!(fs::read(first).unwrap(), before);
     assert_eq!(fs::read(second).unwrap(), after);
 }
