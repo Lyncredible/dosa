@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dosa_desktop::{
     App, CpuMode, Frame, GamepadState, Input, Key, MenuAction, MenuState, PointerEvent,
@@ -33,6 +33,8 @@ const VGA: [[u8; 3]; 16] = [
 ];
 const BATCH_LINES_PER_TICK: usize = 64;
 const MAX_PASTE_CHARS: usize = 4096;
+const AUTOMATIC_SAVE_INTERVAL: Duration = Duration::from_secs(60);
+const AUTOMATIC_SAVE_FILE: &str = "automatic.dosastate";
 
 pub struct Desktop {
     shell: Shell,
@@ -50,6 +52,7 @@ pub struct Desktop {
     settings: Settings,
     status: String,
     state_slots: Option<PathBuf>,
+    next_automatic_save: Option<Instant>,
     exit: bool,
     width: u32,
     height: u32,
@@ -123,6 +126,7 @@ impl Desktop {
             settings,
             status: String::new(),
             state_slots: state_slot_directory(),
+            next_automatic_save: None,
             exit: false,
             width: 640,
             height: 400,
@@ -197,8 +201,7 @@ impl Desktop {
             .state_slots
             .as_deref()
             .ok_or("no local state directory")?;
-        std::fs::create_dir_all(directory)?;
-        save_guest_file(&self.shell, &slot_file(directory, slot))
+        save_local_state(&self.shell, directory, &slot_file(directory, slot))
     }
 
     fn load_state_slot(&mut self, slot: StateSlot) -> Result<(), Box<dyn std::error::Error>> {
@@ -208,6 +211,32 @@ impl Desktop {
             .ok_or("no local state directory")?;
         let path = slot_file(directory, slot);
         self.restore_state(&path)
+    }
+
+    fn save_automatically(&mut self, now: Instant) {
+        let (Some(directory), Some(next)) = (&self.state_slots, self.next_automatic_save) else {
+            return;
+        };
+        if !self.running || self.paused || !self.shell.supports_save_state() {
+            self.next_automatic_save = Some(now + AUTOMATIC_SAVE_INTERVAL);
+            return;
+        }
+        if now < next {
+            return;
+        }
+        self.next_automatic_save = Some(now + AUTOMATIC_SAVE_INTERVAL);
+        let result = save_local_state(&self.shell, directory, &directory.join(AUTOMATIC_SAVE_FILE));
+        if let Err(error) = result {
+            self.status = format!("Automatic save failed: {error}");
+        }
+    }
+
+    fn load_automatic_save(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = self
+            .state_slots
+            .as_ref()
+            .ok_or("no local state directory")?;
+        self.restore_state(&directory.join(AUTOMATIC_SAVE_FILE))
     }
 
     fn clipboard(&mut self) -> Result<&mut arboard::Clipboard, arboard::Error> {
@@ -626,6 +655,7 @@ impl App for Desktop {
             }
             self.advance_batch();
         }
+        self.save_automatically(Instant::now());
         self.render();
     }
 
@@ -670,6 +700,7 @@ impl App for Desktop {
             batch_active: self.shell.command_active(),
             save_state_blocked: !self.shell.supports_save_state(),
             state_slots_available: self.state_slots.is_some(),
+            automatic_save: self.next_automatic_save.is_some(),
             text_visible: matches!(self.shell.machine.video(), Video::Text(_)),
             paste_pending: !self.paste.is_empty(),
             paused: self.paused,
@@ -737,6 +768,22 @@ impl App for Desktop {
                 self.status = match self.load_state_slot(slot) {
                     Ok(()) => format!("Slot {} loaded", slot.number()),
                     Err(error) => format!("Load slot {} failed: {error}", slot.number()),
+                };
+            }
+            MenuAction::SetAutomaticSave(enabled) if self.state_slots.is_some() => {
+                self.next_automatic_save =
+                    enabled.then(|| Instant::now() + AUTOMATIC_SAVE_INTERVAL);
+                self.status = if enabled {
+                    "Automatic save on"
+                } else {
+                    "Automatic save off"
+                }
+                .into();
+            }
+            MenuAction::LoadAutomaticSave => {
+                self.status = match self.load_automatic_save() {
+                    Ok(()) => "Automatic save loaded".into(),
+                    Err(error) => format!("Load automatic save failed: {error}"),
                 };
             }
             MenuAction::Mount {
@@ -999,6 +1046,15 @@ fn state_slot_directory() -> Option<PathBuf> {
 
 fn slot_file(directory: &Path, slot: StateSlot) -> PathBuf {
     directory.join(format!("slot-{}.dosastate", slot.number()))
+}
+
+fn save_local_state(
+    shell: &Shell,
+    directory: &Path,
+    path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(directory)?;
+    save_guest_file(shell, path)
 }
 
 fn save_guest_file(shell: &Shell, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -2218,6 +2274,59 @@ mod tests {
         assert!(restored.menu().status.starts_with("Load slot 3 failed"));
         assert!(restored.menu().running && restored.menu().paused);
         restored.menu_action(MenuAction::SetPaused(false));
+        restored.tick();
+        assert_eq!(restored.shell.errorlevel(), b'X');
+    }
+
+    #[test]
+    fn desktop_automatic_save_checkpoints_a_running_guest_and_reopens_it() {
+        let media = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let directory = storage.path().join("states");
+        let checkpoint = directory.join(AUTOMATIC_SAVE_FILE);
+        std::fs::write(
+            media.path().join("WAIT.COM"),
+            [0xb4, 0, 0xcd, 0x16, 0xb4, 0x4c, 0xcd, 0x21],
+        )
+        .unwrap();
+        let desktop = |command| {
+            let mut shell = Shell::new();
+            shell
+                .mount('C', Mount::open(media.path()).unwrap())
+                .unwrap();
+            let mut desktop = Desktop::new(shell, command);
+            desktop.state_slots = Some(directory.clone());
+            desktop
+        };
+        let mut original = desktop(Some("WAIT.COM"));
+        original.tick();
+        assert!(original.menu().running);
+        assert!(!original.menu().automatic_save);
+        original.menu_action(MenuAction::SetAutomaticSave(true));
+        let due = original.next_automatic_save.unwrap();
+        assert!(original.menu().automatic_save);
+        original.save_automatically(due - Duration::from_millis(1));
+        assert!(!checkpoint.exists());
+        original.set_paused(true);
+        original.save_automatically(due);
+        assert!(!checkpoint.exists());
+        assert_eq!(
+            original.next_automatic_save,
+            Some(due + AUTOMATIC_SAVE_INTERVAL)
+        );
+        original.set_paused(false);
+        original.next_automatic_save = Some(Instant::now());
+        original.tick();
+        let saved = std::fs::read(&checkpoint).unwrap();
+        original.menu_action(MenuAction::SetAutomaticSave(false));
+        original.save_automatically(due + 2 * AUTOMATIC_SAVE_INTERVAL);
+        assert_eq!(std::fs::read(&checkpoint).unwrap(), saved);
+
+        let mut restored = desktop(None);
+        restored.menu_action(MenuAction::LoadAutomaticSave);
+        assert_eq!(restored.menu().status, "Automatic save loaded");
+        assert!(restored.menu().running && !restored.menu().paused);
+        restored.shell.machine.key(b'X', 0x2d);
         restored.tick();
         assert_eq!(restored.shell.errorlevel(), b'X');
     }
