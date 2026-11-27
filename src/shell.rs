@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use dosa_dos::{BootDrive, CodePage, DOS_VERSION, Machine, ShellIo};
+use dosa_dos::{BootDrive, CodePage, DOS_VERSION, DosDevice, Machine, ShellIo};
 use dosa_mount::Mount;
 
 mod batch;
@@ -46,6 +46,9 @@ const SET_HELP: &str =
 
 const CHCP_HELP: &str = "CHCP [number]\r\nShow or change the DOS console code page. Available pages are 437 and 850.\r\n";
 const BREAK_HELP: &str = "BREAK [ON | OFF]\r\nShow or set extended Ctrl+C checking.\r\n";
+const CTTY_HELP: &str = "CTTY CON | NUL\r\n\
+    Select the DOS terminal. CON uses the keyboard and screen. NUL discards output and has no input.\r\n\
+    Use NUL in a batch file with CTTY CON later, or reset Dosa to regain keyboard input.\r\n";
 const VER_HELP: &str = "VER\r\nDisplay the DOS version reported to programs.\r\n";
 const VERIFY_HELP: &str =
     "VERIFY [ON | OFF]\r\nShow or set read-back verification of file writes.\r\n";
@@ -278,7 +281,23 @@ impl Shell {
                 return self.execute_redirected(request, false, None);
             }
         }
-        self.execute_command(line, &mut None)
+        let mut io = if self.console_terminal() {
+            None
+        } else {
+            Some(
+                self.machine
+                    .prepare_shell_io(self.drive, &self.directories, None, None, None)?,
+            )
+        };
+        let command = self.execute_command(line, &mut io)?;
+        match io {
+            Some(io) => self.apply_redirection(io, command),
+            None => Ok(command),
+        }
+    }
+
+    pub(crate) fn console_terminal(&self) -> bool {
+        self.machine.terminal() == DosDevice::Console
     }
 
     fn execute_command(
@@ -342,6 +361,7 @@ impl Shell {
             "HELP" if args.eq_ignore_ascii_case("TIME") => clock::TIME_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("CHCP") => CHCP_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("BREAK") => BREAK_HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("CTTY") => CTTY_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("VER") => VER_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("VERIFY") => VERIFY_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("VOL") => volume::HELP.as_bytes().to_vec(),
@@ -375,6 +395,7 @@ impl Shell {
                 TIME [hh:mm]               Show or set the DOS time\r\n\
                 VER                        Display the DOS version\r\n\
                 CHCP [number]              Show or change the DOS code page\r\n\
+                CTTY device                Select the DOS terminal\r\n\
                 BREAK [ON|OFF]             Show or set extended Ctrl+C checking\r\n\
                 VERIFY [ON|OFF]            Show or set file write verification\r\n\
                 VOL [drive:]               Display a drive volume label\r\n\
@@ -413,6 +434,21 @@ impl Shell {
                     return Ok(Command::Prompt);
                 }
             },
+            "CTTY" => {
+                if args == "/?" {
+                    return Ok(Command::Print(CTTY_HELP.as_bytes().to_vec()));
+                }
+                let name = args.strip_suffix(':').unwrap_or(args);
+                let device = if name.eq_ignore_ascii_case("CON") {
+                    DosDevice::Console
+                } else if name.eq_ignore_ascii_case("NUL") {
+                    DosDevice::Null
+                } else {
+                    return Err("Invalid device".into());
+                };
+                self.machine.set_terminal(device);
+                return Ok(Command::Prompt);
+            }
             "BREAK" => match args.to_ascii_uppercase().as_str() {
                 "/?" => BREAK_HELP.as_bytes().to_vec(),
                 "" => {

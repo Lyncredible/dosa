@@ -560,6 +560,52 @@ fn legacy_character_input_follows_redirected_stdin_until_eof() {
 }
 
 #[test]
+fn ctty_routes_default_dos_streams_and_preserves_explicit_redirection() {
+    let fixture = Fixture::new();
+    let mut program = vec![
+        0xba, 0, 2, 0x31, 0xdb, 0xb9, 1, 0, 0xb4, 0x3f, 0xcd, 0x21, // read stdin
+        0x85, 0xc0, 0x74, 7, 0x43, 0xb4, 0x40, 0xcd, 0x21, 0xeb, 7, // copy input to stdout
+        0xb2, b'S', 0xb4, 2, 0xcd, 0x21, 0x90, // write to stdout on EOF
+        0xba, 1, 2, 0xbb, 2, 0, 0xb9, 1, 0, 0xb4, 0x40, 0xcd, 0x21, // write to stderr
+        0xb0, b'B', 0xcd, 0x29, // write directly to the screen
+        0xb8, 0, 0x4c, 0xcd, 0x21,
+    ];
+    program.resize(0x100, 0);
+    program.extend_from_slice(b"\0E");
+    fs::write(fixture.0.join("STREAMS.COM"), program).unwrap();
+    fs::write(fixture.0.join("INPUT.TXT"), b"R").unwrap();
+    fs::write(
+        fixture.0.join("RUN.BAT"),
+        b"@echo off\r\nctty nul:\r\necho hidden\r\nstreams\r\nstreams <INPUT.TXT >COPY.TXT\r\necho explicit >CON\r\ncall CHILD\r\necho restored\r\n",
+    )
+    .unwrap();
+    fs::write(fixture.0.join("CHILD.BAT"), b"ctty con\r\necho child\r\n").unwrap();
+    let mount = format!("C={}", fixture.0.display());
+    let run = |command| {
+        Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args(["--headless", "--mount-rw", &mount, "--exec", command])
+            .output()
+            .unwrap()
+    };
+    let batch = run("RUN");
+    assert!(batch.status.success(), "{batch:?}");
+    assert_eq!(batch.stdout, b"BBexplicit\r\nchild\r\nrestored\r\n");
+    assert_eq!(fs::read(fixture.0.join("COPY.TXT")).unwrap(), b"R");
+
+    let redirected = run("RUN >BATCH.TXT");
+    assert!(redirected.status.success(), "{redirected:?}");
+    assert_eq!(redirected.stdout, b"BBexplicit\r\n");
+    assert_eq!(
+        fs::read(fixture.0.join("BATCH.TXT")).unwrap(),
+        b"hidden\r\nSchild\r\nrestored\r\n"
+    );
+
+    let invalid = run("CTTY COM1");
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("Invalid device"));
+}
+
+#[test]
 fn legacy_character_output_follows_redirected_stdout() {
     let fixture = Fixture::new();
     let mut program = vec![

@@ -153,6 +153,9 @@ impl Desktop {
     }
 
     fn write_prompt(&mut self) {
+        if !self.shell.console_terminal() {
+            return;
+        }
         let prompt = self
             .shell
             .machine
@@ -162,13 +165,16 @@ impl Desktop {
     }
 
     fn refresh_prompt(&mut self, previous: &str) {
-        if self.shell.prompt() != previous {
+        if self.shell.console_terminal() && self.shell.prompt() != previous {
             self.shell.machine.write_console(b"\r\n");
             self.write_input_prompt();
         }
     }
 
     fn write_input_prompt(&mut self) {
+        if !self.shell.console_terminal() {
+            return;
+        }
         self.write_prompt();
         let typed = self.shell.machine.code_page().encode_text(&self.line);
         self.shell.machine.write_console(&typed);
@@ -267,7 +273,7 @@ impl Desktop {
         if self.running {
             let page = self.shell.machine.code_page();
             self.paste = chars.map(|character| page.encode(character)).collect();
-        } else if !self.shell.command_active() {
+        } else if self.shell.console_terminal() && !self.shell.command_active() {
             for character in chars {
                 let character = if matches!(character, '\r' | '\t') {
                     ' '
@@ -1060,6 +1066,9 @@ impl App for Desktop {
                     }
                 }
             }
+            return;
+        }
+        if !self.shell.console_terminal() {
             return;
         }
         match event.key {
@@ -1932,6 +1941,41 @@ mod tests {
         let text = screen_text(frame);
         assert!(text.contains("D:\\>"));
         assert!(!text.contains("BATCH-CONTINUED"));
+    }
+
+    #[test]
+    fn desktop_reset_restores_console_input_and_prompt_after_ctty_nul() {
+        let mut desktop = Desktop::new(Shell::new(), Some("ctty nul"));
+        let enter = || Input {
+            key: Key::Enter,
+            pressed: true,
+            text: None,
+            modifiers: Default::default(),
+            scan_code: 0x1c,
+        };
+        let character = || Input {
+            key: Key::Character('x'),
+            pressed: true,
+            text: Some("x".into()),
+            modifiers: Default::default(),
+            scan_code: 0x2d,
+        };
+        desktop.input(character());
+        desktop.input(enter());
+        desktop.paste_text("echo ignored");
+        assert!(desktop.line.is_empty());
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected text console")
+        };
+        assert_eq!(screen_text(frame).matches("C:\\>").count(), 1);
+
+        desktop.menu_action(MenuAction::ResetGuest);
+        desktop.input(character());
+        assert_eq!(desktop.line, "x");
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected text console")
+        };
+        assert!(screen_text(frame).contains("C:\\> x"));
     }
 
     #[test]
