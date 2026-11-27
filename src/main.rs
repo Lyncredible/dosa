@@ -288,10 +288,12 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
                         }
                         RunState::WaitingForInterrupt => {
                             halted_since.get_or_insert_with(Instant::now);
-                            std::thread::sleep(Duration::from_millis(1));
                         }
                         RunState::Idle => break,
                         RunState::Running => halted_since = None,
+                    }
+                    if boot_started.is_some() || halted_since.is_some() {
+                        std::thread::sleep(Duration::from_millis(1));
                     }
                 }
             }
