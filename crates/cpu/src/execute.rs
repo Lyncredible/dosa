@@ -174,6 +174,11 @@ impl Cpu {
                 self.string(ins, start_ip)?;
             }
             Nop | Pause | Into | Wait => {}
+            Seto | Setno | Setb | Setae | Sete | Setne | Setbe | Seta | Sets | Setns | Setp
+            | Setnp | Setl | Setge | Setle | Setg => {
+                let value = self.condition(ins.condition_code())?;
+                self.write_op(ins, 0, u32::from(value))?;
+            }
             _ if ins.flow_control() == FlowControl::ConditionalBranch => {
                 if self.condition(ins.condition_code())? {
                     self.near_transfer(ins.near_branch_target() as u32)?;

@@ -256,6 +256,40 @@ fn cpu_profiles_reject_later_generations_before_execution() {
 }
 
 #[test]
+fn setcc_writes_a_single_byte_without_modifying_flags() {
+    for (flags, outcomes) in [
+        (2, 0xaaaa),
+        (2 | OF | SF | ZF | PF | CF, 0x6555),
+        (2 | SF, 0x59aa),
+    ] {
+        for condition in 0..16 {
+            let opcode = 0x90 + condition;
+            let mut cpu = program(&[0x0f, opcode, 0xc4, 0x0f, opcode, 0x06, 0, 2]);
+            cpu.regs.flags = flags;
+            cpu.regs.ax = 0xa55a;
+            cpu.load(cpu.regs.ds, 0x1ff, &[0x55, 0xa5, 0xaa]);
+            advance(&mut cpu, 2);
+
+            let expected = u8::from(outcomes & (1 << condition) != 0);
+            assert_eq!(cpu.regs.ax, u16::from_le_bytes([0x5a, expected]));
+            assert_eq!(cpu.read_u8(cpu.regs.ds, 0x1ff), 0x55);
+            assert_eq!(cpu.read_u8(cpu.regs.ds, 0x200), expected);
+            assert_eq!(cpu.read_u8(cpu.regs.ds, 0x201), 0xaa);
+            assert_eq!(cpu.regs.flags, flags);
+        }
+    }
+    for profile in [CpuProfile::I8086, CpuProfile::I286] {
+        let mut cpu = program_for(profile, &[0x0f, 0x95, 0xc4]);
+        let before = cpu.regs;
+        assert_eq!(
+            cpu.step().unwrap_err().kind,
+            CpuErrorKind::UnavailableOnProfile(profile)
+        );
+        assert_eq!(cpu.regs, before);
+    }
+}
+
+#[test]
 fn cpu_profiles_gate_prefixes_even_when_the_decoder_can_discard_them() {
     for profile in [CpuProfile::I8086, CpuProfile::I286, CpuProfile::I386] {
         // MOV AL,66h and REP NOP are valid on every profile. Each remaining
