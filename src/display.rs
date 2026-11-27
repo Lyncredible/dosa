@@ -1273,14 +1273,15 @@ fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: boo
     } else {
         0x0f
     };
+    let background_mask = if frame.blink_enabled { 0x07 } else { 0x0f };
     for (cell, data) in frame.cells.as_chunks::<2>().0.iter().enumerate() {
         let (column, row) = (cell % columns, cell / columns);
         let cursor = blink && frame.cursor == Some((column as u16, row as u16));
         let glyph = glyphs[usize::from(data[0])];
         let loaded = fonts.as_ref().map(|fonts| fonts.glyph(data[0], data[1]));
         let color = VGA[usize::from(data[1] & color_mask)];
-        let background = VGA[usize::from(data[1] >> 4 & 0x07)];
-        let visible = data[1] & 0x80 == 0 || blink;
+        let background = VGA[usize::from(data[1] >> 4 & background_mask)];
+        let visible = !frame.blink_enabled || data[1] & 0x80 == 0 || blink;
         for y in 0..height {
             let start = ((row * height + y) * width + column * 8) * 4;
             let row = loaded.map_or(glyph[y * 8 / height], |bitmap| bitmap[y].reverse_bits());
@@ -1304,6 +1305,82 @@ fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vga_bios_switches_between_text_blink_and_bright_backgrounds() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(
+            fixture.path().join("BLINK.COM"),
+            [
+                0xb8, b'A', 9, 0xbb, 0x97, 0, 0xb9, 1, 0, 0xcd, 0x10, // Write one cell.
+                0x31, 0xc0, 0xcd, 0x16, // Wait with the default blink mode.
+                0xb8, 3, 0x10, 0x31, 0xdb, 0xcd, 0x10, // Enable bright backgrounds.
+                0x31, 0xc0, 0xcd, 0x16, // Wait again.
+                0xb8, 3, 0x10, 0xbb, 1, 0, 0xcd, 0x10, // Reenable blink.
+                0x31, 0xc0, 0xcd, 0x16,
+            ],
+        )
+        .unwrap();
+        let mut shell = Shell::new();
+        shell
+            .mount('C', Mount::open(fixture.path()).unwrap())
+            .unwrap();
+        let mut desktop = Desktop::new(shell, Some("BLINK"));
+        let advance = |desktop: &mut Desktop| {
+            desktop.input(Input {
+                key: Key::Enter,
+                pressed: true,
+                text: None,
+                modifiers: Default::default(),
+                scan_code: 0x1c,
+            });
+            desktop.tick();
+            desktop.input(Input {
+                key: Key::Enter,
+                pressed: false,
+                text: None,
+                modifiers: Default::default(),
+                scan_code: 0x1c,
+            });
+        };
+        let check = |desktop: &Desktop, enabled| {
+            let Video::Text(frame) = desktop.shell.machine.video() else {
+                panic!("expected the text console");
+            };
+            assert_eq!(frame.blink_enabled, enabled);
+            let width = usize::from(frame.columns) * 8;
+            let height = usize::from(frame.character_height);
+            let cell_index = frame
+                .cells
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .position(|cell| *cell == [b'A', 0x97])
+                .expect("the VGA BIOS wrote the test character");
+            let row_index = cell_index / usize::from(frame.columns);
+            let column_start = cell_index % usize::from(frame.columns) * 32;
+            let mut pixels = vec![0; width * height * usize::from(frame.rows) * 4];
+            render_text(frame, width, &mut pixels, false);
+            let cell = pixels
+                .chunks_exact(width * 4)
+                .skip(row_index * height)
+                .take(height)
+                .flat_map(|row| row[column_start..column_start + 32].as_chunks::<4>().0)
+                .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+                .collect::<Vec<_>>();
+            assert!(cell.contains(&VGA[if enabled { 1 } else { 9 }]));
+            assert_eq!(cell.contains(&VGA[7]), !enabled);
+        };
+        desktop.tick();
+        check(&desktop, true);
+        advance(&mut desktop);
+        check(&desktop, false);
+        let saved = desktop.shell.machine.save_guest().unwrap();
+        advance(&mut desktop);
+        check(&desktop, true);
+        desktop.shell.machine.load_guest(&saved).unwrap();
+        check(&desktop, false);
+    }
 
     #[test]
     fn desktop_swaps_a_boot_floppy_while_the_guest_waits_for_a_key() {
