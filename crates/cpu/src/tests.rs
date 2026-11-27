@@ -50,6 +50,32 @@ fn alu_sets_flags_for_overflow_carry_and_zero() {
 }
 
 #[test]
+fn packed_decimal_adjustment_updates_al_and_arithmetic_flags() {
+    for profile in [CpuProfile::I8086, CpuProfile::I286, CpuProfile::I386] {
+        let mut cpu = program_for(profile, &[0x27, 0x2f]); // DAA; DAS.
+        for (offset, input, flags, result, expected_flags) in [
+            (0, 0xae, 0, 0x14, CF | AF | PF), // Intel's 79 + 35 example.
+            (0, 0x99, 0, 0x99, SF | PF),
+            (0, 0x9a, 0, 0, CF | AF | ZF | PF),
+            (0, 0xfa, 0, 0x60, CF | AF | PF), // Low correction wraps AL.
+            (0, 0x05, AF | CF, 0x6b, CF | AF),
+            (1, 0xee, AF | CF, 0x88, CF | AF | SF | PF), // Intel's 35 - 47 example.
+            (1, 0x05, AF, 0xff, CF | AF | SF | PF),      // Only the low correction borrows.
+            (1, 0x06, AF, 0, AF | ZF | PF),
+            (1, 0x66, CF, 0x06, CF | PF),
+        ] {
+            cpu.set_ip(0x100 + offset);
+            cpu.regs.ax = u16::from_le_bytes([input, 0xa5]);
+            cpu.regs.flags = profile.normalize_flags(flags | IF | DF);
+            advance(&mut cpu, 1);
+            assert_eq!(cpu.regs.ax, u16::from_le_bytes([result, 0xa5]));
+            assert_eq!(cpu.regs.flags & (CF | AF | SF | ZF | PF), expected_flags);
+            assert_eq!(cpu.regs.flags & (IF | DF), IF | DF);
+        }
+    }
+}
+
+#[test]
 fn modrm_with_bp_defaults_to_ss_and_lea_ignores_the_segment() {
     // MOV BP,1234h / MOV AX,[BP+SI-2] / LEA DI,[BP+SI-2] / ES:MOV BX,[BP+SI-2]
     let mut cpu = program(&[

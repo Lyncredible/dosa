@@ -20,6 +20,23 @@ impl Cpu {
         self.set_flag(PF, (value as u8).count_ones().is_multiple_of(2));
     }
 
+    pub(super) fn decimal_adjust(&mut self, subtract: bool) {
+        let [al, ah] = self.regs.ax.to_le_bytes();
+        let adjust_low = al & 0x0f > 9 || self.flag(AF);
+        let adjust_high = al > 0x99 || self.flag(CF);
+        let low_borrow = subtract && adjust_low && al < 6;
+        let correction = 6 * u8::from(adjust_low) + 0x60 * u8::from(adjust_high);
+        let result = if subtract {
+            al.wrapping_sub(correction)
+        } else {
+            al.wrapping_add(correction)
+        };
+        self.regs.ax = u16::from_le_bytes([result, ah]);
+        self.set_flag(AF, adjust_low);
+        self.set_flag(CF, adjust_high || low_borrow);
+        self.set_szp(u32::from(result), 1);
+    }
+
     pub(super) fn binary(&mut self, op: Mnemonic, a: u32, b: u32, width: u8) -> u32 {
         use Mnemonic::*;
         let a = a & mask(width);
