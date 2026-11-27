@@ -1,5 +1,8 @@
 use super::{Cpu, CpuProfile, Instruction, Mnemonic, Register};
 
+pub(super) const VM: u32 = 1 << 17;
+pub(super) const IOPL: u16 = 3 << 12;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) struct Table {
     pub(super) base: u32,
@@ -84,6 +87,8 @@ pub(super) struct Control {
     ldt: Option<Table>,
     #[serde(skip)]
     pub(super) task_register: Option<TaskRegister>,
+    #[serde(skip)]
+    pub(super) virtual_8086: bool,
     pub(super) segments: [Option<Segment>; 6],
 }
 
@@ -105,6 +110,10 @@ impl Control {
         };
         valid_cr0
             && valid_ldt
+            && (!self.virtual_8086
+                || profile == CpuProfile::I386
+                    && self.cr0 & 1 != 0
+                    && self.segments.iter().all(Option::is_none))
             && self.task_register.is_none_or(|task| {
                 task.selector & 4 == 0
                     && task.selector & !7 != 0
@@ -133,6 +142,7 @@ impl Control {
             ldtr: 0,
             ldt: None,
             task_register: None,
+            virtual_8086: false,
             segments: [None; 6],
         }
     }
@@ -148,7 +158,7 @@ impl Cpu {
         register: Register,
         selector: u16,
     ) -> Option<Option<Segment>> {
-        if !self.protected_mode() {
+        if !self.protected_mode() || self.control.virtual_8086 {
             return Some(None);
         }
         let table_selector = selector & !3;

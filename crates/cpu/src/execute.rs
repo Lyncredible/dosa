@@ -1,3 +1,4 @@
+use super::control::{IOPL, VM};
 use super::*;
 use iced_x86::{Code, ConditionCode, FlowControl};
 
@@ -5,6 +6,24 @@ impl Cpu {
     pub(super) fn execute(&mut self, ins: &Instruction, start_ip: u32) -> Option<Step> {
         use Mnemonic::*;
         let op = ins.mnemonic();
+        if self.control.virtual_8086 {
+            match op {
+                // Virtual port I/O needs the task's I/O permission bitmap.
+                Hlt | Lgdt | Lidt | Lmsw | Clts | Lldt | Ltr | In | Out => {
+                    return self.segment_fault(13, 0);
+                }
+                Lsl | Lar | Sldt | Str | Verr | Verw => return self.segment_fault(6, 0),
+                Cli | Sti | Int | Iret | Iretd | Pushf | Pushfd | Popf | Popfd
+                    if self.regs.flags & IOPL != IOPL =>
+                {
+                    return self.segment_fault(13, 0);
+                }
+                Mov if ins.op0_register().is_cr() || ins.op1_register().is_cr() => {
+                    return self.segment_fault(13, 0);
+                }
+                _ => {}
+            }
+        }
         match op {
             Mov | Movzx | Movsx => {
                 let mut value = self.read_op(ins, 1)?;
@@ -133,7 +152,7 @@ impl Cpu {
             }
             Popf | Popfd => {
                 let flags = self.pop(if op == Popf { 2 } else { 4 })? as u16;
-                self.regs.flags = self.profile.normalize_flags(flags);
+                self.restore_interrupt_flags(flags);
             }
             Pusha | Pushad => self.push_all(if op == Pusha { 2 } else { 4 })?,
             Popa | Popad => self.pop_all(if op == Popa { 2 } else { 4 })?,
@@ -228,7 +247,10 @@ impl Cpu {
     }
 
     fn check_near_target(&mut self, target: u32) -> Option<()> {
-        if self.control.segments[Register::CS.number()].is_none() && target > 0xffff {
+        if !self.control.virtual_8086
+            && self.control.segments[Register::CS.number()].is_none()
+            && target > 0xffff
+        {
             return None;
         }
         if self.code_address(target, 1).is_none() {
@@ -296,7 +318,7 @@ impl Cpu {
                 return self.segment_fault(13, 0);
             }
         } else if target > 0xffff {
-            return None;
+            return self.segment_fault(13, 0);
         }
         Some(descriptor)
     }
@@ -319,11 +341,19 @@ impl Cpu {
         };
         let interrupt = matches!(ins.mnemonic(), Mnemonic::Iret | Mnemonic::Iretd);
         let flags = if interrupt {
-            Some(self.peek_stack(width, u32::from(width) * 2)? as u16)
+            Some(self.peek_stack(width, u32::from(width) * 2)?)
         } else {
             None
         };
         if let Some(selector) = selector {
+            if let Some(flags) = flags
+                && self.protected_mode()
+                && !self.control.virtual_8086
+                && self.regs.cs & 3 == 0
+                && flags & VM != 0
+            {
+                return self.return_to_virtual_8086(target, selector, flags);
+            }
             let descriptor = self.check_far_target(selector, target)?;
             self.control.segments[Register::CS.number()] = descriptor;
             self.regs.cs = selector;
@@ -334,11 +364,49 @@ impl Cpu {
         let words = 1 + u32::from(far) + u32::from(interrupt);
         self.adjust_stack(words * u32::from(width));
         if let Some(flags) = flags {
-            self.regs.flags = self.profile.normalize_flags(flags);
+            self.restore_interrupt_flags(flags as u16);
         }
         if ins.op_count() == 1 {
             self.adjust_stack(ins.immediate16().into());
         }
+        Some(())
+    }
+
+    fn restore_interrupt_flags(&mut self, flags: u16) {
+        let flags = if self.control.virtual_8086 {
+            (flags & !IOPL) | (self.regs.flags & IOPL)
+        } else {
+            flags
+        };
+        self.regs.flags = self.profile.normalize_flags(flags);
+    }
+
+    fn return_to_virtual_8086(&mut self, target: u32, cs: u16, flags: u32) -> Option<()> {
+        if self.regs.flags & 0x4000 != 0 {
+            // A nested-task return requires a hardware task switch.
+            return None;
+        }
+        if target > u32::from(u16::MAX) {
+            return self.segment_fault(13, 0);
+        }
+        let esp = self.peek_stack(4, 12)?;
+        let ss = self.peek_stack(4, 16)? as u16;
+        let es = self.peek_stack(4, 20)? as u16;
+        let ds = self.peek_stack(4, 24)? as u16;
+        let fs = self.peek_stack(4, 28)? as u16;
+        let gs = self.peek_stack(4, 32)? as u16;
+
+        self.set_reg(Register::ESP, esp)?;
+        self.set_ip(target);
+        self.regs.cs = cs;
+        self.regs.ss = ss;
+        self.regs.es = es;
+        self.regs.ds = ds;
+        self.fs = fs;
+        self.gs = gs;
+        self.regs.flags = self.profile.normalize_flags(flags as u16);
+        self.control.segments = [None; 6];
+        self.control.virtual_8086 = true;
         Some(())
     }
 
