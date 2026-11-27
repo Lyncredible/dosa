@@ -5,6 +5,7 @@ use std::fmt;
 const MAGIC: &[u8; 8] = b"DOSACPU\0";
 const VERSION: u16 = 1;
 const VERSION_TASK_REGISTER: u16 = 2;
+const VERSION_VIRTUAL_8086: u16 = 3;
 const HEADER_BYTES: usize = 12;
 const MAX_METADATA_BYTES: usize = 512;
 
@@ -66,12 +67,16 @@ impl Cpu {
             mapping: self.snapshot_mapping(),
         };
         let metadata = postcard::to_allocvec(&metadata).map_err(|_| SnapshotError::Metadata)?;
-        let (version, metadata) = match self.control.task_register {
-            Some(task) => (
+        let (version, metadata) = match (self.control.virtual_8086, self.control.task_register) {
+            (true, task) => (
+                VERSION_VIRTUAL_8086,
+                postcard::to_extend(&task, metadata).map_err(|_| SnapshotError::Metadata)?,
+            ),
+            (false, Some(task)) => (
                 VERSION_TASK_REGISTER,
                 postcard::to_extend(&task, metadata).map_err(|_| SnapshotError::Metadata)?,
             ),
-            None => (VERSION, metadata),
+            (false, None) => (VERSION, metadata),
         };
         if metadata.len() > MAX_METADATA_BYTES {
             return Err(SnapshotError::Metadata);
@@ -93,7 +98,10 @@ impl Cpu {
             .filter(|(header, _)| header.starts_with(MAGIC))
             .ok_or(SnapshotError::Header)?;
         let version = u16::from_le_bytes([header[8], header[9]]);
-        if !matches!(version, VERSION | VERSION_TASK_REGISTER) {
+        if !matches!(
+            version,
+            VERSION | VERSION_TASK_REGISTER | VERSION_VIRTUAL_8086
+        ) {
             return Err(SnapshotError::Version(version));
         }
         let length = usize::from(u16::from_le_bytes([header[10], header[11]]));
@@ -108,6 +116,12 @@ impl Cpu {
                 postcard::take_from_bytes(remainder).map_err(|_| SnapshotError::Metadata)?;
             state.control.task_register = Some(task);
             trailing
+        } else if version == VERSION_VIRTUAL_8086 {
+            let (task, trailing) =
+                postcard::take_from_bytes(remainder).map_err(|_| SnapshotError::Metadata)?;
+            state.control.task_register = task;
+            state.control.virtual_8086 = true;
+            trailing
         } else {
             remainder
         };
@@ -117,6 +131,7 @@ impl Cpu {
         if !remainder.is_empty()
             || !state.control.valid_snapshot(state.profile)
             || state.profile == CpuProfile::I8086 && state.a20
+            || state.control.virtual_8086 && state.ip_high != 0
         {
             return Err(SnapshotError::Metadata);
         }

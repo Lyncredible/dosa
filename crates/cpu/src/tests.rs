@@ -928,6 +928,121 @@ fn task_register_load_marks_the_descriptor_busy_and_survives_a_snapshot() {
 }
 
 #[test]
+fn iretd_enters_virtual_8086_and_restores_all_guest_segments() {
+    let mut cpu = program_for(
+        CpuProfile::I386,
+        &[
+            0xfa, 0x0f, 1, 0x16, 0, 2, // CLI; LGDT [0200h].
+            0xb8, 1, 0, 0x0f, 1, 0xf0, 0xea, 0, 0, 8, 0, // Set PE and far jump.
+        ],
+    );
+    cpu.load(cpu.regs.ds, 0x200, &[0x17, 0, 0, 0x40, 1, 0]);
+    cpu.load(
+        0x1400,
+        8,
+        &[
+            0xff, 0, 0, 0x80, 1, 0x9a, 0, 0, // Code at 18000h.
+            0xff, 0, 0, 0xa0, 1, 0x92, 0, 0, // Stack at 1A000h.
+        ],
+    );
+    cpu.load(
+        0x1800,
+        0,
+        &[0xb8, 0x10, 0, 0x8e, 0xd0, 0xbc, 0xc0, 0, 0x66, 0xcf],
+    );
+    let frame: [u32; 9] = [
+        0x20,
+        0x1902,
+        0x0002_3002,
+        0xbeef_0080,
+        0x1b03,
+        0x1c04,
+        0x1d05,
+        0x1e06,
+        0x1f07,
+    ];
+    for (index, word) in frame.into_iter().enumerate() {
+        cpu.load(0x1a00, 0xc0 + index as u16 * 4, &word.to_le_bytes());
+    }
+    cpu.load(
+        0x1902,
+        0x20,
+        &[
+            0x8b, 0x1e, 0x10, 0, // MOV BX,[0010h].
+            0xb8, 0x34, 0x12, 0x50, 0x5a, // PUSH AX; POP DX.
+            0xb8, 0, 0, 0x50, 0x9d, // POPF preserves IOPL.
+            0x8e, 0xd8, // MOV DS,AX uses the virtual segment base.
+            0xea, 0x20, 0, 0x01, 0x21, // Far JMP to another virtual segment.
+        ],
+    );
+    cpu.load(0x2101, 0x20, &[0x67, 0xa1, 0, 0, 1, 0]); // Read beyond the virtual segment.
+    cpu.write_u16(0x1d05, 0x10, 0xabcd);
+
+    advance(&mut cpu, 8);
+    let old = cpu.save_snapshot().unwrap();
+    assert_eq!(&old[8..10], &[1, 0]);
+    cpu.load(0x1a00, 0xc0, &0x10000u32.to_le_bytes());
+    assert_eq!(
+        cpu.step().unwrap_err().kind,
+        CpuErrorKind::SegmentFault {
+            vector: 13,
+            code: 0
+        }
+    );
+    assert!(!cpu.control.virtual_8086);
+    assert_eq!((cpu.regs.cs, cpu.regs.ss, cpu.regs.sp), (8, 0x10, 0xc0));
+
+    cpu.restore_snapshot(&old).unwrap();
+    advance(&mut cpu, 1);
+    assert!(cpu.protected_mode() && cpu.control.virtual_8086);
+    assert_eq!(cpu.instruction_pointer(), 0x20);
+    assert_eq!(cpu.get_reg(Register::ESP), Some(0xbeef_0080));
+    assert_eq!(
+        [
+            Register::CS,
+            Register::SS,
+            Register::ES,
+            Register::DS,
+            Register::FS,
+            Register::GS
+        ]
+        .map(|register| cpu.get_reg(register).unwrap()),
+        [0x1902, 0x1b03, 0x1c04, 0x1d05, 0x1e06, 0x1f07]
+    );
+    assert_eq!(cpu.regs.flags, 0x3002);
+    let state = cpu.save_snapshot().unwrap();
+    assert_eq!(&state[8..10], &[3, 0]);
+
+    let mut restored = Cpu::with_profile(CpuProfile::I386);
+    restored.restore_snapshot(&state).unwrap();
+    assert!(restored.control.virtual_8086);
+    advance(&mut restored, 9);
+    assert_eq!(restored.regs.bx, 0xabcd);
+    assert_eq!(restored.regs.dx, 0x1234);
+    assert_eq!(restored.read_u16(0x1b03, 0x7e), 0);
+    assert_eq!(restored.get_reg(Register::ESP), Some(0xbeef_0080));
+    assert_eq!(restored.regs.flags & 0x3000, 0x3000);
+    assert_eq!((restored.regs.cs, restored.regs.ds), (0x2101, 0));
+    assert_eq!(
+        restored.step().unwrap_err().kind,
+        CpuErrorKind::SegmentFault {
+            vector: 13,
+            code: 0
+        }
+    );
+    assert_eq!(restored.instruction_pointer(), 0x20);
+    restored.load(0x2101, 0x20, &[0xe4, 0x61]); // IN AL,61h requires an I/O bitmap.
+    assert_eq!(
+        restored.step().unwrap_err().kind,
+        CpuErrorKind::SegmentFault {
+            vector: 13,
+            code: 0
+        }
+    );
+    assert_eq!(restored.instruction_pointer(), 0x20);
+}
+
+#[test]
 fn protected_mode_local_descriptors_are_selectable_and_queryable_on_286_and_386() {
     for profile in [CpuProfile::I286, CpuProfile::I386] {
         let mut cpu = program_for(

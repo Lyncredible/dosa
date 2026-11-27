@@ -409,7 +409,7 @@ impl Cpu {
         } else {
             tail = std::array::from_fn(|index| {
                 let offset = ip.wrapping_add(index as u32);
-                let offset = if code_segment.is_none() {
+                let offset = if code_segment.is_none() && !self.control.virtual_8086 {
                     offset & 0xffff
                 } else {
                     offset
@@ -428,7 +428,9 @@ impl Cpu {
                 None => self.bad_code_fetch(fetch_error),
             };
         }
-        if code_segment.is_some() && self.code_address(ip, instruction.len()).is_none() {
+        if (code_segment.is_some() || self.control.virtual_8086)
+            && self.code_address(ip, instruction.len()).is_none()
+        {
             return self.bad_code_fetch(fetch_error);
         }
         if !instruction.is_invalid()
@@ -553,6 +555,10 @@ impl Cpu {
     }
 
     fn enter_interrupt_frame(&mut self, vector: u8, error_code: Option<u32>) -> Option<()> {
+        if self.control.virtual_8086 {
+            // A virtual 8086 interrupt requires a separate protected-mode stack.
+            return None;
+        }
         let (target_ip, target_cs, descriptor, width, disable_irq) = if self.protected_mode() {
             let gate = self.interrupt_gate(vector)?;
             (
@@ -823,8 +829,10 @@ impl Cpu {
     fn code_address(&self, offset: u32, width: usize) -> Option<usize> {
         if let Some(segment) = self.control.segments[Register::CS.number()] {
             segment.address(true, offset, width, false)
-        } else {
+        } else if self.valid_unsegmented_offset(offset, width) {
             Some(Self::linear(self.regs.cs, offset))
+        } else {
+            None
         }
     }
 
@@ -837,9 +845,16 @@ impl Cpu {
     ) -> Option<usize> {
         if let Some(segment) = self.control.segments[register.number()] {
             segment.address(false, offset, width, write)
-        } else {
+        } else if self.valid_unsegmented_offset(offset, width) {
             Some(Self::linear(self.get_reg(register)? as u16, offset))
+        } else {
+            None
         }
+    }
+
+    fn valid_unsegmented_offset(&self, offset: u32, width: usize) -> bool {
+        !self.control.virtual_8086
+            || (width != 0 && width <= 0x10000_usize.saturating_sub(offset as usize))
     }
 
     fn segment_access(
@@ -1017,7 +1032,10 @@ impl Cpu {
     }
 
     fn check_stack_push(&mut self, width: u8, count: u8) -> Option<()> {
-        if self.control.segments[Register::SS.number()].is_none() && !self.paging() {
+        if self.control.segments[Register::SS.number()].is_none()
+            && !self.paging()
+            && !self.control.virtual_8086
+        {
             return Some(());
         }
         for word in 1..=count {
