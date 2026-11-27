@@ -8,8 +8,7 @@ impl Cpu {
         let op = ins.mnemonic();
         if self.control.virtual_8086 {
             match op {
-                // Virtual port I/O needs the task's I/O permission bitmap.
-                Hlt | Lgdt | Lidt | Lmsw | Clts | Lldt | Ltr | In | Out => {
+                Hlt | Lgdt | Lidt | Lmsw | Clts | Lldt | Ltr => {
                     return self.segment_fault(13, 0);
                 }
                 Lsl | Lar | Sldt | Str | Verr | Verw => return self.segment_fault(6, 0),
@@ -186,15 +185,18 @@ impl Cpu {
             Into if self.flag(OF) => return self.software_interrupt(4),
             Hlt => return Some(Step::Halt),
             In => {
-                return Some(Step::PortRead {
-                    port: self.read_op(ins, 1)? as u16,
-                    width: Self::width(ins, 0)?,
-                });
+                let port = self.read_op(ins, 1)? as u16;
+                let width = Self::width(ins, 0)?;
+                self.check_io_permission(port, width)?;
+                return Some(Step::PortRead { port, width });
             }
             Out => {
+                let port = self.read_op(ins, 0)? as u16;
+                let width = Self::width(ins, 1)?;
+                self.check_io_permission(port, width)?;
                 return Some(Step::PortWrite {
-                    port: self.read_op(ins, 0)? as u16,
-                    width: Self::width(ins, 1)?,
+                    port,
+                    width,
                     value: self.read_op(ins, 1)?,
                 });
             }

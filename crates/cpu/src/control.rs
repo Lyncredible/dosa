@@ -372,6 +372,30 @@ impl Cpu {
         Some(())
     }
 
+    pub(super) fn check_io_permission(&mut self, port: u16, width: u8) -> Option<()> {
+        let iopl = (self.regs.flags & IOPL) >> 12;
+        if !self.protected_mode() || !self.control.virtual_8086 && self.regs.cs & 3 <= iopl {
+            return Some(());
+        }
+        let Some(task) = self.control.task_register.filter(|task| task.wide) else {
+            return self.segment_fault(13, 0);
+        };
+        let Some(address) = task.span.at(0x66, 2) else {
+            return self.segment_fault(13, 0);
+        };
+        let map = self.read_linear(address, 2)?;
+        // The processor reads two bytes so even a dword spanning separate
+        // bitmap bytes can be checked before any I/O is performed.
+        let Some(address) = task.span.at(map + u32::from(port / 8), 2) else {
+            return self.segment_fault(13, 0);
+        };
+        let bits = self.read_linear(address, 2)? >> (port % 8);
+        if bits & ((1 << width) - 1) != 0 {
+            return self.segment_fault(13, 0);
+        }
+        Some(())
+    }
+
     pub(super) fn interrupt_gate(&mut self, vector: u8, software: bool) -> Option<InterruptGate> {
         let index = u32::from(vector) * 8;
         let Some(address) = self.control.idtr.at(index, 8) else {
