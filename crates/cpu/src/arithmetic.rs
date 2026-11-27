@@ -61,6 +61,53 @@ impl Cpu {
         result & mask(width)
     }
 
+    pub(super) fn bit_test(&mut self, instruction: &Instruction) -> Option<()> {
+        use Mnemonic::*;
+
+        let operation = instruction.mnemonic();
+        let width = Self::width(instruction, 0)?;
+        let bits = u32::from(width) * 8;
+        let index = self.read_op(instruction, 1)?;
+        let bit = 1 << (index & (bits - 1));
+        let address = if instruction.op0_kind() == OpKind::Memory {
+            let adjustment = if instruction.op1_kind() == OpKind::Register {
+                (signed(index, width).div_euclid(i64::from(bits)) * i64::from(width)) as i32
+            } else {
+                0
+            };
+            let offset = self.adjusted_offset(instruction, adjustment)?;
+            Some(self.segment_access(
+                instruction.memory_segment(),
+                offset,
+                usize::from(width),
+                operation != Bt,
+            )?)
+        } else {
+            None
+        };
+        let original = if let Some(address) = address {
+            self.read_linear(address, width)?
+        } else {
+            self.read_op(instruction, 0)?
+        };
+        let result = match operation {
+            Bt => None,
+            Bts => Some(original | bit),
+            Btr => Some(original & !bit),
+            Btc => Some(original ^ bit),
+            _ => unreachable!(),
+        };
+        if let Some(result) = result {
+            if let Some(address) = address {
+                self.write_linear(address, width, result)?;
+            } else {
+                self.write_op(instruction, 0, result)?;
+            }
+        }
+        self.set_flag(CF, original & bit != 0);
+        Some(())
+    }
+
     pub(super) fn double_shift(&mut self, instruction: &Instruction) -> Option<()> {
         let count = self.read_op(instruction, 2)? & 31;
         if count == 0 {

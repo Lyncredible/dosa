@@ -790,6 +790,10 @@ impl Cpu {
     }
 
     fn offset(&self, ins: &Instruction) -> Option<u32> {
+        self.adjusted_offset(ins, 0)
+    }
+
+    fn adjusted_offset(&self, ins: &Instruction, adjustment: i32) -> Option<u32> {
         let reg = |r| {
             if r == Register::None {
                 Some(0)
@@ -799,7 +803,8 @@ impl Cpu {
         };
         let offset = reg(ins.memory_base())?
             .wrapping_add(reg(ins.memory_index())?.wrapping_mul(ins.memory_index_scale()))
-            .wrapping_add(ins.memory_displacement32());
+            .wrapping_add(ins.memory_displacement32())
+            .wrapping_add_signed(adjustment);
         let address32 = ins.memory_base().size() == 4
             || ins.memory_index().size() == 4
             || ins.memory_displ_size() == 4;
