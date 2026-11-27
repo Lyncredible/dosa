@@ -161,6 +161,14 @@ impl Cpu {
         if !self.protected_mode() || self.control.virtual_8086 {
             return Some(None);
         }
+        self.protected_descriptor(register, selector)
+    }
+
+    fn protected_descriptor(
+        &mut self,
+        register: Register,
+        selector: u16,
+    ) -> Option<Option<Segment>> {
         let table_selector = selector & !3;
         let index = selector & !7;
         let rpl = (selector & 3) as u8;
@@ -185,7 +193,9 @@ impl Cpu {
         let read_write = access & 0x02 != 0;
         let dpl = (access >> 5) & 3;
         let permitted = match register {
-            Register::CS => code && dpl == 0 && rpl == 0,
+            Register::CS => {
+                code && dpl == 0 && rpl == 0 && !(self.control.virtual_8086 && conforming)
+            }
             Register::SS => !code && read_write && dpl == 0 && rpl == 0,
             _ => (!code || read_write) && (conforming || rpl <= dpl),
         };
@@ -357,20 +367,32 @@ impl Cpu {
         Some(())
     }
 
-    pub(super) fn interrupt_gate(&mut self, vector: u8) -> Option<InterruptGate> {
-        let address = self.control.idtr.at(u32::from(vector) * 8, 8)?;
+    pub(super) fn interrupt_gate(&mut self, vector: u8, software: bool) -> Option<InterruptGate> {
+        let index = u32::from(vector) * 8;
+        let Some(address) = self.control.idtr.at(index, 8) else {
+            return self.segment_fault(13, index as u16 | 2);
+        };
         let low = self.read_linear(address, 4)?;
         let high = self.read_linear(address + 4, 4)?;
-        let gate = ((high >> 8) as u8) & !0x60;
+        let access = (high >> 8) as u8;
+        let gate = access & 0x1f;
         let width = match gate {
-            0x86 | 0x87 => 2,
-            0x8e | 0x8f if self.profile == CpuProfile::I386 => 4,
-            _ => return None,
+            6 | 7 if !self.control.virtual_8086 => 2,
+            14 | 15 if self.profile == CpuProfile::I386 => 4,
+            _ => return self.segment_fault(13, index as u16 | 2),
         };
+        if software && access & 0x60 != 0x60 {
+            return self.segment_fault(13, index as u16 | 2);
+        }
+        if access & 0x80 == 0 {
+            return self.segment_fault(11, index as u16 | 2);
+        }
         let selector = (low >> 16) as u16 & !3;
         let offset = (low & 0xffff) | if width == 4 { high & 0xffff_0000 } else { 0 };
-        let code = self.descriptor(Register::CS, selector)??;
-        code.address(true, offset, 1, false)?;
+        let code = self.protected_descriptor(Register::CS, selector)??;
+        if code.address(true, offset, 1, false).is_none() {
+            return self.segment_fault(13, 0);
+        }
         Some(InterruptGate {
             offset,
             selector,
@@ -378,6 +400,19 @@ impl Cpu {
             width,
             disable_irq: gate & 1 == 0,
         })
+    }
+
+    pub(super) fn virtual_8086_monitor_stack(&mut self) -> Option<(u16, u32, Segment)> {
+        let Some(task) = self.control.task_register else {
+            return self.segment_fault(10, 0);
+        };
+        let Some(address) = task.span.at(4, 6).filter(|_| task.wide) else {
+            return self.segment_fault(10, task.selector & !3);
+        };
+        let esp = self.read_linear(address, 4)?;
+        let ss = self.read_linear(address + 4, 2)? as u16;
+        let stack = self.protected_descriptor(Register::SS, ss)??;
+        Some((ss, esp, stack))
     }
 
     pub(super) fn table_instruction(&mut self, ins: &Instruction) -> Option<()> {
