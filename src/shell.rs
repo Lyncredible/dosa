@@ -515,12 +515,35 @@ impl Shell {
         args: &str,
         io: &mut Option<ShellIo>,
     ) -> Result<Command, Box<dyn Error>> {
+        self.launch_program_with_memory(name, args, io, None)
+    }
+
+    fn launch_program_with_memory(
+        &mut self,
+        name: &str,
+        args: &str,
+        io: &mut Option<ShellIo>,
+        upper: Option<dosa_dos::UpperMemoryRequest>,
+    ) -> Result<Command, Box<dyn Error>> {
         let (drive, executable) = self.find_program(name, &["COM", "EXE", "BAT"])?;
         if batch::is_batch(&executable) {
             self.launch_batch(drive, &executable, name, args, false, io.take())?;
             return Ok(Command::Prompt);
         }
-        if let Some(io) = io.take() {
+        if let Some(upper) = upper {
+            let streams = match io.take() {
+                Some(streams) => streams,
+                None => self.machine.prepare_shell_io(
+                    self.drive,
+                    &self.directories,
+                    None,
+                    None,
+                    None,
+                )?,
+            };
+            self.machine
+                .launch_high_with_shell_io(drive, &executable, args, streams, upper)?;
+        } else if let Some(io) = io.take() {
             self.machine
                 .launch_with_shell_io(drive, &executable, args, io)?;
         } else {

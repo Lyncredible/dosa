@@ -78,7 +78,15 @@ fn loadhigh_falls_back_to_conventional_memory_with_normal_arguments_and_io() {
     let mount = format!("C={}", fixture.0.display());
     let run = |command| {
         Command::new(env!("CARGO_BIN_EXE_dosa"))
-            .args(["--mount-rw", &mount, "--headless", "--exec", command])
+            .args([
+                "--mount-rw",
+                &mount,
+                "--cpu",
+                "8086",
+                "--headless",
+                "--exec",
+                command,
+            ])
             .output()
             .unwrap()
     };
@@ -97,6 +105,85 @@ fn loadhigh_falls_back_to_conventional_memory_with_normal_arguments_and_io() {
         let help = run(command);
         assert!(help.status.success(), "{help:?}");
         assert!(String::from_utf8_lossy(&help.stdout).contains("conventional memory"));
+    }
+}
+
+#[test]
+fn loadhigh_loads_com_and_mz_above_conventional_memory_when_they_fit() {
+    let fixture = Fixture::new();
+    let mut probe = [
+        0x0e, 0x5a, // DX = CS (COM program segment)
+        0xb4, 0x62, 0xcd, 0x21, 0x39, 0xd3, 0x75, 0x1f, // DOS returns PSP in BX
+        0xb4, 0x2f, 0xcd, 0x21, 0x8c, 0xc0, 0x39, 0xd0, 0x75, 0x15, // DTA segment
+        0x81, 0xfb, 0x80, 0x00, 0x75, 0x0f, // DTA offset
+        0x3d, 0x00, 0xd0, 0x75, 0x05, // Compare returned segment with D000h
+        0xb8, 7, 0x4c, 0xcd, 0x21, // exit 7: upper memory
+        0xb8, 6, 0x4c, 0xcd, 0x21, // exit 6: conventional memory
+        0xb8, 1, 0x4c, 0xcd, 0x21, // exit 1: inconsistent program data
+    ];
+    fs::write(fixture.0.join("PROBE.COM"), probe).unwrap();
+
+    let mut mz = vec![0; 32];
+    let relocation = (14 + probe.len()) as u16;
+    let [relocation_lo, relocation_hi] = relocation.to_le_bytes();
+    let relocation_check = [
+        0x8c,
+        0xc8, // MOV AX,CS
+        0x2e,
+        0x3b,
+        0x06,
+        relocation_lo,
+        relocation_hi, // CMP AX, CS:[relocated word]
+        0x74,
+        5,
+        0xb8,
+        2,
+        0x4c,
+        0xcd,
+        0x21, // exit 2: incorrect relocation
+    ];
+    mz[..2].copy_from_slice(b"MZ");
+    let image_size = mz.len() as u16 + relocation + 2;
+    mz[2..4].copy_from_slice(&image_size.to_le_bytes());
+    mz[4] = 1; // Pages
+    mz[6] = 1; // Relocation count
+    mz[8] = 2; // Header paragraphs
+    mz[0x10] = 0x80; // Initial SP
+    mz[0x18] = 0x1c; // Relocation table offset
+    mz[0x1c..0x1e].copy_from_slice(&relocation.to_le_bytes());
+    mz.extend_from_slice(&relocation_check);
+    probe[0] = 0x1e; // PUSH DS (EXE program segment)
+    mz.extend_from_slice(&probe);
+    mz.extend([0, 0]);
+    fs::write(fixture.0.join("PROBE.EXE"), mz).unwrap();
+
+    let mount = format!("C={}", fixture.0.display());
+    for (cpu, command, expected) in [
+        ("386", "LH PROBE.COM", 7),
+        ("286", "LOADHIGH PROBE.EXE", 7),
+        ("386", "LH /L:1,4096 /S PROBE.COM", 7),
+        ("386", "LH /L:1,256 /S PROBE.COM", 6),
+        ("386", "LH /L:1,131073 PROBE.EXE", 6),
+        ("386", "LH /L:0;1 PROBE.EXE", 6),
+        ("386", "PROBE.COM", 6),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args([
+                "--mount",
+                &mount,
+                "--cpu",
+                cpu,
+                "--headless",
+                "--exec",
+                command,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{cpu} {command}: {output:?}"
+        );
     }
 }
 

@@ -1,10 +1,9 @@
-use crate::{DosError, Environment, environment};
+use crate::{DosError, Environment, UpperProgram, environment, xms};
 use dosa_cpu::{Cpu, CpuProfile};
 
 pub(crate) const PSP: u16 = 0x1000;
 pub(crate) const CONVENTIONAL_END: u16 = 0xa000;
 const ENVIRONMENT: u16 = PSP - (environment::CAPACITY / 16) as u16;
-const LOAD: u16 = PSP + 0x10;
 
 pub(crate) fn load(
     bytes: &[u8],
@@ -12,6 +11,7 @@ pub(crate) fn load(
     args: &str,
     profile: CpuProfile,
     environment: &Environment,
+    upper_program: Option<UpperProgram>,
 ) -> Result<Cpu, DosError> {
     let mut cpu = Cpu::with_profile(profile);
     let args = if args.is_empty() {
@@ -23,43 +23,47 @@ pub(crate) fn load(
         return Err(DosError::InvalidCommandTail);
     }
 
+    let (psp, segment_end) = upper_program
+        .map(|upper| (xms::UPPER_START, upper.end))
+        .unwrap_or((PSP, CONVENTIONAL_END));
     cpu.load(ENVIRONMENT, 0, &environment.encode(name)?);
-    cpu.load(PSP, 0, &[0xcd, 0x20]);
-    cpu.write_u16(PSP, 2, CONVENTIONAL_END);
-    cpu.write_u16(PSP, 0x16, PSP);
-    cpu.load(PSP, 0x18, &[0, 1, 2, 3, 4]);
-    cpu.load(PSP, 0x1d, &[0xff; 15]);
-    cpu.write_u16(PSP, 0x2c, ENVIRONMENT);
-    cpu.write_u16(PSP, 0x32, 20);
-    cpu.write_u16(PSP, 0x34, 0x18);
-    cpu.write_u16(PSP, 0x36, PSP);
-    cpu.load(PSP, 0x50, &[0xcd, 0x21, 0xcb]);
-    cpu.write_u8(PSP, 0x80, args.len() as u8);
-    cpu.load(PSP, 0x81, args.as_bytes());
-    cpu.write_u8(PSP, 0x81 + args.len() as u16, b'\r');
-    cpu.regs.ds = PSP;
-    cpu.regs.es = PSP;
+    cpu.load(psp, 0, &[0xcd, 0x20]);
+    cpu.write_u16(psp, 2, segment_end);
+    cpu.write_u16(psp, 0x16, psp);
+    cpu.load(psp, 0x18, &[0, 1, 2, 3, 4]);
+    cpu.load(psp, 0x1d, &[0xff; 15]);
+    cpu.write_u16(psp, 0x2c, ENVIRONMENT);
+    cpu.write_u16(psp, 0x32, 20);
+    cpu.write_u16(psp, 0x34, 0x18);
+    cpu.write_u16(psp, 0x36, psp);
+    cpu.load(psp, 0x50, &[0xcd, 0x21, 0xcb]);
+    cpu.write_u8(psp, 0x80, args.len() as u8);
+    cpu.load(psp, 0x81, args.as_bytes());
+    cpu.write_u8(psp, 0x81 + args.len() as u16, b'\r');
+    cpu.regs.ds = psp;
+    cpu.regs.es = psp;
     cpu.regs.flags = 0x0202;
 
     if bytes.starts_with(b"MZ") || bytes.starts_with(b"ZM") {
-        load_mz(&mut cpu, bytes)?;
+        load_mz(&mut cpu, bytes, psp, segment_end)?;
     } else if name.to_ascii_uppercase().ends_with(".COM") {
-        if bytes.is_empty() || bytes.len() > 0xfefe {
+        let stack = (usize::from(segment_end - psp) * 16).min(0x10000) - 2;
+        if bytes.is_empty() || bytes.len() > stack - 0x100 {
             return Err(DosError::InvalidProgram("invalid COM image size"));
         }
-        cpu.load(PSP, 0x100, bytes);
-        cpu.regs.cs = PSP;
+        cpu.load(psp, 0x100, bytes);
+        cpu.regs.cs = psp;
         cpu.regs.ip = 0x100;
-        cpu.regs.ss = PSP;
-        cpu.regs.sp = 0xfffe;
-        cpu.write_u16(PSP, 0xfffe, 0);
+        cpu.regs.ss = psp;
+        cpu.regs.sp = stack as u16;
+        cpu.write_u16(psp, stack as u16, 0);
     } else {
         return Err(DosError::InvalidProgram("expected a COM or DOS MZ image"));
     }
     Ok(cpu)
 }
 
-fn load_mz(cpu: &mut Cpu, bytes: &[u8]) -> Result<(), DosError> {
+fn load_mz(cpu: &mut Cpu, bytes: &[u8], psp: u16, segment_end: u16) -> Result<(), DosError> {
     const HEADER_ERROR: DosError = DosError::InvalidProgram("invalid MZ header");
     if bytes.len() < 28 {
         return Err(HEADER_ERROR);
@@ -71,7 +75,8 @@ fn load_mz(cpu: &mut Cpu, bytes: &[u8]) -> Result<(), DosError> {
     let header = usize::from(word(8)) * 16;
     let minimum_extra = usize::from(word(0x0a)) * 16;
     let relocations = usize::from(word(0x18));
-    let capacity = usize::from(CONVENTIONAL_END - LOAD) * 16;
+    let load = psp + 0x10;
+    let capacity = usize::from(segment_end - load) * 16;
     if pages == 0
         || last_page >= 512
         || header < 28
@@ -92,11 +97,11 @@ fn load_mz(cpu: &mut Cpu, bytes: &[u8]) -> Result<(), DosError> {
     let image = &bytes[header..end];
     let (ss, sp, ip, cs) = (word(0x0e), word(0x10), word(0x14), word(0x16));
     let absolute = |segment: u16, offset: u16| usize::from(segment) * 16 + usize::from(offset);
-    let base = absolute(LOAD, 0);
-    let entry = absolute(LOAD.wrapping_add(cs), ip);
-    let stack = absolute(LOAD.wrapping_add(ss), sp.wrapping_sub(2));
+    let base = absolute(load, 0);
+    let entry = absolute(load.wrapping_add(cs), ip);
+    let stack = absolute(load.wrapping_add(ss), sp.wrapping_sub(2));
     if !(base..base + image.len()).contains(&entry)
-        || !(absolute(PSP, 0)..absolute(CONVENTIONAL_END, 0) - 1).contains(&stack)
+        || !(absolute(psp, 0)..absolute(segment_end, 0) - 1).contains(&stack)
     {
         return Err(DosError::InvalidProgram(
             "MZ entry point or stack is outside load memory",
@@ -110,12 +115,12 @@ fn load_mz(cpu: &mut Cpu, bytes: &[u8]) -> Result<(), DosError> {
             return Err(DosError::InvalidProgram("MZ relocation is outside image"));
         }
         let at = base + absolute(segment, offset);
-        let value = u16::from_le_bytes([cpu.memory[at], cpu.memory[at + 1]]).wrapping_add(LOAD);
+        let value = u16::from_le_bytes([cpu.memory[at], cpu.memory[at + 1]]).wrapping_add(load);
         cpu.memory[at..at + 2].copy_from_slice(&value.to_le_bytes());
     }
-    cpu.regs.ss = LOAD.wrapping_add(ss);
+    cpu.regs.ss = load.wrapping_add(ss);
     cpu.regs.sp = sp;
-    cpu.regs.cs = LOAD.wrapping_add(cs);
+    cpu.regs.cs = load.wrapping_add(cs);
     cpu.regs.ip = ip;
     Ok(())
 }
