@@ -518,7 +518,8 @@ impl Cpu {
         ip: u32,
         mnemonic: Mnemonic,
     ) -> Result<Step, CpuError> {
-        self.enter_interrupt_frame(vector, Some(u32::from(code)))
+        let error_code = (vector != 6).then_some(u32::from(code));
+        self.enter_interrupt_frame(vector, error_code)
             .map(|()| Step::Continue)
             .ok_or(CpuError {
                 cs,
@@ -556,11 +557,10 @@ impl Cpu {
 
     fn enter_interrupt_frame(&mut self, vector: u8, error_code: Option<u32>) -> Option<()> {
         if self.control.virtual_8086 {
-            // A virtual 8086 interrupt requires a separate protected-mode stack.
-            return None;
+            return self.enter_virtual_8086_interrupt(vector, error_code, false);
         }
         let (target_ip, target_cs, descriptor, width, disable_irq) = if self.protected_mode() {
-            let gate = self.interrupt_gate(vector)?;
+            let gate = self.interrupt_gate(vector, false)?;
             (
                 gate.offset,
                 gate.selector,
@@ -594,6 +594,55 @@ impl Cpu {
         self.regs.cs = target_cs;
         self.control.segments[Register::CS.number()] = descriptor;
         self.set_ip(target_ip);
+        Some(())
+    }
+
+    fn enter_virtual_8086_interrupt(
+        &mut self,
+        vector: u8,
+        error_code: Option<u32>,
+        software: bool,
+    ) -> Option<()> {
+        let gate = self.interrupt_gate(vector, software)?;
+        let (ss, esp, stack) = self.virtual_8086_monitor_stack()?;
+        let saved = self.save_registers();
+        let frame = [
+            u32::from(self.gs),
+            u32::from(self.fs),
+            u32::from(self.regs.ds),
+            u32::from(self.regs.es),
+            u32::from(self.regs.ss),
+            self.get_reg(Register::ESP)?,
+            u32::from(self.regs.flags) | control::VM,
+            u32::from(self.regs.cs),
+            self.instruction_pointer(),
+        ];
+        self.control.virtual_8086 = false;
+        self.control.segments[Register::SS.number()] = Some(stack);
+        self.regs.ss = ss;
+        self.set_reg(Register::ESP, esp)?;
+        if self.push_virtual_8086_frame(frame, error_code).is_none() {
+            self.restore_registers(saved);
+            self.control.virtual_8086 = true;
+            return None;
+        }
+        for register in [Register::DS, Register::ES, Register::FS, Register::GS] {
+            self.set_reg(register, 0)?;
+        }
+        self.regs.flags &= !(TF | 0x4000 | if gate.disable_irq { IF } else { 0 });
+        self.interrupt_shadow = false;
+        self.halted = false;
+        self.regs.cs = gate.selector;
+        self.control.segments[Register::CS.number()] = Some(gate.code);
+        self.set_ip(gate.offset);
+        Some(())
+    }
+
+    fn push_virtual_8086_frame(&mut self, frame: [u32; 9], error_code: Option<u32>) -> Option<()> {
+        self.check_stack_push(4, frame.len() as u8 + u8::from(error_code.is_some()))?;
+        for value in frame.into_iter().chain(error_code) {
+            self.push(4, value)?;
+        }
         Some(())
     }
 

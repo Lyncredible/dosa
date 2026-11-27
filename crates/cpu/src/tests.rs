@@ -927,8 +927,7 @@ fn task_register_load_marks_the_descriptor_busy_and_survives_a_snapshot() {
     }
 }
 
-#[test]
-fn iretd_enters_virtual_8086_and_restores_all_guest_segments() {
+fn virtual_8086_test_cpu(flags: u32) -> Cpu {
     let mut cpu = program_for(
         CpuProfile::I386,
         &[
@@ -936,13 +935,15 @@ fn iretd_enters_virtual_8086_and_restores_all_guest_segments() {
             0xb8, 1, 0, 0x0f, 1, 0xf0, 0xea, 0, 0, 8, 0, // Set PE and far jump.
         ],
     );
-    cpu.load(cpu.regs.ds, 0x200, &[0x17, 0, 0, 0x40, 1, 0]);
+    cpu.load(cpu.regs.ds, 0x200, &[0x27, 0, 0, 0x40, 1, 0]);
     cpu.load(
         0x1400,
         8,
         &[
             0xff, 0, 0, 0x80, 1, 0x9a, 0, 0, // Code at 18000h.
             0xff, 0, 0, 0xa0, 1, 0x92, 0, 0, // Stack at 1A000h.
+            0x67, 0, 0, 0xb0, 1, 0x89, 0, 0, // 386 TSS at 1B000h.
+            0xff, 0, 0, 0xc0, 1, 0x92, 0x40, 0, // 32-bit monitor stack at 1C000h.
         ],
     );
     cpu.load(
@@ -953,7 +954,7 @@ fn iretd_enters_virtual_8086_and_restores_all_guest_segments() {
     let frame: [u32; 9] = [
         0x20,
         0x1902,
-        0x0002_3002,
+        flags,
         0xbeef_0080,
         0x1b03,
         0x1c04,
@@ -964,6 +965,13 @@ fn iretd_enters_virtual_8086_and_restores_all_guest_segments() {
     for (index, word) in frame.into_iter().enumerate() {
         cpu.load(0x1a00, 0xc0 + index as u16 * 4, &word.to_le_bytes());
     }
+    advance(&mut cpu, 8);
+    cpu
+}
+
+#[test]
+fn iretd_enters_virtual_8086_and_restores_all_guest_segments() {
+    let mut cpu = virtual_8086_test_cpu(0x0002_3002);
     cpu.load(
         0x1902,
         0x20,
@@ -978,7 +986,6 @@ fn iretd_enters_virtual_8086_and_restores_all_guest_segments() {
     cpu.load(0x2101, 0x20, &[0x67, 0xa1, 0, 0, 1, 0]); // Read beyond the virtual segment.
     cpu.write_u16(0x1d05, 0x10, 0xabcd);
 
-    advance(&mut cpu, 8);
     let old = cpu.save_snapshot().unwrap();
     assert_eq!(&old[8..10], &[1, 0]);
     cpu.load(0x1a00, 0xc0, &0x10000u32.to_le_bytes());
@@ -1040,6 +1047,68 @@ fn iretd_enters_virtual_8086_and_restores_all_guest_segments() {
         }
     );
     assert_eq!(restored.instruction_pointer(), 0x20);
+}
+
+#[test]
+fn virtual_8086_interrupts_switch_to_the_monitor_stack_and_return() {
+    let mut cpu = virtual_8086_test_cpu(0x0002_3202);
+    cpu.load(
+        0x1800,
+        8,
+        &[0xb8, 0x18, 0, 0x0f, 0, 0xd8, 0x66, 0xcf], // LTR AX; IRETD.
+    );
+    cpu.load(0x1800, 0x60, &[0x66, 0xcf]); // IRETD from either monitor gate.
+    cpu.load(0x1b00, 4, &[0x90, 0, 0, 0, 0x20, 0]); // ESP0 and SS0.
+    cpu.load(0x1902, 0x20, &[0xcd, 0x21, 0xcd, 0x22]);
+    cpu.load(0, 0x21 * 8, &[0x60, 0, 8, 0, 0, 0xee, 0, 0]); // DPL3 interrupt gate.
+    cpu.load(0, 0x22 * 8, &[0x60, 0, 8, 0, 0, 0x8f, 0, 0]); // DPL0 trap gate.
+    cpu.load(0, 13 * 8, &[0x70, 0, 8, 0, 0, 0x8e, 0, 0]); // #GP interrupt gate.
+    cpu.write_u16(0x1b03, 0x7c, 0xabcd);
+
+    advance(&mut cpu, 3);
+    assert!(cpu.control.virtual_8086);
+    advance(&mut cpu, 1); // INT 21h from virtual mode.
+    assert!(!cpu.control.virtual_8086);
+    assert_eq!((cpu.regs.cs, cpu.instruction_pointer()), (8, 0x60));
+    assert_eq!((cpu.regs.ss, cpu.stack_pointer()), (0x20, 0x6c));
+    assert_eq!([cpu.regs.ds, cpu.regs.es, cpu.fs, cpu.gs], [0; 4]);
+    assert!(!cpu.flag(IF));
+    for (index, word) in [
+        0x22_u32,
+        0x1902,
+        0x0002_3202,
+        0xbeef_0080,
+        0x1b03,
+        0x1c04,
+        0x1d05,
+        0x1e06,
+        0x1f07,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let offset = 0x6c + index as u16 * 4;
+        let low = u32::from(cpu.read_u16(0x1c00, offset));
+        let high = u32::from(cpu.read_u16(0x1c00, offset + 2));
+        assert_eq!(low | high << 16, word);
+    }
+    assert_eq!(cpu.read_u16(0x1b03, 0x7c), 0xabcd);
+    advance(&mut cpu, 1);
+    assert!(cpu.control.virtual_8086 && cpu.flag(IF));
+    assert_eq!(cpu.instruction_pointer(), 0x22);
+    assert_eq!(cpu.get_reg(Register::ESP), Some(0xbeef_0080));
+
+    cpu.enter_interrupt(0x22).unwrap(); // A hardware interrupt may use the DPL0 gate.
+    assert!(cpu.flag(IF));
+    advance(&mut cpu, 1);
+    advance(&mut cpu, 1); // INT 22h is denied from virtual mode and enters #GP.
+    assert!(!cpu.control.virtual_8086);
+    assert_eq!(
+        (cpu.instruction_pointer(), cpu.stack_pointer()),
+        (0x70, 0x68)
+    );
+    assert_eq!(cpu.read_u16(0x1c00, 0x68), 0x112);
+    assert_eq!(cpu.read_u16(0x1c00, 0x6c), 0x22); // Return address of the faulting INT.
 }
 
 #[test]

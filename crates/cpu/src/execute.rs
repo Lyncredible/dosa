@@ -180,9 +180,9 @@ impl Cpu {
             Loop | Loope | Loopne | Jcxz | Jecxz => {
                 self.loop_branch(ins)?;
             }
-            Int => return Some(Step::Interrupt(ins.immediate8())),
-            Int3 => return Some(Step::Interrupt(3)),
-            Into if self.flag(OF) => return Some(Step::Interrupt(4)),
+            Int => return self.software_interrupt(ins.immediate8()),
+            Int3 => return self.software_interrupt(3),
+            Into if self.flag(OF) => return self.software_interrupt(4),
             Hlt => return Some(Step::Halt),
             In => {
                 return Some(Step::PortRead {
@@ -215,6 +215,15 @@ impl Cpu {
             _ => return None,
         }
         Some(Step::Continue)
+    }
+
+    fn software_interrupt(&mut self, vector: u8) -> Option<Step> {
+        if self.control.virtual_8086 {
+            self.enter_virtual_8086_interrupt(vector, None, true)?;
+            Some(Step::Continue)
+        } else {
+            Some(Step::Interrupt(vector))
+        }
     }
 
     fn condition(&self, code: ConditionCode) -> Option<bool> {
