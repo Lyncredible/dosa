@@ -823,6 +823,156 @@ fn blocking_int16_wait_runs_a_chained_keyboard_irq_before_resuming() {
 }
 
 #[test]
+fn callable_int16_rom_entry_returns_search_flags_and_resumes_after_a_key() {
+    let directory = Directory::new("callable-int16");
+    directory.write(
+        "WAIT.COM",
+        &[
+            0xb4, 1, // MOV AH,1 (keyboard status).
+            0x9c, 0xff, 0x1e, 0x80, 0x01, // PUSHF; CALL FAR [0180h].
+            0x75, 0x0b, // JNZ to failure if the empty keyboard poll loses ZF.
+            0x31, 0xc0, // XOR AX,AX (read a key).
+            0x9c, 0xff, 0x1e, 0x80, 0x01, // PUSHF; CALL FAR [0180h].
+            0xb4, 0x4c, 0xcd, 0x21, // Exit with the returned ASCII code.
+            0xb8, 0xff, 0x4c, 0xcd, 0x21,
+        ],
+    );
+    let mut machine = directory.machine();
+    machine.launch('C', "WAIT.COM", "").unwrap();
+    let vector = u16::from(crate::bios::KEYBOARD_SERVICE_VECTOR) * 4;
+    let entry = machine.cpu.read_u16(0, vector);
+    let segment = machine.cpu.read_u16(0, vector + 2);
+    assert_ne!(segment, 0);
+    let guest = machine.cpu.regs.cs;
+    machine.cpu.write_u16(guest, 0x180, entry);
+    machine.cpu.write_u16(guest, 0x182, segment);
+
+    let sp = machine.cpu.regs.sp;
+    assert_eq!(machine.run(32).unwrap(), RunState::WaitingForKey);
+    assert_eq!((machine.cpu.regs.cs, machine.cpu.regs.ip), (guest, 0x110));
+    assert_eq!(machine.cpu.regs.sp, sp);
+    machine.key(b'K', 0x25);
+    assert_eq!(machine.run(32).unwrap(), RunState::Exited(b'K'));
+    assert!(machine.pending.is_empty());
+}
+
+#[test]
+fn callable_int10_reports_vbe_unavailable_and_prints_to_the_guest_display() {
+    let directory = Directory::new("callable-int10");
+    directory.write(
+        "PRINT.COM",
+        &[
+            0xb8, 0, 0x4f, // VBE controller information probe.
+            0x9c, 0xff, 0x1e, 0x80, 0x01, 0x3c, 0x4f, 0x74,
+            0x0d, // Fail if the adapter advertises the VBE signature.
+            0xb8, b'Z', 0x0e, // MOV AX,0E5Ah (teletype).
+            0x9c, 0xff, 0x1e, 0x80, 0x01, // PUSHF; CALL FAR [0180h].
+            0xb8, 0, 0x4c, 0xcd, 0x21, 0xb8, 0xff, 0x4c, 0xcd, 0x21,
+        ],
+    );
+    let mut machine = directory.machine();
+    machine.launch('C', "PRINT.COM", "").unwrap();
+    let guest = machine.cpu.regs.cs;
+    let entry = machine.cpu.read_u16(0, 0x10 * 4);
+    let segment = machine.cpu.read_u16(0, 0x10 * 4 + 2);
+    assert_ne!(segment, 0);
+    machine.cpu.write_u16(guest, 0x180, entry);
+    machine.cpu.write_u16(guest, 0x182, segment);
+    assert_eq!(machine.run(24).unwrap(), RunState::Exited(0));
+    assert_eq!(machine.cpu.read_u8(0xb800, 0), b'Z');
+}
+
+#[test]
+fn callable_int15_reports_absent_apm_to_the_caller() {
+    let directory = Directory::new("callable-int15");
+    directory.write(
+        "APM.COM",
+        &[
+            0xb8, 0, 0x53, // APM installation check.
+            0xf8, 0x9c, 0xff, 0x1e, 0x80, 0x01, // CLC; PUSHF; CALL FAR [0180h].
+            0x73, 0x06, // JNC to failure if the result loses CF.
+            0x88, 0xe0, 0xb4, 0x4c, 0xcd, 0x21, // Exit with the BIOS status code.
+            0xb8, 0xff, 0x4c, 0xcd, 0x21,
+        ],
+    );
+    let mut machine = directory.machine();
+    machine.launch('C', "APM.COM", "").unwrap();
+    let guest = machine.cpu.regs.cs;
+    let entry = machine.cpu.read_u16(0, 0x15 * 4);
+    let rom = machine.cpu.read_u16(0, 0x15 * 4 + 2);
+    assert_ne!(rom, 0);
+    machine.cpu.write_u16(guest, 0x180, entry);
+    machine.cpu.write_u16(guest, 0x182, rom);
+    assert_eq!(machine.run(24).unwrap(), RunState::Exited(0x86));
+}
+
+#[test]
+fn virtual_8086_can_return_from_the_bios_keyboard_poll() {
+    let directory = Directory::new("vm86-int16");
+    directory.write(
+        "VM86.COM",
+        &[
+            0xfa, 0x0f, 1, 0x16, 0x80, 1, // CLI; LGDT [0180h].
+            0xb8, 1, 0, 0x0f, 1, 0xf0, 0xea, 0, 0, 8, 0, // Set PE; far jump.
+        ],
+    );
+    let mut machine = directory.machine();
+    machine.launch('C', "VM86.COM", "").unwrap();
+    let cpu = &mut machine.cpu;
+    let guest = cpu.regs.cs;
+    cpu.load(guest, 0x180, &[0x17, 0, 0, 0x40, 1, 0]);
+    cpu.load(
+        0x1400,
+        8,
+        &[
+            0xff, 0, 0, 0x80, 1, 0x9a, 0, 0, // Code at 18000h.
+            0xff, 0, 0, 0xa0, 1, 0x92, 0, 0, // Stack at 1A000h.
+        ],
+    );
+    cpu.load(
+        0x1800,
+        0,
+        &[0xb8, 0x10, 0, 0x8e, 0xd0, 0xbc, 0xc0, 0, 0x66, 0xcf], // Ring 0 stack; IRETD.
+    );
+    let vector = u16::from(crate::bios::KEYBOARD_SERVICE_VECTOR) * 4;
+    let entry = cpu.read_u16(0, vector);
+    let rom = cpu.read_u16(0, vector + 2);
+    // A monitor reflects the interrupt by returning to the ROM with a
+    // 16-bit interrupt frame already on the virtual guest's stack.
+    for (index, word) in [
+        u32::from(entry),
+        u32::from(rom),
+        0x0002_3002,
+        0x80,
+        0x1b00,
+        0,
+        u32::from(guest),
+        0,
+        0,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        cpu.load(0x1a00, 0xc0 + index as u16 * 4, &word.to_le_bytes());
+    }
+    cpu.write_u16(0x1b00, 0x80, 0x0200);
+    cpu.write_u16(0x1b00, 0x82, guest);
+    cpu.write_u16(0x1b00, 0x84, 0x3002);
+    for _ in 0..9 {
+        assert_eq!(cpu.step().unwrap(), dosa_cpu::Step::Continue);
+    }
+    assert!(cpu.virtual_8086_mode());
+    assert_eq!((cpu.regs.cs, cpu.regs.ip), (rom, entry));
+    cpu.regs.ax = 0x0100;
+
+    assert_eq!(machine.run(1).unwrap(), RunState::Running);
+    assert!(machine.cpu.virtual_8086_mode());
+    assert_eq!((machine.cpu.regs.cs, machine.cpu.regs.ip), (guest, 0x0200));
+    assert_eq!(machine.cpu.regs.sp, 0x86);
+    assert_ne!(machine.cpu.regs.flags & crate::ZERO, 0);
+}
+
+#[test]
 fn masked_irq1_leaves_kbc_output_available_for_guest_port_polling() {
     let directory = Directory::new("masked-kbc");
     fs::write(

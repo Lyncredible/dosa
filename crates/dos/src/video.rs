@@ -869,6 +869,8 @@ impl Adapter {
                 cpu.regs.ax = 0x1a;
                 cpu.regs.bx = 8;
             }
+            // A VGA-only BIOS returns without the VBE signature in AL.
+            0x4f if al == 0 => {}
             _ => return false,
         }
         true
