@@ -153,6 +153,11 @@ impl Cpu {
         self.control.cr0 & 1 != 0
     }
 
+    /// Whether the current code uses virtual 8086 addressing and privilege.
+    pub fn virtual_8086_mode(&self) -> bool {
+        self.control.virtual_8086
+    }
+
     pub(super) fn descriptor(
         &mut self,
         register: Register,

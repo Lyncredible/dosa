@@ -1119,7 +1119,14 @@ impl Machine {
                 .dispatch_callback(&mut self.cpu, interrupts_enabled);
         }
         self.service_hardware_interrupt();
-        if !self.cpu.protected_mode() {
+        let real_mode = !self.cpu.protected_mode();
+        let firmware_mode = real_mode || self.cpu.virtual_8086_mode();
+        let firmware_service = if firmware_mode {
+            bios::service_at(&self.cpu)
+        } else {
+            None
+        };
+        if real_mode {
             self.run_firmware_hooks();
         }
         let step = self
@@ -1130,7 +1137,15 @@ impl Machine {
                 None => DosError::Cpu(error),
             })?;
         match step {
-            Step::Continue => {}
+            Step::Continue => {
+                if let Some(vector) = firmware_service
+                    && (!self.cpu.protected_mode() || self.cpu.virtual_8086_mode())
+                {
+                    // The ROM IRET restores the caller's flags and stack before we
+                    // set the status flags or suspend a blocking keyboard read.
+                    self.interrupt_service(vector)?;
+                }
+            }
             Step::Interrupt(vector) => self.interrupt(vector)?,
             Step::PortRead { port, width } => {
                 let elapsed = self.elapsed();

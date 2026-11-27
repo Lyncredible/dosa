@@ -7,6 +7,7 @@ use crate::keyboard::KEYBOARD_VECTOR;
 use crate::pit::BIOS_DIVISOR;
 
 pub(super) const TIMER_VECTOR: u8 = 0x08;
+pub(super) const KEYBOARD_SERVICE_VECTOR: u8 = 0x16;
 const USER_TIMER_VECTOR: u8 = 0x1c;
 const ROM: u16 = 0xf000;
 // This firmware byte travels with the BIOS tick data in the guest's RAM image.
@@ -15,6 +16,17 @@ const FLOPPY_CHANGE_LINE: u16 = 0x07f1;
 const TIMER_ENTRY: u16 = 0x0800;
 const TIMER_RETURN: u16 = TIMER_ENTRY + 3;
 const KEYBOARD_ENTRY: u16 = 0x0900;
+const SERVICE_ENTRY_BASE: u16 = 0x3000;
+const SERVICE_VECTORS: [u8; 8] = [
+    0x10,
+    0x11,
+    0x12,
+    0x13,
+    0x15,
+    KEYBOARD_SERVICE_VECTOR,
+    0x18,
+    0x1a,
+];
 const USER_TIMER_ENTRY: u16 = 0x1c00;
 const BDA: u16 = 0x0040;
 const EQUIPMENT: u16 = 0x0010;
@@ -36,7 +48,10 @@ pub(super) fn install(cpu: &mut Cpu, now: u64) {
         (TIMER_VECTOR, TIMER_ENTRY),
         (KEYBOARD_VECTOR, KEYBOARD_ENTRY),
         (USER_TIMER_VECTOR, USER_TIMER_ENTRY),
-    ] {
+    ]
+    .into_iter()
+    .chain(SERVICE_VECTORS.map(|vector| (vector, SERVICE_ENTRY_BASE + u16::from(vector))))
+    {
         let index = u16::from(vector) * 4;
         cpu.write_u16(0, index, entry);
         cpu.write_u16(0, index + 2, ROM);
@@ -46,6 +61,9 @@ pub(super) fn install(cpu: &mut Cpu, now: u64) {
     cpu.load(ROM, TIMER_ENTRY, &[0xfa, 0xcd, USER_TIMER_VECTOR, 0xcf]);
     cpu.write_u8(ROM, KEYBOARD_ENTRY, 0xcf);
     cpu.write_u8(ROM, USER_TIMER_ENTRY, 0xcf);
+    for vector in SERVICE_VECTORS {
+        cpu.write_u8(ROM, SERVICE_ENTRY_BASE + u16::from(vector), 0xcf);
+    }
     write_ticks(cpu, (now / BIOS_DIVISOR % u64::from(TICKS_PER_DAY)) as u32);
 }
 
@@ -111,6 +129,24 @@ pub(super) fn take_floppy_change(cpu: &mut Cpu) -> bool {
 pub(super) fn default_keyboard(cpu: &Cpu) -> bool {
     let index = u16::from(KEYBOARD_VECTOR) * 4;
     cpu.read_u16(0, index) == KEYBOARD_ENTRY && cpu.read_u16(0, index + 2) == ROM
+}
+
+pub(super) fn default_service_vector(cpu: &Cpu, vector: u8) -> bool {
+    let index = u16::from(vector) * 4;
+    SERVICE_VECTORS.contains(&vector)
+        && cpu.read_u16(0, index) == SERVICE_ENTRY_BASE + u16::from(vector)
+        && cpu.read_u16(0, index + 2) == ROM
+}
+
+pub(super) fn service_at(cpu: &Cpu) -> Option<u8> {
+    if cpu.regs.cs != ROM {
+        return None;
+    }
+    let vector = cpu
+        .instruction_pointer()
+        .checked_sub(u32::from(SERVICE_ENTRY_BASE))?;
+    let vector = u8::try_from(vector).ok()?;
+    SERVICE_VECTORS.contains(&vector).then_some(vector)
 }
 
 pub(super) fn hook(cpu: &Cpu) -> Option<Hook> {

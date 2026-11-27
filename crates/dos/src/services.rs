@@ -8,7 +8,6 @@ use dosa_mount::{Allocation, Entry};
 impl Machine {
     pub(crate) fn interrupt(&mut self, vector: u8) -> Result<(), DosError> {
         let ax = self.cpu.regs.ax;
-        let [al, ah] = ax.to_le_bytes();
         if self.cpu.protected_mode() {
             return self
                 .cpu
@@ -19,12 +18,20 @@ impl Machine {
             self.mouse_interrupt();
             return Ok(());
         }
-        if self.has_interrupt_handler(vector) {
+        if self.has_interrupt_handler(vector)
+            && !crate::bios::default_service_vector(&self.cpu, vector)
+        {
             return self
                 .cpu
                 .enter_interrupt(vector)
                 .ok_or(DosError::Interrupt { vector, ax });
         }
+        self.interrupt_service(vector)
+    }
+
+    pub(super) fn interrupt_service(&mut self, vector: u8) -> Result<(), DosError> {
+        let ax = self.cpu.regs.ax;
+        let [al, ah] = ax.to_le_bytes();
         match vector {
             0x10 if self.video.bios(&mut self.cpu) => {
                 if ah == 0x0e && self.boot_disk.is_some() {
@@ -46,7 +53,8 @@ impl Machine {
                 self.cpu.regs.ax = self.cpu.extended_memory_kib();
                 self.success();
             }
-            0x16 => match ah {
+            0x15 if ax == 0x5300 => self.failure(0x8600),
+            crate::bios::KEYBOARD_SERVICE_VECTOR => match ah {
                 0 | 0x10 => self.resume(Pending::Bios),
                 1 | 0x11 => {
                     self.cpu.regs.flags |= ZERO;
