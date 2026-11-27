@@ -1,5 +1,5 @@
 //! x86 execution, with software interrupts and I/O delegated to the machine.
-use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
+use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind};
 use std::fmt;
 
 use control::{Control, Segment};
@@ -11,6 +11,7 @@ mod paging;
 mod profile;
 mod snapshot;
 
+pub use iced_x86::Register;
 pub use profile::CpuProfile;
 pub use snapshot::SnapshotError;
 
@@ -917,7 +918,8 @@ impl Cpu {
         })
     }
 
-    fn get_reg(&self, register: Register) -> Option<u32> {
+    /// Read a register at its encoded width.
+    pub fn get_reg(&self, register: Register) -> Option<u32> {
         use Register::*;
         Some(match register {
             ES => self.regs.es.into(),
@@ -946,7 +948,8 @@ impl Cpu {
         })
     }
 
-    fn set_reg(&mut self, register: Register, value: u32) -> Option<()> {
+    /// Write a register at its encoded width using the active CPU mode.
+    pub fn set_reg(&mut self, register: Register, value: u32) -> Option<()> {
         use Register::*;
         if register.is_segment_register() {
             self.control.segments[register.number()] = self.descriptor(register, value as u16)?;

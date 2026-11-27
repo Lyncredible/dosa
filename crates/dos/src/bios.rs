@@ -1,7 +1,8 @@
 //! Callable default BIOS interrupt handlers and the BIOS timer data area.
 
-use dosa_cpu::Cpu;
+use dosa_cpu::{Cpu, CpuProfile, Register};
 
+use crate::CARRY;
 use crate::keyboard::KEYBOARD_VECTOR;
 use crate::pit::BIOS_DIVISOR;
 
@@ -50,6 +51,46 @@ pub(super) fn install(cpu: &mut Cpu, now: u64) {
 
 pub(super) fn equipment(cpu: &Cpu) -> u16 {
     cpu.read_u16(BDA, EQUIPMENT)
+}
+
+pub(super) fn memory_map(cpu: &mut Cpu) {
+    const SIGNATURE: u32 = 0x534d_4150; // SMAP
+    const DESCRIPTOR_SIZE: u32 = 20;
+    const RAM: u32 = 1;
+    const RESERVED: u32 = 2;
+    let regions: [(u64, u64, u32); 3] = [
+        (0, 0xa0000, RAM),
+        (0xa0000, 0x60000, RESERVED),
+        (0x100000, u64::from(cpu.extended_memory_kib()) * 1024, RAM),
+    ];
+    let number = cpu.get_reg(Register::EBX).unwrap() as usize;
+    let offset = u32::from(cpu.regs.di);
+    let region = regions.get(number).filter(|_| {
+        cpu.profile() == CpuProfile::I386
+            && cpu.get_reg(Register::EDX) == Some(SIGNATURE)
+            && cpu.get_reg(Register::ECX).unwrap() >= DESCRIPTOR_SIZE
+            && offset + DESCRIPTOR_SIZE <= 0x10000
+    });
+    let Some(&(base, length, kind)) = region else {
+        cpu.regs.flags |= CARRY;
+        cpu.regs.ax = (cpu.regs.ax & 0xff) | 0x8600;
+        return;
+    };
+    let mut descriptor = [0; DESCRIPTOR_SIZE as usize];
+    descriptor[..8].copy_from_slice(&base.to_le_bytes());
+    descriptor[8..16].copy_from_slice(&length.to_le_bytes());
+    descriptor[16..].copy_from_slice(&kind.to_le_bytes());
+    cpu.load(cpu.regs.es, cpu.regs.di, &descriptor);
+
+    let next = if number + 1 < regions.len() {
+        number + 1
+    } else {
+        0
+    };
+    cpu.set_reg(Register::EAX, SIGNATURE).unwrap();
+    cpu.set_reg(Register::EBX, next as u32).unwrap();
+    cpu.set_reg(Register::ECX, DESCRIPTOR_SIZE).unwrap();
+    cpu.regs.flags &= !CARRY;
 }
 
 pub(super) fn install_floppy(cpu: &mut Cpu) {
