@@ -750,6 +750,11 @@ impl Machine {
         Ok(())
     }
 
+    /// Whether the current guest is running from a raw BIOS boot disk.
+    pub fn is_booting_from_disk(&self) -> bool {
+        self.boot_disk.is_some()
+    }
+
     /// Load and execute the first sector of a read-only raw disk image.
     pub fn boot(&mut self, file: std::fs::File, drive: BootDrive) -> Result<(), DosError> {
         if self.state.is_active() {

@@ -42,6 +42,7 @@ Usage: dosa [OPTIONS]
 
 Explicit options override values from the launch profile.";
 const HEADLESS_IRQ_WAIT: Duration = Duration::from_secs(2);
+const HEADLESS_BOOT_WAIT: Duration = Duration::from_secs(30);
 const HALT_TIMEOUT: &str = "program did not resume from HLT within the headless wait limit";
 
 fn main() -> ExitCode {
@@ -263,16 +264,16 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
             }
             Command::Launched => {
                 let mut halted_since = None;
+                // A booted OS may poll the real-time BIOS clock before displaying its prompt.
+                // A fast host can spend the regular instruction budget during that wait.
+                let boot_started = shell.machine.is_booting_from_disk().then(Instant::now);
                 loop {
-                    if remaining_slices == 0 {
-                        let message = if halted_since.is_some() {
-                            HALT_TIMEOUT
-                        } else {
-                            "program exceeded the headless instruction budget"
-                        };
-                        return Err(shell.guest_failed(message.into()));
-                    }
-                    remaining_slices -= 1;
+                    check_headless_limit(
+                        boot_started.map(|started| started.elapsed()),
+                        &mut remaining_slices,
+                        halted_since.is_some(),
+                    )
+                    .map_err(|message| shell.guest_failed(message.into()))?;
                     let state = shell.machine.run(20_000);
                     output.write_all(&shell.machine.take_output())?;
                     match state.map_err(|error| shell.guest_failed(error.into()))? {
@@ -309,6 +310,26 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
     }
 }
 
+fn check_headless_limit(
+    boot_elapsed: Option<Duration>,
+    remaining_slices: &mut usize,
+    halted: bool,
+) -> Result<(), &'static str> {
+    match boot_elapsed {
+        Some(elapsed) if elapsed < HEADLESS_BOOT_WAIT => Ok(()),
+        Some(_) => Err("disk boot exceeded the headless time limit"),
+        None => {
+            let message = if halted {
+                HALT_TIMEOUT
+            } else {
+                "program exceeded the headless instruction budget"
+            };
+            *remaining_slices = remaining_slices.checked_sub(1).ok_or(message)?;
+            Ok(())
+        }
+    }
+}
+
 fn read_console_key(input: &mut impl Read, skip_lf: &mut bool) -> io::Result<u8> {
     let mut key = [0];
     input.read_exact(&mut key)?;
@@ -321,6 +342,21 @@ fn read_console_key(input: &mut impl Read, skip_lf: &mut bool) -> io::Result<u8>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disk_boot_uses_wall_time_even_when_the_program_budget_is_spent() {
+        let mut slices = 1;
+        assert!(check_headless_limit(None, &mut slices, false).is_ok());
+        assert_eq!(slices, 0);
+        assert!(check_headless_limit(None, &mut slices, false).is_err());
+        assert_eq!(
+            check_headless_limit(None, &mut slices, true),
+            Err(HALT_TIMEOUT)
+        );
+        assert!(check_headless_limit(Some(Duration::from_secs(11)), &mut slices, false).is_ok());
+        assert!(check_headless_limit(Some(HEADLESS_BOOT_WAIT), &mut slices, false).is_err());
+        assert_eq!(slices, 0);
+    }
 
     #[test]
     fn parses_native_mounts() {
