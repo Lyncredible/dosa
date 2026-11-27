@@ -11,8 +11,8 @@ const POOL_START: usize = 0x110000;
 const KIB: usize = 1024;
 const HANDLES: u16 = 64;
 // Keep the arena clear of VGA, option ROM space at C000h, and the BIOS at F000h.
-const UPPER_START: u16 = 0xd000;
-const UPPER_END: u16 = 0xf000;
+pub(super) const UPPER_START: u16 = 0xd000;
+pub(super) const UPPER_END: u16 = 0xf000;
 
 const OUT_OF_MEMORY: u8 = 0xa0;
 const INVALID_HANDLE: u8 = 0xa2;
@@ -33,6 +33,7 @@ pub(super) struct Xms {
     hma: bool,
     global_a20: bool,
     local_a20: u16,
+    upper_start: u16,
     upper: BTreeMap<u16, u16>,
 }
 
@@ -51,6 +52,7 @@ impl Default for Xms {
             hma: false,
             global_a20: false,
             local_a20: 0,
+            upper_start: UPPER_START,
             upper: BTreeMap::new(),
         }
     }
@@ -91,6 +93,7 @@ impl Xms {
             hma: state.hma,
             global_a20: state.global_a20,
             local_a20: state.local_a20,
+            upper_start: UPPER_START,
             upper: BTreeMap::new(),
         })
     }
@@ -99,8 +102,12 @@ impl Xms {
         &self.upper
     }
 
+    pub(super) fn reserve_upper_for_dos(&mut self, end: u16) {
+        self.upper_start = end;
+    }
+
     pub(super) fn restore_upper(&mut self, blocks: BTreeMap<u16, u16>) -> Option<()> {
-        let mut previous_end = UPPER_START;
+        let mut previous_end = self.upper_start;
         for (&segment, &paragraphs) in &blocks {
             let end = segment.checked_add(paragraphs)?;
             if paragraphs == 0 || segment < previous_end || end > UPPER_END {
@@ -218,7 +225,7 @@ impl Xms {
     }
 
     fn request_upper(&mut self, paragraphs: u16) -> Result<u16, (u8, u16)> {
-        let mut start = UPPER_START;
+        let mut start = self.upper_start;
         let mut largest = 0;
         for (next, used) in self
             .upper

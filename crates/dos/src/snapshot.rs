@@ -19,6 +19,7 @@ const VERSION_BOOT_MEDIA: u16 = 3;
 const VERSION_MIDI: u16 = 4;
 const VERSION_OPTICAL_CHANGE: u16 = 5;
 const VERSION_UPPER_MEMORY: u16 = 6;
+const VERSION_HIGH_PROGRAM: u16 = 7;
 const HEADER_BYTES: usize = 18;
 /// Maximum size in bytes of a serialized guest save state.
 pub const MAX_GUEST_SNAPSHOT_BYTES: usize = 300 * 1024 * 1024;
@@ -199,6 +200,12 @@ impl Machine {
             .transpose()?;
         let upper = self.xms.upper_blocks();
         let version = match (boot, replay, midi, self.iso_media_changed) {
+            (boot, replay, midi, changed) if let Some(program) = self.upper_program => {
+                metadata =
+                    postcard::to_extend(&(boot, replay, midi, changed, upper, program), metadata)
+                        .map_err(|_| Invalid)?;
+                VERSION_HIGH_PROGRAM
+            }
             (boot, replay, midi, changed) if !upper.is_empty() => {
                 metadata = postcard::to_extend(&(boot, replay, midi, changed, upper), metadata)
                     .map_err(|_| Invalid)?;
@@ -309,6 +316,7 @@ impl Machine {
                 | VERSION_MIDI
                 | VERSION_OPTICAL_CHANGE
                 | VERSION_UPPER_MEMORY
+                | VERSION_HIGH_PROGRAM
         ) {
             return Err(GuestSnapshotError::Version(version));
         }
@@ -321,19 +329,20 @@ impl Machine {
         }
         let (state, trailing): (State<'static>, _) =
             postcard::take_from_bytes(metadata).map_err(|_| Invalid)?;
-        let (boot, replay, midi, iso_media_changed, upper) = match version {
-            VERSION_LEGACY if trailing.is_empty() => (None, None, None, 0, None),
+        let (boot, replay, midi, iso_media_changed, upper, upper_program) = match version {
+            VERSION_LEGACY if trailing.is_empty() => (None, None, None, 0, None, None),
             VERSION_ADLIB_REPLAY => (
                 None,
                 Some(decode_extension::<SynthReplay>(trailing)?),
                 None,
                 0,
                 None,
+                None,
             ),
             VERSION_BOOT_MEDIA => {
                 let (boot, replay) =
                     decode_extension::<(DiskSnapshot, Option<SynthReplay>)>(trailing)?;
-                (Some(boot), replay, None, 0, None)
+                (Some(boot), replay, None, 0, None, None)
             }
             VERSION_MIDI => {
                 let (boot, replay, midi) = decode_extension::<(
@@ -341,15 +350,19 @@ impl Machine {
                     Option<SynthReplay>,
                     MidiSnapshot<MidiReplay>,
                 )>(trailing)?;
-                (boot, replay, Some(midi), 0, None)
+                (boot, replay, Some(midi), 0, None, None)
             }
             VERSION_OPTICAL_CHANGE => {
                 let (boot, replay, midi, changed) = decode_extension(trailing)?;
-                (boot, replay, midi, changed, None)
+                (boot, replay, midi, changed, None, None)
             }
             VERSION_UPPER_MEMORY => {
                 let (boot, replay, midi, changed, upper) = decode_extension(trailing)?;
-                (boot, replay, midi, changed, Some(upper))
+                (boot, replay, midi, changed, Some(upper), None)
+            }
+            VERSION_HIGH_PROGRAM => {
+                let (boot, replay, midi, changed, upper, program) = decode_extension(trailing)?;
+                (boot, replay, midi, changed, Some(upper), Some(program))
             }
             _ => return Err(Invalid),
         };
@@ -413,6 +426,12 @@ impl Machine {
         }
         cpu.restore_snapshot(cpu_bytes)?;
         let mut xms = xms::Xms::from_snapshot(state.xms, cpu.memory.len()).ok_or(Invalid)?;
+        if let Some(program) = upper_program {
+            if !valid_high_program(&state.blocks, program) {
+                return Err(Invalid);
+            }
+            xms.reserve_upper_for_dos(program.end);
+        }
         if let Some(upper) = upper {
             if !cpu.has_a20() || boot_status.is_some() {
                 return Err(Invalid);
@@ -455,11 +474,36 @@ impl Machine {
             extended_break: state.extended_break,
             paused_since: state.paused.then_some(now),
             dta: state.dta,
+            upper_program,
             blocks: state.blocks,
             line: state.line,
         };
         Ok(streams)
     }
+}
+
+fn valid_high_program(blocks: &BTreeMap<u16, u16>, program: UpperProgram) -> bool {
+    if !(UpperProgram::MIN_END..=xms::UPPER_END).contains(&program.end)
+        || !blocks.contains_key(&xms::UPPER_START)
+    {
+        return false;
+    }
+    let mut previous_end = 0;
+    for (&segment, &size) in blocks {
+        let Some(end) = segment.checked_add(size) else {
+            return false;
+        };
+        if size == 0 || segment < previous_end {
+            return false;
+        }
+        if !(segment >= xms::UPPER_START && end <= program.end
+            || program.allow_conventional_allocations && segment >= PSP && end <= CONVENTIONAL_END)
+        {
+            return false;
+        }
+        previous_end = end;
+    }
+    true
 }
 
 fn decode_extension<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, GuestSnapshotError> {

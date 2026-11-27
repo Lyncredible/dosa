@@ -1194,3 +1194,56 @@ fn xms_upper_memory_survives_save_and_restore_and_can_be_reused() {
         assert_eq!((status(0x44e), status(0x450)), (0xd000, 0x2000));
     }
 }
+
+#[test]
+fn high_program_restore_preserves_dos_and_xms_memory_boundaries() {
+    let directory = Directory::new("high-program-save");
+    directory.write(
+        "HIGH.COM",
+        &[
+            0xbb, 0x40, 0, 0xb4, 0x4a, 0xcd, 0x21, // Resize the DOS program block.
+            0xbb, 2, 0, 0xb4, 0x48, 0xcd, 0x21, 0xa3, 0, 2, // Allocate extra DOS space.
+            0xb8, 0x10, 0x43, 0xcd, 0x2f, // Read the XMS far entry point.
+            0x89, 0x1e, 2, 2, 0x8c, 0x06, 4, 2, 0xba, 1, 0, 0xb4, 0x10, 0xff, 0x1e, 2,
+            2, // Request an XMS upper-memory block.
+            0x89, 0x1e, 6, 2, 0x31, 0xc0, 0xcd,
+            0x16, // Wait for a keystroke before restoring.
+            0xb4, 0x62, 0xcd, 0x21, 0x89, 0x1e, 8, 2, // Get the restored program segment.
+            0xbb, 3, 0, 0xb4, 0x48, 0xcd, 0x21, 0xa3, 0x0a, 2, // Allocate more DOS space.
+            0xb8, 0, 0x4c, 0xcd, 0x21,
+        ],
+    );
+    let mut machine = directory.machine();
+    let io = machine
+        .prepare_shell_io('C', &Default::default(), None, None, None)
+        .unwrap();
+    machine
+        .launch_high_with_shell_io(
+            'C',
+            "HIGH.COM",
+            "",
+            io,
+            crate::UpperMemoryRequest {
+                minimum_bytes: 4096,
+                shrink: true,
+                ..crate::UpperMemoryRequest::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(machine.run(256).unwrap(), RunState::WaitingForKey);
+    let bytes = machine.save_guest().unwrap();
+
+    let mut restored = directory.machine();
+    restored.load_guest(&bytes).unwrap();
+    assert_eq!(restored.blocks.get(&0xd000), Some(&0x40));
+    assert_eq!(restored.blocks.get(&0xd041), Some(&2));
+    assert_eq!(restored.xms.upper_blocks().get(&0xd100), Some(&1));
+    restored.key(b'\r', 0x1c);
+    assert_eq!(restored.run(256).unwrap(), RunState::Exited(0));
+    let read = |offset| restored.cpu.read_u16(0xd000, offset);
+    assert_eq!(read(2), 0xd040);
+    assert_eq!(read(0x200), 0xd041);
+    assert_eq!(read(0x206), 0xd100);
+    assert_eq!(read(0x208), 0xd000);
+    assert_eq!(read(0x20a), 0xd044);
+}

@@ -1,4 +1,4 @@
-use crate::{CONVENTIONAL_END, DosError, Machine, PSP, Pending, PendingCall, RunState, ZERO};
+use crate::{CONVENTIONAL_END, DosError, Machine, PSP, Pending, PendingCall, RunState, ZERO, xms};
 use crate::{
     CodePage, DOS_VERSION,
     files::{DosDevice, HandleTarget},
@@ -605,7 +605,7 @@ impl Machine {
                 }
             }
             0x48 => self.allocate(bx),
-            0x49 if es != PSP && self.blocks.remove(&es).is_some() => self.success(),
+            0x49 if es != self.psp() && self.blocks.remove(&es).is_some() => self.success(),
             0x49 => self.failure(9),
             0x4a => self.resize(es, bx),
             0x4c => self.exit(al),
@@ -620,7 +620,7 @@ impl Machine {
                 let entry = self.files.next();
                 self.find_result(entry);
             }
-            0x51 | 0x62 => self.cpu.regs.bx = PSP,
+            0x51 | 0x62 => self.cpu.regs.bx = self.psp(),
             0x54 => self.set_al(u8::from(self.verify_writes())),
             0x56 => {
                 let result = self.path(ds, dx).and_then(|from| {
@@ -658,7 +658,7 @@ impl Machine {
     }
 
     fn sync_psp_handles(&mut self) {
-        self.cpu.load(PSP, 0x18, &self.files.psp_handles());
+        self.cpu.load(self.psp(), 0x18, &self.files.psp_handles());
     }
 
     fn read_handle(&mut self, handle: u16, count: u16, segment: u16, offset: u16) {
@@ -776,18 +776,25 @@ impl Machine {
             self.failure(9);
             return;
         }
+        use std::ops::Bound::Excluded;
+        let end = if segment >= xms::UPPER_START {
+            self.upper_program.map_or(xms::UPPER_END, |upper| upper.end)
+        } else {
+            CONVENTIONAL_END
+        };
+        if segment >= end {
+            self.failure(9);
+            return;
+        }
         let next = self
             .blocks
-            .range((
-                std::ops::Bound::Excluded(segment),
-                std::ops::Bound::Unbounded,
-            ))
+            .range((Excluded(segment), Excluded(end)))
             .next()
-            .map_or(CONVENTIONAL_END, |(&start, _)| start - 1);
+            .map_or(end, |(&start, _)| start - 1);
         if paragraphs <= next - segment {
             self.blocks.insert(segment, paragraphs);
-            if segment == PSP {
-                self.cpu.write_u16(PSP, 2, PSP + paragraphs);
+            if segment == self.psp() {
+                self.cpu.write_u16(segment, 2, segment + paragraphs);
             }
             self.success();
         } else {
@@ -797,29 +804,30 @@ impl Machine {
     }
 
     fn allocate(&mut self, paragraphs: u16) {
-        let gaps = self
-            .blocks
-            .iter()
-            .zip(
-                self.blocks
-                    .keys()
-                    .copied()
-                    .skip(1)
-                    .map(|start| start - 1)
-                    .chain([CONVENTIONAL_END]),
-            )
-            .map(|((&start, &size), next)| {
-                let usable = (start + size).saturating_add(1);
-                (usable, next.saturating_sub(usable))
-            });
         let mut maximum = 0;
-        for (start, size) in gaps {
-            maximum = maximum.max(size);
-            if paragraphs > 0 && size >= paragraphs {
-                self.blocks.insert(start, paragraphs);
-                self.cpu.regs.ax = start;
-                self.success();
-                return;
+        let upper = self.upper_program.map(|upper| xms::UPPER_START..upper.end);
+        let low = self
+            .upper_program
+            .is_none_or(|upper| upper.allow_conventional_allocations)
+            .then_some(PSP..CONVENTIONAL_END);
+        for arena in upper.into_iter().chain(low) {
+            let mut usable = arena.start;
+            let end = arena.end;
+            let blocks = self
+                .blocks
+                .range(arena)
+                .map(|(&start, &size)| (start, size));
+            for (next, size) in blocks.chain([(end, 0)]) {
+                let boundary = if size == 0 { end } else { next - 1 };
+                let available = boundary.saturating_sub(usable);
+                maximum = maximum.max(available);
+                if paragraphs > 0 && available >= paragraphs {
+                    self.blocks.insert(usable, paragraphs);
+                    self.cpu.regs.ax = usable;
+                    self.success();
+                    return;
+                }
+                usable = (next + size).saturating_add(1);
             }
         }
         self.cpu.regs.bx = maximum;

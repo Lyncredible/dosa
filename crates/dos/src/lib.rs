@@ -227,6 +227,40 @@ pub enum ShellInput {
     Byte(u8),
 }
 
+/// Limits for loading a program into the built-in DOS upper-memory region.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UpperMemoryRequest {
+    pub minimum_bytes: u32,
+    pub shrink: bool,
+    pub allow_conventional_allocations: bool,
+}
+
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
+struct UpperProgram {
+    end: u16,
+    allow_conventional_allocations: bool,
+}
+
+impl UpperProgram {
+    const MIN_END: u16 = xms::UPPER_START + 0x11;
+
+    fn for_request(profile: CpuProfile, request: UpperMemoryRequest) -> Option<Self> {
+        let paragraphs = u16::try_from(request.minimum_bytes.div_ceil(16)).ok()?;
+        let minimum_end = xms::UPPER_START.checked_add(paragraphs)?;
+        if profile == CpuProfile::I8086 || minimum_end > xms::UPPER_END {
+            return None;
+        }
+        Some(Self {
+            end: if request.shrink {
+                minimum_end.max(Self::MIN_END)
+            } else {
+                xms::UPPER_END
+            },
+            allow_conventional_allocations: request.allow_conventional_allocations,
+        })
+    }
+}
+
 pub struct Machine {
     cpu: Cpu,
     cpu_profile: CpuProfile,
@@ -256,6 +290,7 @@ pub struct Machine {
     extended_break: bool,
     paused_since: Option<Instant>,
     dta: (u16, u16),
+    upper_program: Option<UpperProgram>,
     blocks: BTreeMap<u16, u16>,
     line: Vec<u8>,
 }
@@ -303,6 +338,7 @@ impl Machine {
             extended_break: false,
             paused_since: None,
             dta: (PSP, 0x80),
+            upper_program: None,
             blocks: BTreeMap::new(),
             line: Vec::new(),
         }
@@ -494,7 +530,7 @@ impl Machine {
     pub fn launch(&mut self, drive: char, path: &str, args: &str) -> Result<(), DosError> {
         let drive = normalize_drive(drive)?;
         let cwd = executable_parent(path).replace('/', "\\");
-        self.launch_with_files(drive, path, args, DosFiles::new(drive, cwd))
+        self.launch_with_files(drive, path, args, DosFiles::new(drive, cwd), None)
     }
 
     /// Start a program while inheriting the shell's default drive and per-drive directories.
@@ -508,7 +544,7 @@ impl Machine {
     ) -> Result<(), DosError> {
         let files =
             DosFiles::with_directories(normalize_drive(current_drive)?, directories.clone());
-        self.launch_with_files(normalize_drive(drive)?, path, args, files)
+        self.launch_with_files(normalize_drive(drive)?, path, args, files, None)
     }
 
     /// Open shell stream redirections using the DOS working directories and mounted drives.
@@ -621,7 +657,20 @@ impl Machine {
         args: &str,
         io: ShellIo,
     ) -> Result<(), DosError> {
-        self.launch_with_files(normalize_drive(drive)?, path, args, io.files)
+        self.launch_with_files(normalize_drive(drive)?, path, args, io.files, None)
+    }
+
+    /// Start a program in upper memory when its image and memory request fit.
+    pub fn launch_high_with_shell_io(
+        &mut self,
+        drive: char,
+        path: &str,
+        args: &str,
+        io: ShellIo,
+        request: UpperMemoryRequest,
+    ) -> Result<(), DosError> {
+        let upper_program = UpperProgram::for_request(self.cpu_profile, request);
+        self.launch_with_files(normalize_drive(drive)?, path, args, io.files, upper_program)
     }
 
     fn launch_with_files(
@@ -630,6 +679,7 @@ impl Machine {
         path: &str,
         args: &str,
         files: DosFiles,
+        upper_program: Option<UpperProgram>,
     ) -> Result<(), DosError> {
         if self.state.is_active() {
             return Err(DosError::Busy);
@@ -643,9 +693,24 @@ impl Machine {
         } else {
             format!("{drive}:\\{parent}\\{}", entry.name)
         };
-        let mut cpu = loader::load(&bytes, &name, args, self.cpu_profile, &self.environment)?;
-        cpu.load(PSP, 0x18, &files.psp_handles());
-        self.start(cpu, files);
+        let load = |upper_program| {
+            loader::load(
+                &bytes,
+                &name,
+                args,
+                self.cpu_profile,
+                &self.environment,
+                upper_program,
+            )
+        };
+        let (mut cpu, upper_program) = match upper_program
+            .and_then(|upper| load(Some(upper)).ok().map(|cpu| (cpu, Some(upper))))
+        {
+            Some(loaded) => loaded,
+            None => (load(None)?, None),
+        };
+        cpu.load(cpu.regs.ds, 0x18, &files.psp_handles());
+        self.start(cpu, files, upper_program);
         Ok(())
     }
 
@@ -661,13 +726,13 @@ impl Machine {
         cpu.regs.dx = u16::from(drive.number());
         cpu.regs.flags |= 0x0200;
         cpu.load(0, 0x7c00, &sector);
-        self.start(cpu, DosFiles::new('C', String::new()));
+        self.start(cpu, DosFiles::new('C', String::new()), None);
         disk.install_data(&mut self.cpu);
         self.boot_disk = Some(disk);
         Ok(())
     }
 
-    fn start(&mut self, mut cpu: Cpu, files: DosFiles) {
+    fn start(&mut self, mut cpu: Cpu, files: DosFiles, upper_program: Option<UpperProgram>) {
         let mut video = Adapter::new();
         video::initialize(&mut cpu, &mut video);
         let elapsed = self.clock.elapsed();
@@ -687,6 +752,10 @@ impl Machine {
         self.keyboard = Keyboard::default();
         self.fast_a20 = false;
         self.xms = xms::Xms::default();
+        self.upper_program = upper_program;
+        if let Some(upper) = upper_program {
+            self.xms.reserve_upper_for_dos(upper.end);
+        }
         self.gameport.reset_timers();
         self.mouse = Mouse::default();
         self.pic = Pic::default();
@@ -695,10 +764,20 @@ impl Machine {
         self.modifiers = 0;
         self.locks = 0;
         self.output.clear();
-        self.dta = (PSP, 0x80);
-        self.blocks = BTreeMap::from([(PSP, CONVENTIONAL_END - PSP)]);
+        let psp = self.psp();
+        let end = upper_program.map_or(CONVENTIONAL_END, |upper| upper.end);
+        self.dta = (psp, 0x80);
+        self.blocks = BTreeMap::from([(psp, end - psp)]);
         self.line.clear();
         self.state = RunState::Running;
+    }
+
+    fn psp(&self) -> u16 {
+        if self.upper_program.is_some() {
+            xms::UPPER_START
+        } else {
+            PSP
+        }
     }
 
     /// Update connector A (0) or B (1). Pass `None` when the controller disconnects.
