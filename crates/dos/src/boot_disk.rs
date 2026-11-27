@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use dosa_cpu::Cpu;
 
@@ -10,7 +10,7 @@ const WRITE_PROTECTED: u8 = 3;
 const SECTOR_NOT_FOUND: u8 = 4;
 const MEDIA_CHANGED: u8 = 6;
 const DMA_BOUNDARY: u8 = 9;
-const READ_FAILURE: u8 = 0x20;
+const DISK_FAILURE: u8 = 0x20;
 const TIMEOUT: u8 = 0x80;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -31,6 +31,7 @@ impl BootDrive {
 pub(super) struct BootDisk {
     file: File,
     drive: BootDrive,
+    writable: bool,
     sectors: u64,
     cylinders: u16,
     heads: u16,
@@ -68,6 +69,10 @@ impl BootDisk {
         }
         file.rewind()?;
         let mut hasher = crc32fast::Hasher::new();
+        if self.writable {
+            // Keep old read-only identities stable and distinguish writable media.
+            hasher.update(b"Dosa writable BIOS disk\0");
+        }
         let mut buffer = [0; 64 * 1024];
         let mut remaining = length;
         while remaining != 0 {
@@ -91,8 +96,12 @@ impl BootDisk {
         self.status = status;
     }
 
-    pub fn open(file: File, drive: BootDrive) -> io::Result<(Self, [u8; SECTOR_BYTES])> {
-        let (disk, sector) = Self::open_media(file, drive)?;
+    pub fn open(
+        file: File,
+        drive: BootDrive,
+        writable: bool,
+    ) -> io::Result<(Self, [u8; SECTOR_BYTES])> {
+        let (disk, sector) = Self::open_media(file, drive, writable)?;
         if sector[510..] != [0x55, 0xaa] {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -107,13 +116,17 @@ impl BootDisk {
     }
 
     pub(super) fn replace_floppy(&mut self, file: File) -> io::Result<()> {
-        let (mut replacement, _) = Self::open_media(file, BootDrive::Floppy)?;
+        let (mut replacement, _) = Self::open_media(file, BootDrive::Floppy, false)?;
         replacement.status = self.status;
         *self = replacement;
         Ok(())
     }
 
-    fn open_media(mut file: File, drive: BootDrive) -> io::Result<(Self, [u8; SECTOR_BYTES])> {
+    fn open_media(
+        mut file: File,
+        drive: BootDrive,
+        writable: bool,
+    ) -> io::Result<(Self, [u8; SECTOR_BYTES])> {
         let metadata = file.metadata()?;
         let length = metadata.len();
         if !metadata.is_file() || length == 0 || length % SECTOR_BYTES as u64 != 0 {
@@ -143,6 +156,7 @@ impl BootDisk {
             Self {
                 file,
                 drive,
+                writable,
                 sectors,
                 cylinders,
                 heads,
@@ -193,11 +207,7 @@ impl BootDisk {
                     cpu.regs.ax &= 0xff00;
                     MEDIA_CHANGED
                 }
-                0x02 => self.read_chs(cpu, al),
-                0x03 => {
-                    cpu.regs.ax &= 0xff00;
-                    WRITE_PROTECTED
-                }
+                0x02 | 0x03 => self.chs_transfer(cpu, al, function == 0x03),
                 0x08 => {
                     let cylinder = self.cylinders - 1;
                     cpu.regs.cx =
@@ -223,7 +233,7 @@ impl BootDisk {
                     return;
                 }
                 0x42 | 0x43 if self.drive == BootDrive::HardDisk => {
-                    self.packet_transfer(cpu, function == 0x43)
+                    self.packet_transfer(cpu, function == 0x43, al)
                 }
                 0x48 if self.drive == BootDrive::HardDisk => self.extended_parameters(cpu),
                 _ => BAD_COMMAND,
@@ -244,12 +254,15 @@ impl BootDisk {
         cpu.regs.flags = (cpu.regs.flags & !1) | u16::from(status != 0);
     }
 
-    fn read_chs(&mut self, cpu: &mut Cpu, count: u8) -> u8 {
+    fn chs_transfer(&mut self, cpu: &mut Cpu, count: u8, write: bool) -> u8 {
         let [cl, ch] = cpu.regs.cx.to_le_bytes();
         let cylinder = u16::from(ch) | (u16::from(cl & 0xc0) << 2);
         let head = cpu.regs.dx >> 8;
         let sector = u16::from(cl & 0x3f);
         cpu.regs.ax &= 0xff00;
+        if write && !self.writable {
+            return WRITE_PROTECTED;
+        }
         if cylinder >= self.cylinders
             || head >= self.heads
             || sector == 0
@@ -260,14 +273,19 @@ impl BootDisk {
         let first = (u64::from(cylinder) * u64::from(self.heads) + u64::from(head))
             * u64::from(self.track_sectors)
             + u64::from(sector - 1);
-        let status = self.read(cpu, first, u16::from(count), cpu.regs.es, cpu.regs.bx);
-        if status == 0 {
-            cpu.regs.ax |= u16::from(count);
-        }
+        let (status, transferred) = self.transfer(
+            cpu,
+            first,
+            u16::from(count),
+            cpu.regs.es,
+            cpu.regs.bx,
+            write,
+        );
+        cpu.regs.ax |= transferred;
         status
     }
 
-    fn packet_transfer(&mut self, cpu: &mut Cpu, write: bool) -> u8 {
+    fn packet_transfer(&mut self, cpu: &mut Cpu, write: bool, flags: u8) -> u8 {
         let (ds, si) = (cpu.regs.ds, cpu.regs.si);
         if si > 0xfff0 || cpu.read_u16(ds, si) != 0x0010 {
             return BAD_COMMAND;
@@ -278,12 +296,13 @@ impl BootDisk {
         let lba = u64::from_le_bytes(std::array::from_fn(|index| {
             cpu.read_u8(ds, si + 8 + index as u16)
         }));
-        let status = if write {
-            WRITE_PROTECTED
+        // EDD 2.1 permits flags 0 and 1 for writes without verification.
+        let (status, transferred) = if write && self.writable && flags > 1 {
+            (BAD_COMMAND, 0)
         } else {
-            self.read(cpu, lba, count, segment, offset)
+            self.transfer(cpu, lba, count, segment, offset, write)
         };
-        cpu.write_u16(ds, si + 2, if status == 0 { count } else { 0 });
+        cpu.write_u16(ds, si + 2, transferred);
         status
     }
 
@@ -315,32 +334,65 @@ impl BootDisk {
         0
     }
 
-    fn read(&mut self, cpu: &mut Cpu, first: u64, count: u16, segment: u16, offset: u16) -> u8 {
+    fn transfer(
+        &mut self,
+        cpu: &mut Cpu,
+        first: u64,
+        count: u16,
+        segment: u16,
+        offset: u16,
+        write: bool,
+    ) -> (u8, u16) {
+        if write && !self.writable {
+            return (WRITE_PROTECTED, 0);
+        }
         if count == 0 || count > MAX_TRANSFER {
-            return BAD_COMMAND;
+            return (BAD_COMMAND, 0);
         }
         if first
             .checked_add(u64::from(count))
             .is_none_or(|end| end > self.sectors)
         {
-            return SECTOR_NOT_FOUND;
+            return (SECTOR_NOT_FOUND, 0);
         }
         let size = usize::from(count) * SECTOR_BYTES;
         let physical_low = usize::from(segment.wrapping_shl(4).wrapping_add(offset));
         if physical_low + size > 0x10000 || usize::from(offset) + size > 0x10000 {
-            return DMA_BOUNDARY;
+            return (DMA_BOUNDARY, 0);
         }
-        let mut bytes = vec![0; size];
         if self
             .file
             .seek(SeekFrom::Start(first * SECTOR_BYTES as u64))
-            .and_then(|_| self.file.read_exact(&mut bytes))
             .is_err()
         {
-            return READ_FAILURE;
+            return (DISK_FAILURE, 0);
+        }
+        if write {
+            if !self
+                .file
+                .metadata()
+                .is_ok_and(|metadata| metadata.len() == self.media_bytes())
+            {
+                return (DISK_FAILURE, 0);
+            }
+            let mut bytes = [0; SECTOR_BYTES];
+            for sector in 0..count {
+                let start = offset + sector * SECTOR_BYTES as u16;
+                for (index, byte) in bytes.iter_mut().enumerate() {
+                    *byte = cpu.read_u8(segment, start + index as u16);
+                }
+                if self.file.write_all(&bytes).is_err() {
+                    return (DISK_FAILURE, sector);
+                }
+            }
+            return (0, count);
+        }
+        let mut bytes = vec![0; size];
+        if self.file.read_exact(&mut bytes).is_err() {
+            return (DISK_FAILURE, 0);
         }
         cpu.load(segment, offset, &bytes);
-        0
+        (0, count)
     }
 }
 
