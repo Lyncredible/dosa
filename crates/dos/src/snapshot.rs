@@ -23,6 +23,7 @@ const VERSION_HIGH_PROGRAM: u16 = 7;
 const VERSION_MEMORY_STRATEGY: u16 = 8;
 const VERSION_INSTALLATION_DISK: u16 = 9;
 const VERSION_ADLIB_CHIP: u16 = 10;
+const VERSION_NULL_TERMINAL: u16 = 11;
 const HEADER_BYTES: usize = 18;
 /// Maximum size in bytes of a serialized guest save state.
 pub const MAX_GUEST_SNAPSHOT_BYTES: usize = 300 * 1024 * 1024;
@@ -278,6 +279,14 @@ impl Machine {
         } else {
             version
         };
+        let version = if self.null_terminal {
+            let mut prefix = postcard::to_allocvec(&version).map_err(|_| Invalid)?;
+            prefix.append(&mut metadata);
+            metadata = prefix;
+            VERSION_NULL_TERMINAL
+        } else {
+            version
+        };
         let cpu = self.cpu.save_snapshot()?;
         encode_snapshot(version, metadata, &cpu)
     }
@@ -341,7 +350,7 @@ impl Machine {
             return Err(Invalid);
         }
         let version = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
-        if !(VERSION_LEGACY..=VERSION_ADLIB_CHIP).contains(&version) {
+        if !(VERSION_LEGACY..=VERSION_NULL_TERMINAL).contains(&version) {
             return Err(GuestSnapshotError::Version(version));
         }
         let metadata_len = u32::from_le_bytes(bytes[10..14].try_into().unwrap()) as usize;
@@ -351,6 +360,17 @@ impl Machine {
         if crc32fast::hash(payload) != checksum {
             return Err(Invalid);
         }
+        let null_terminal = version == VERSION_NULL_TERMINAL;
+        let (version, metadata) = if null_terminal {
+            let (base, remaining) =
+                postcard::take_from_bytes::<u16>(metadata).map_err(|_| Invalid)?;
+            if !(VERSION_LEGACY..=VERSION_ADLIB_CHIP).contains(&base) {
+                return Err(Invalid);
+            }
+            (base, remaining)
+        } else {
+            (version, metadata)
+        };
         let (version, chip, metadata) = if version == VERSION_ADLIB_CHIP {
             let ((base, chip), remaining) =
                 postcard::take_from_bytes::<(u16, oplon::Opl2)>(metadata).map_err(|_| Invalid)?;
@@ -535,6 +555,7 @@ impl Machine {
             session_clock,
             verify_writes: state.verify_writes,
             extended_break: state.extended_break,
+            null_terminal,
             paused_since: state.paused.then_some(now),
             dta: state.dta,
             upper_program,
@@ -744,6 +765,27 @@ mod tests {
         restored.key(b'Z', 0x2c);
         assert_eq!(restored.run(100).unwrap(), RunState::Exited(42));
         assert_eq!(restored.take_output(), b"Z");
+    }
+
+    #[test]
+    fn snapshot_restores_terminal_selection_and_legacy_snapshots_use_console() {
+        let directory = Directory::new("save-guest-terminal");
+        directory.write("STATE.COM", &[0xeb, 0xfe]);
+        let mut original = directory.machine();
+        original.launch('C', "STATE.COM", "").unwrap();
+        let legacy = original.save_guest().unwrap();
+        original.set_terminal(crate::DosDevice::Null);
+        let saved = original.save_guest().unwrap();
+        assert_eq!(&saved[8..10], &VERSION_NULL_TERMINAL.to_le_bytes());
+
+        let mut restored = directory.machine();
+        restored.load_guest(&saved).unwrap();
+        assert!(restored.terminal() == crate::DosDevice::Null);
+        restored.load_guest(&legacy).unwrap();
+        assert!(restored.terminal() == crate::DosDevice::Console);
+        restored.load_guest(&saved).unwrap();
+        restored.reset();
+        assert!(restored.terminal() == crate::DosDevice::Console);
     }
 
     #[test]

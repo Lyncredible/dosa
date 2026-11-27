@@ -439,18 +439,18 @@ impl Shell {
         let mut echo = line
             .echo
             .then(|| format!("{}{}\r\n", self.prompt(), line.command));
-        let mut io = self
-            .batch_io()
-            .map(|parent| {
-                self.machine.prepare_shell_io(
-                    self.drive,
-                    &self.directories,
-                    Some(parent),
-                    None,
-                    None,
-                )
-            })
-            .transpose()?;
+        let parent = self.batch_io();
+        let mut io = if parent.is_some() || !self.console_terminal() {
+            Some(self.machine.prepare_shell_io(
+                self.drive,
+                &self.directories,
+                parent,
+                None,
+                None,
+            )?)
+        } else {
+            None
+        };
         if let (Some(text), Some(streams)) = (&echo, &mut io) {
             let bytes = self.machine.code_page().encode_text(text);
             if self.machine.write_shell_stdout(streams, &bytes)? {

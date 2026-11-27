@@ -320,6 +320,7 @@ pub struct Machine {
     session_clock: clock::SessionClock,
     verify_writes: bool,
     extended_break: bool,
+    null_terminal: bool,
     paused_since: Option<Instant>,
     dta: (u16, u16),
     upper_program: Option<UpperProgram>,
@@ -371,6 +372,7 @@ impl Machine {
             session_clock: clock::SessionClock::default(),
             verify_writes: false,
             extended_break: false,
+            null_terminal: false,
             paused_since: None,
             dta: (PSP, 0x80),
             upper_program: None,
@@ -462,6 +464,18 @@ impl Machine {
     /// Whether DOS requests read-back verification for mounted file writes.
     pub fn verify_writes(&self) -> bool {
         self.verify_writes
+    }
+
+    pub fn terminal(&self) -> DosDevice {
+        if self.null_terminal {
+            DosDevice::Null
+        } else {
+            DosDevice::Console
+        }
+    }
+
+    pub fn set_terminal(&mut self, terminal: DosDevice) {
+        self.null_terminal = terminal == DosDevice::Null;
     }
 
     pub fn set_verify_writes(&mut self, enabled: bool) {
@@ -648,6 +662,9 @@ impl Machine {
 
     /// Write builtin output to the redirected handle. Return false for display output.
     pub fn write_shell_stdout(&self, io: &mut ShellIo, bytes: &[u8]) -> Result<bool, DosError> {
+        if self.null_terminal && io.files.uses_default_terminal(1) {
+            return Ok(true);
+        }
         let write = || FileWriteOptions {
             modified: self.adjusted_file_time(),
             verify: self.verify_writes(),
@@ -669,6 +686,9 @@ impl Machine {
 
     /// Read one byte of redirected builtin input without consuming host keyboard events.
     pub fn read_shell_stdin(&self, io: &mut ShellIo) -> Result<ShellInput, DosError> {
+        if self.null_terminal && io.files.uses_default_terminal(0) {
+            return Ok(ShellInput::Eof);
+        }
         let result = match io.files.input_target(0) {
             Ok(files::HandleTarget::Console) => Ok(ShellInput::Console),
             Ok(files::HandleTarget::Null) => Ok(ShellInput::Eof),
@@ -715,11 +735,14 @@ impl Machine {
         drive: char,
         path: &str,
         args: &str,
-        files: DosFiles,
+        mut files: DosFiles,
         upper_program: Option<UpperProgram>,
     ) -> Result<(), DosError> {
         if self.state.is_active() {
             return Err(DosError::Busy);
+        }
+        if self.null_terminal {
+            files.use_null_terminal();
         }
         let mount = self.drive(drive).ok_or(DosError::UnmountedDrive(drive))?;
         let entry = mount.metadata(path).map_err(DosError::Mount)?;

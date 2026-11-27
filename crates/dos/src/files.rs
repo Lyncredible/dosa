@@ -14,6 +14,7 @@ pub(crate) use snapshot::{FilesSnapshot, SnapshotPipes};
 
 const MAX_OPEN_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_HANDLES: u16 = 64;
+const CONSOLE_STREAMS: [(u16, u16); 3] = [(0, 0x81), (1, 0x82), (2, 0x82)];
 
 pub(crate) struct DosFiles {
     pub drive: char,
@@ -104,7 +105,7 @@ impl DosFiles {
             open_files: BTreeMap::new(),
             search: VecDeque::new(),
         };
-        for (handle, info) in [(0, 0x81), (1, 0x82), (2, 0x82)] {
+        for (handle, info) in CONSOLE_STREAMS {
             let source = FileSource::Device(DeviceHandle {
                 device: DosDevice::Console,
                 readable: handle == 0,
@@ -309,6 +310,34 @@ impl DosFiles {
         self.open_files
             .get(self.handles.get(&handle)?)
             .map(Arc::as_ref)
+    }
+
+    /// Explicit CON redirections have both console bits set. Only the
+    /// original per-stream console handles follow a change of terminal.
+    pub(crate) fn uses_default_terminal(&self, handle: u16) -> bool {
+        CONSOLE_STREAMS.iter().any(|&(stream, info)| {
+            handle == stream
+                && self
+                    .file(handle)
+                    .is_some_and(|file| file.device_info == info)
+        })
+    }
+
+    pub(crate) fn use_null_terminal(&mut self) {
+        for (handle, _) in CONSOLE_STREAMS {
+            if self.uses_default_terminal(handle) {
+                let _ = self.close(handle);
+                self.insert_handle(
+                    handle,
+                    FileSource::Device(DeviceHandle {
+                        device: DosDevice::Null,
+                        readable: handle == 0,
+                        writable: handle != 0,
+                    }),
+                    DosDevice::Null.ioctl_info(),
+                );
+            }
+        }
     }
 
     pub(crate) fn attach_pipe(&mut self, bytes: Arc<Mutex<Vec<u8>>>, writable: bool) {
