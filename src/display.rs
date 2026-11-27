@@ -701,6 +701,7 @@ impl App for Desktop {
                 })
                 .collect(),
             iso_set_drives: self.shell.iso_set_drives().collect(),
+            boot_floppy: self.shell.machine.has_boot_floppy(),
             cpu: self.settings.cpu,
             speed: self.settings.speed,
             volume: self.volume,
@@ -821,6 +822,19 @@ impl App for Desktop {
                         format!("Drive {drive}: ISO {current}/{count}")
                     }
                     Err(error) => format!("ISO swap failed: {error}"),
+                };
+            }
+            MenuAction::Mount {
+                source,
+                kind: dosa_desktop::MountKind::SwapBootFloppy,
+                ..
+            } => {
+                let result = std::fs::File::open(source)
+                    .map_err(dosa_dos::DosError::ReplaceFloppy)
+                    .and_then(|file| self.shell.machine.swap_boot_floppy(file));
+                self.status = match result {
+                    Ok(()) => "Swapped boot floppy in A:".into(),
+                    Err(error) => format!("Floppy swap failed: {error}"),
                 };
             }
             MenuAction::Mount {
@@ -1290,6 +1304,71 @@ fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_swaps_a_boot_floppy_while_the_guest_waits_for_a_key() {
+        let fixture = tempfile::tempdir().unwrap();
+        let boot_path = fixture.path().join("boot.img");
+        let data_path = fixture.path().join("data.img");
+        let invalid_path = fixture.path().join("invalid.img");
+        let mut boot = vec![0; 1_474_560];
+        let guest = [
+            0x31, 0xc0, 0xcd, 0x16, // Wait for a key while the drive is changed.
+            0xbb, 0, 0x7e, 0xb9, 2, 0, 0x31, 0xd2, 0xb8, 1, 2, 0xcd, 0x13, 0x88, 0xe0, 0x04, b'0',
+            0xb4, 0x0e, 0xcd, 0x10, // Print the change status.
+            0xbb, 0, 0x7e, 0xb8, 1, 2, 0xcd, 0x13, // Retry the read.
+            0xa0, 0, 0x7e, 0xb4, 0x0e, 0xcd, 0x10, // Print the first byte.
+            0x31, 0xc0, 0xcd, 0x16, // Leave the result on the screen.
+        ];
+        boot[..guest.len()].copy_from_slice(&guest);
+        boot[510..512].copy_from_slice(&[0x55, 0xaa]);
+        boot[512] = b'O';
+        let mut data = vec![0; 368_640];
+        data[512] = b'N';
+        std::fs::write(&boot_path, &boot).unwrap();
+        std::fs::write(&data_path, &data).unwrap();
+        std::fs::write(&invalid_path, [0]).unwrap();
+
+        let mut desktop = Desktop::new(Shell::new(), None);
+        assert!(!desktop.menu().boot_floppy);
+        desktop.submit(&format!("BOOT A \"{}\"", boot_path.display()));
+        desktop.tick();
+        assert!(desktop.running && desktop.menu().boot_floppy);
+        let swap = |source| MenuAction::Mount {
+            drive: 'A',
+            source,
+            kind: dosa_desktop::MountKind::SwapBootFloppy,
+        };
+        desktop.menu_action(swap(data_path.clone()));
+        assert_eq!(desktop.menu().status, "Swapped boot floppy in A:");
+        desktop.menu_action(swap(invalid_path));
+        assert!(desktop.menu().status.contains("whole 512-byte sectors"));
+
+        desktop.input(Input {
+            key: Key::Enter,
+            pressed: true,
+            text: None,
+            modifiers: Default::default(),
+            scan_code: 0x1c,
+        });
+        desktop.tick();
+        assert!(desktop.running);
+        let Video::Text(frame) = desktop.shell.machine.video() else {
+            panic!("expected the text console");
+        };
+        assert!(
+            frame
+                .cells
+                .as_chunks::<2>()
+                .0
+                .windows(2)
+                .any(|cells| { [cells[0][0], cells[1][0]] == *b"6N" })
+        );
+        assert_eq!(std::fs::read(boot_path).unwrap(), boot);
+        assert_eq!(std::fs::read(data_path).unwrap(), data);
+        desktop.menu_action(MenuAction::ResetGuest);
+        assert!(!desktop.menu().boot_floppy);
+    }
 
     #[test]
     fn desktop_renders_the_vga_font_bank_selected_by_each_cell() {

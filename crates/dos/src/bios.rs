@@ -10,6 +10,7 @@ const USER_TIMER_VECTOR: u8 = 0x1c;
 const ROM: u16 = 0xf000;
 // This firmware byte travels with the BIOS tick data in the guest's RAM image.
 const RTC_DST_OPTION: u16 = 0x07f0;
+const FLOPPY_CHANGE_LINE: u16 = 0x07f1;
 const TIMER_ENTRY: u16 = 0x0800;
 const TIMER_RETURN: u16 = TIMER_ENTRY + 3;
 const KEYBOARD_ENTRY: u16 = 0x0900;
@@ -53,6 +54,17 @@ pub(super) fn equipment(cpu: &Cpu) -> u16 {
 
 pub(super) fn install_floppy(cpu: &mut Cpu) {
     cpu.write_u16(BDA, EQUIPMENT, equipment(cpu) | 1);
+}
+
+pub(super) fn signal_floppy_change(cpu: &mut Cpu) {
+    cpu.write_u8(ROM, FLOPPY_CHANGE_LINE, 1);
+}
+
+pub(super) fn take_floppy_change(cpu: &mut Cpu) -> bool {
+    // Keep the change line in firmware memory so it travels with saved guests.
+    let changed = cpu.read_u8(ROM, FLOPPY_CHANGE_LINE) != 0;
+    cpu.write_u8(ROM, FLOPPY_CHANGE_LINE, 0);
+    changed
 }
 
 pub(super) fn default_keyboard(cpu: &Cpu) -> bool {

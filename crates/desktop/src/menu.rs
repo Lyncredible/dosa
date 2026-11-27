@@ -96,6 +96,7 @@ pub enum MountKind {
     Fat,
     Iso,
     SwapIso,
+    SwapBootFloppy,
     SessionZip,
 }
 
@@ -148,6 +149,7 @@ pub struct MenuState {
     pub drives: std::collections::BTreeMap<char, &'static str>,
     pub iso_drives: std::collections::BTreeSet<char>,
     pub iso_set_drives: std::collections::BTreeSet<char>,
+    pub boot_floppy: bool,
     pub cpu: CpuMode,
     pub speed: Speed,
     pub volume: Volume,
@@ -177,6 +179,7 @@ impl Default for MenuState {
             drives: Default::default(),
             iso_drives: Default::default(),
             iso_set_drives: Default::default(),
+            boot_floppy: false,
             cpu: CpuMode::default(),
             speed: Speed::default(),
             volume: Volume::default(),
@@ -388,7 +391,7 @@ impl Menu {
         }
         if tab == Tab::Drives {
             for index in 0..26 {
-                if drive_rect(index).contains(point) {
+                if drive_rect(index, items.len()).contains(point) {
                     self.drive = Some(char::from(b'A' + index as u8));
                     return (true, None);
                 }
@@ -676,12 +679,12 @@ impl Menu {
                 let label = format!("{drive}: {info}");
                 canvas.text(
                     POPUP_LEFT + 12,
-                    panel.rows_top() + DRIVE_ACTION_ROWS * ROW_HEIGHT + 3,
+                    panel.rows_top() + items.len() as u32 * ROW_HEIGHT + 3,
                     &label,
                     MUTED,
                 );
                 for index in 0..26 {
-                    let rect = drive_rect(index);
+                    let rect = drive_rect(index, items.len());
                     let letter = char::from(b'A' + index as u8);
                     if letter == drive || self.point.is_some_and(|point| rect.contains(point)) {
                         canvas.fill(rect, ACTIVE);
@@ -725,13 +728,11 @@ fn row_rect(panel: Panel, index: usize) -> Rect {
     }
 }
 
-const DRIVE_ACTION_ROWS: u32 = 9;
-
-fn drive_rect(index: u32) -> Rect {
+fn drive_rect(index: u32, rows: usize) -> Rect {
     Rect {
         x: POPUP_LEFT + 8 + (index % 13) * 18,
         y: Panel::Category(Tab::Drives).rows_top()
-            + DRIVE_ACTION_ROWS * ROW_HEIGHT
+            + rows as u32 * ROW_HEIGHT
             + 18
             + (index / 13) * 21,
         w: 17,
@@ -863,6 +864,14 @@ pub(crate) fn options(tab: Tab, state: &MenuState, drive: char, fullscreen: bool
             can_change_mounts && state.drives.contains_key(&drive),
             false,
         )))
+        .chain(state.boot_floppy.then(|| {
+            item(
+                "Swap boot floppy A:...",
+                Command::Mount(MountKind::SwapBootFloppy, 'A'),
+                true,
+                false,
+            )
+        }))
         .collect(),
         Tab::Cpu => [CpuMode::I8086, CpuMode::I286, CpuMode::I386]
             .into_iter()
@@ -1101,6 +1110,10 @@ pub(crate) fn pick_path(window: &Window, kind: MountKind) -> Option<PathBuf> {
             .pick_file(),
         MountKind::Fat => dialog
             .set_title("Mount a FAT disk image")
+            .add_filter("Raw disk image", &["img", "ima", "dsk"])
+            .pick_file(),
+        MountKind::SwapBootFloppy => dialog
+            .set_title("Choose a replacement boot floppy")
             .add_filter("Raw disk image", &["img", "ima", "dsk"])
             .pick_file(),
         MountKind::SessionZip => dialog

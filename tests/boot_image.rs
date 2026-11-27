@@ -130,6 +130,63 @@ fn restores_boot_disk_status_and_reads_the_second_stage() {
 }
 
 #[test]
+fn restored_boot_guest_detects_the_replacement_floppy_once() {
+    use dosa_dos::{BootDrive, DosError, GuestSnapshotError, Machine, RunState};
+    use std::fs::{self, File};
+
+    let scratch = tempfile::tempdir().unwrap();
+    let boot_path = scratch.path().join("boot.img");
+    let data_path = scratch.path().join("data.img");
+    let mut boot = vec![0; 1_474_560];
+    let code = [
+        0x31, 0xc0, 0xcd, 0x16, // Wait while the drive is changed.
+        0x31, 0xd2, 0xb4, 0x15, 0xcd, 0x13, // Get the drive type.
+        0x88, 0xe0, 0x04, b'0', 0xb4, 0x0e, 0xcd, 0x10, // Print type 2.
+        0x30, 0xe4, 0xcd, 0x13, // Reset the controller.
+        0xb4, 0x16, 0xcd, 0x13, // Detect the change and clear the latch.
+        0x88, 0xe0, 0x14, b'0', 0xb4, 0x0e, 0xcd, 0x10, // Print status 6 plus carry.
+        0xb4, 0x16, 0xcd, 0x13, // The next query should report no change.
+        0x88, 0xe0, 0x14, b'0', 0xb4, 0x0e, 0xcd, 0x10, // Print status 0 plus carry.
+        0xb4, 0x08, 0xcd, 0x13, // Get the new geometry.
+        0x80, 0xe1, 0x3f, 0x88, 0xc8, 0x04, b'0', 0xb4, 0x0e, 0xcd, 0x10, 0xcd,
+        0x18, // No next boot device.
+    ];
+    boot[..code.len()].copy_from_slice(&code);
+    boot[510..512].copy_from_slice(&[0x55, 0xaa]);
+    fs::write(&boot_path, boot).unwrap();
+    fs::write(&data_path, vec![0; 368_640]).unwrap();
+    let boot = || {
+        let mut machine = Machine::new();
+        machine
+            .boot(File::open(&boot_path).unwrap(), BootDrive::Floppy)
+            .unwrap();
+        machine
+    };
+    let swap = |machine: &mut Machine| machine.swap_boot_floppy(File::open(&data_path).unwrap());
+    assert!(matches!(
+        swap(&mut Machine::new()),
+        Err(DosError::NoBootFloppy)
+    ));
+    let mut running = boot();
+    assert_eq!(running.run(100).unwrap(), RunState::WaitingForKey);
+    running.set_paused(true);
+    swap(&mut running).unwrap();
+    let saved = running.save_guest().unwrap();
+
+    let mut restored = boot();
+    assert!(matches!(
+        restored.load_guest(&saved),
+        Err(GuestSnapshotError::MediaChanged)
+    ));
+    swap(&mut restored).unwrap();
+    restored.load_guest(&saved).unwrap();
+    restored.set_paused(false);
+    restored.key(b' ', 0x39);
+    assert_eq!(restored.run(200).unwrap(), RunState::Exited(1));
+    assert_eq!(restored.take_output(), b"2709");
+}
+
+#[test]
 fn rejects_a_raw_image_without_the_boot_signature() {
     let file = tempfile::NamedTempFile::new().unwrap();
     file.as_file().set_len(512).unwrap();

@@ -8,8 +8,10 @@ const MAX_TRANSFER: u16 = 127;
 const BAD_COMMAND: u8 = 1;
 const WRITE_PROTECTED: u8 = 3;
 const SECTOR_NOT_FOUND: u8 = 4;
+const MEDIA_CHANGED: u8 = 6;
 const DMA_BOUNDARY: u8 = 9;
 const READ_FAILURE: u8 = 0x20;
+const TIMEOUT: u8 = 0x80;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BootDrive {
@@ -89,7 +91,29 @@ impl BootDisk {
         self.status = status;
     }
 
-    pub fn open(mut file: File, drive: BootDrive) -> io::Result<(Self, [u8; SECTOR_BYTES])> {
+    pub fn open(file: File, drive: BootDrive) -> io::Result<(Self, [u8; SECTOR_BYTES])> {
+        let (disk, sector) = Self::open_media(file, drive)?;
+        if sector[510..] != [0x55, 0xaa] {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "boot sector is missing the 55 AA signature",
+            ));
+        }
+        Ok((disk, sector))
+    }
+
+    pub(super) fn drive(&self) -> BootDrive {
+        self.drive
+    }
+
+    pub(super) fn replace_floppy(&mut self, file: File) -> io::Result<()> {
+        let (mut replacement, _) = Self::open_media(file, BootDrive::Floppy)?;
+        replacement.status = self.status;
+        *self = replacement;
+        Ok(())
+    }
+
+    fn open_media(mut file: File, drive: BootDrive) -> io::Result<(Self, [u8; SECTOR_BYTES])> {
         let metadata = file.metadata()?;
         let length = metadata.len();
         if !metadata.is_file() || length == 0 || length % SECTOR_BYTES as u64 != 0 {
@@ -115,12 +139,6 @@ impl BootDisk {
         file.rewind()?;
         let mut sector = [0; SECTOR_BYTES];
         file.read_exact(&mut sector)?;
-        if sector[510..] != [0x55, 0xaa] {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "boot sector is missing the 55 AA signature",
-            ));
-        }
         Ok((
             Self {
                 file,
@@ -145,12 +163,36 @@ impl BootDisk {
 
     pub fn interrupt(&mut self, cpu: &mut Cpu) {
         let [al, function] = cpu.regs.ax.to_le_bytes();
+        let floppy = self.drive == BootDrive::Floppy;
+        if function == 0x15 {
+            let disk_type = if cpu.regs.dx as u8 != self.drive.number() {
+                0
+            } else if floppy {
+                2
+            } else {
+                let sectors = self.sectors.min(u64::from(u32::MAX)) as u32;
+                cpu.regs.cx = (sectors >> 16) as u16;
+                cpu.regs.dx = sectors as u16;
+                3
+            };
+            self.finish(cpu, 0);
+            cpu.regs.ax |= disk_type << 8;
+            return;
+        }
         let status = if cpu.regs.dx as u8 != self.drive.number() {
-            BAD_COMMAND
+            if function == 0x16 && (cpu.regs.dx as u8) < 0x80 {
+                TIMEOUT
+            } else {
+                BAD_COMMAND
+            }
         } else {
             match function {
                 0x00 => 0,
                 0x01 => self.status,
+                0x02 | 0x03 if floppy && crate::bios::take_floppy_change(cpu) => {
+                    cpu.regs.ax &= 0xff00;
+                    MEDIA_CHANGED
+                }
                 0x02 => self.read_chs(cpu, al),
                 0x03 => {
                     cpu.regs.ax &= 0xff00;
@@ -165,6 +207,13 @@ impl BootDisk {
                     cpu.regs.es = 0;
                     cpu.regs.di = 0;
                     0
+                }
+                0x16 if floppy => {
+                    if crate::bios::take_floppy_change(cpu) {
+                        MEDIA_CHANGED
+                    } else {
+                        0
+                    }
                 }
                 0x41 if self.drive == BootDrive::HardDisk && cpu.regs.bx == 0x55aa => {
                     cpu.regs.bx = 0xaa55;

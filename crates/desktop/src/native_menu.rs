@@ -382,6 +382,7 @@ mod tests {
                     paused: true,
                     iso_drives: ['D'].into(),
                     iso_set_drives: ['D'].into(),
+                    boot_floppy: true,
                     ..Default::default()
                 };
                 native.sync(&state, false);
@@ -424,6 +425,10 @@ mod tests {
                 assert!(matches!(
                     action_at(drives, &actions, "Next ISO in set"),
                     Some(Action::Run(Command::App(MenuAction::NextIso('D'))))
+                ));
+                assert!(matches!(
+                    action_at(drives, &actions, "Swap boot floppy A:..."),
+                    Some(Action::Run(Command::Mount(MountKind::SwapBootFloppy, 'A')))
                 ));
                 let view = unsafe { GetSubMenu(popup.0, item_position(popup.0, "&View")) };
                 assert!(action_at(view, &actions, "132 x 50").is_none());
