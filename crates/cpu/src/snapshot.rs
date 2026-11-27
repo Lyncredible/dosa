@@ -4,6 +4,7 @@ use std::fmt;
 
 const MAGIC: &[u8; 8] = b"DOSACPU\0";
 const VERSION: u16 = 1;
+const VERSION_TASK_REGISTER: u16 = 2;
 const HEADER_BYTES: usize = 12;
 const MAX_METADATA_BYTES: usize = 512;
 
@@ -65,12 +66,19 @@ impl Cpu {
             mapping: self.snapshot_mapping(),
         };
         let metadata = postcard::to_allocvec(&metadata).map_err(|_| SnapshotError::Metadata)?;
+        let (version, metadata) = match self.control.task_register {
+            Some(task) => (
+                VERSION_TASK_REGISTER,
+                postcard::to_extend(&task, metadata).map_err(|_| SnapshotError::Metadata)?,
+            ),
+            None => (VERSION, metadata),
+        };
         if metadata.len() > MAX_METADATA_BYTES {
             return Err(SnapshotError::Metadata);
         }
         let mut bytes = Vec::with_capacity(HEADER_BYTES + metadata.len() + self.memory.len());
         bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&VERSION.to_le_bytes());
+        bytes.extend_from_slice(&version.to_le_bytes());
         bytes.extend_from_slice(&(metadata.len() as u16).to_le_bytes());
         bytes.extend_from_slice(&metadata);
         bytes.extend_from_slice(&self.memory);
@@ -85,7 +93,7 @@ impl Cpu {
             .filter(|(header, _)| header.starts_with(MAGIC))
             .ok_or(SnapshotError::Header)?;
         let version = u16::from_le_bytes([header[8], header[9]]);
-        if version != VERSION {
+        if !matches!(version, VERSION | VERSION_TASK_REGISTER) {
             return Err(SnapshotError::Version(version));
         }
         let length = usize::from(u16::from_le_bytes([header[10], header[11]]));
@@ -93,8 +101,16 @@ impl Cpu {
             .split_at_checked(length)
             .filter(|_| length <= MAX_METADATA_BYTES)
             .ok_or(SnapshotError::Metadata)?;
-        let (state, remainder) =
+        let (mut state, remainder) =
             postcard::take_from_bytes::<Metadata>(metadata).map_err(|_| SnapshotError::Metadata)?;
+        let remainder = if version == VERSION_TASK_REGISTER {
+            let (task, trailing) =
+                postcard::take_from_bytes(remainder).map_err(|_| SnapshotError::Metadata)?;
+            state.control.task_register = Some(task);
+            trailing
+        } else {
+            remainder
+        };
         if state.profile != self.profile {
             return Err(SnapshotError::Profile);
         }
