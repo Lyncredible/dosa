@@ -5,7 +5,57 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 const APERTURE: usize = 0xa0000;
 const PLANE_BYTES: usize = 0x10000;
+const GLYPH_ROWS: usize = 32;
+const GLYPHS_PER_BANK: usize = 256;
+type GlyphBank = [[u8; GLYPH_ROWS]; GLYPHS_PER_BANK];
 pub(crate) const WIDTH: usize = 320;
+
+/// The two VGA character maps currently selected for an alphanumeric frame.
+#[derive(Clone, Copy)]
+pub struct VgaTextFonts<'a>(&'a Mutex<PlaneRam>);
+
+/// Character maps copied together so text rendering only locks VGA RAM once.
+pub struct TextFontBanks {
+    low: GlyphBank,
+    high: Option<GlyphBank>,
+}
+
+impl VgaTextFonts<'_> {
+    pub fn read(self) -> TextFontBanks {
+        let ram = lock(self.0);
+        let select = ram.sequencer[3];
+        let low = (select & 3) | ((select >> 2) & 4);
+        let high = ((select >> 2) & 3) | ((select >> 3) & 4);
+        let bank = |block| {
+            let base = text_font_offset(block);
+            std::array::from_fn(|glyph| {
+                std::array::from_fn(|row| ram.cells[base + glyph * GLYPH_ROWS + row][2])
+            })
+        };
+        TextFontBanks {
+            low: bank(low),
+            high: (low != high).then(|| bank(high)),
+        }
+    }
+}
+
+impl TextFontBanks {
+    pub fn glyph(&self, character: u8, attribute: u8) -> &[u8; GLYPH_ROWS] {
+        let bank = match &self.high {
+            Some(high) if attribute & 8 != 0 => high,
+            _ => &self.low,
+        };
+        &bank[usize::from(character)]
+    }
+
+    pub fn uses_dual_maps(&self) -> bool {
+        self.high.is_some()
+    }
+}
+
+fn text_font_offset(block: u8) -> usize {
+    usize::from(block & 3) * 0x4000 + usize::from(block >> 2) * 0x2000
+}
 
 const CRTC_MODE_13: [u8; 25] = [
     0x5f, 0x4f, 0x50, 0x82, 0x54, 0x80, 0xbf, 0x1f, 0x00, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -39,6 +89,43 @@ pub(crate) struct Vga {
 }
 
 impl Vga {
+    pub(crate) fn text_fonts(&self) -> VgaTextFonts<'_> {
+        VgaTextFonts(&self.ram)
+    }
+
+    pub(crate) fn select_text_fonts(&mut self, select: u8) {
+        lock(&self.ram).sequencer[3] = select & 0x3f;
+    }
+
+    pub(crate) fn load_text_font(
+        &mut self,
+        block: u8,
+        first: usize,
+        glyphs: impl Iterator<Item = [u8; GLYPH_ROWS]>,
+    ) {
+        let mut ram = lock(&self.ram);
+        let start = text_font_offset(block) + first * GLYPH_ROWS;
+        let end = text_font_offset(block) + GLYPHS_PER_BANK * GLYPH_ROWS;
+        for (slot, glyph) in ram.cells[start..end]
+            .as_chunks_mut::<GLYPH_ROWS>()
+            .0
+            .iter_mut()
+            .zip(glyphs)
+        {
+            for (cell, byte) in slot.iter_mut().zip(glyph) {
+                cell[2] = byte;
+            }
+        }
+    }
+
+    pub(crate) fn copy_text_fonts(&mut self, from: &Self) {
+        let source = lock(&from.ram);
+        let mut target = lock(&self.ram);
+        target.sequencer[3] = source.sequencer[3];
+        for (to, from) in target.cells.iter_mut().zip(source.cells.iter()) {
+            to[2] = from[2];
+        }
+    }
     pub(crate) fn snapshot(&self) -> VgaSnapshot {
         VgaSnapshot {
             planar16: self.planar16,

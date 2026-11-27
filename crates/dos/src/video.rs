@@ -1,7 +1,7 @@
 use crate::{
     CodePage,
     ansi::{Ansi, Byte},
-    vga::{Vga, VgaSnapshot},
+    vga::{Vga, VgaSnapshot, VgaTextFonts},
 };
 use dosa_cpu::Cpu;
 
@@ -10,6 +10,9 @@ use dosa_cpu::Cpu;
 mod text_tests;
 
 const TEXT: usize = 0xb8000;
+// The firmware flag is part of CPU RAM, so older guest snapshots still decode.
+const FONT_FIRMWARE_SEGMENT: u16 = 0xf000;
+const FONT_FIRMWARE_FLAG: u16 = 0x0780;
 const COLS: usize = 80;
 #[cfg(test)]
 const ROW_BYTES: usize = COLS * 2;
@@ -25,6 +28,7 @@ pub struct TextFrame<'a> {
     pub rows: u16,
     pub character_height: u16,
     pub code_page: CodePage,
+    pub fonts: Option<VgaTextFonts<'a>>,
     pub cells: &'a [u8],
     pub cursor: Option<(u16, u16)>,
 }
@@ -264,6 +268,7 @@ impl Adapter {
                 rows: self.text.rows() as u16,
                 character_height: self.text.character_height,
                 code_page: self.code_page,
+                fonts: Self::bios_fonts_active(cpu).then(|| self.vga.text_fonts()),
                 cells: &cpu.memory[TEXT..TEXT + self.text.text_bytes()],
                 cursor: (self.cursor_shape & 0x2000 == 0)
                     .then_some((self.col as u16, self.row as u16)),
@@ -315,6 +320,10 @@ impl Adapter {
             .copy_from_slice(&from.memory[TEXT..TEXT + MAX_TEXT_BYTES]);
         self.code_page = previous.code_page;
         self.ansi = previous.ansi;
+        if previous.mode == 3 && Self::bios_fonts_active(from) {
+            self.vga.copy_text_fonts(&previous.vga);
+            to.write_u8(FONT_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG, 1);
+        }
         self.console = previous.console;
         self.next_scan_lines = self.console.scan_lines;
         self.col = previous.col;
@@ -386,6 +395,7 @@ impl Adapter {
             self.vga.leave(cpu);
         }
         self.mode = mode;
+        cpu.write_u8(FONT_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG, 0);
         self.palette = default_palette();
         if mode == 0x12 {
             for (index, color) in self.palette[..64].iter_mut().enumerate() {
@@ -828,18 +838,7 @@ impl Adapter {
                         .map(expand_dac);
                 }
             }
-            0x11 if self.mode == 3 && matches!(al, 0x11 | 0x12 | 0x14) => {
-                let character_height = match al {
-                    0x11 => 14,
-                    0x12 => 8,
-                    _ => 16,
-                };
-                let geometry = TextGeometry {
-                    character_height,
-                    ..self.text
-                };
-                self.set_text_geometry(cpu, geometry, geometry.font_page_bytes());
-            }
+            0x11 if self.mode == 3 => return self.bios_text_font(cpu, al, bh, bl),
             0x12 if bl == 0x10 => {
                 cpu.regs.bx = 3;
                 cpu.regs.cx = 0;
@@ -854,6 +853,93 @@ impl Adapter {
                 cpu.regs.bx = 8;
             }
             _ => return false,
+        }
+        true
+    }
+
+    fn bios_fonts_active(cpu: &Cpu) -> bool {
+        cpu.read_u8(FONT_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG) == 1
+    }
+
+    pub(crate) fn set_code_page(&mut self, cpu: &mut Cpu, page: CodePage) {
+        self.code_page = page;
+        cpu.write_u8(FONT_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG, 0);
+    }
+
+    fn activate_bios_fonts(&mut self, cpu: &mut Cpu) {
+        if !Self::bios_fonts_active(cpu) {
+            self.vga.select_text_fonts(0);
+            self.load_rom_text_font(0, self.text.character_height);
+            cpu.write_u8(FONT_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG, 1);
+        }
+    }
+
+    fn load_rom_text_font(&mut self, bank: u8, height: u16) {
+        let height = usize::from(height);
+        let glyphs = CodePage::Cp437.glyphs().iter().map(|bitmap| {
+            std::array::from_fn(|row| {
+                if row < height {
+                    bitmap[row * 8 / height].reverse_bits()
+                } else {
+                    0
+                }
+            })
+        });
+        self.vga.load_text_font(bank, 0, glyphs);
+    }
+
+    fn bios_text_font(&mut self, cpu: &mut Cpu, function: u8, height: u8, bank: u8) -> bool {
+        if function == 3 {
+            self.activate_bios_fonts(cpu);
+            self.vga.select_text_fonts(bank);
+            return true;
+        }
+        if bank > 7 {
+            return false;
+        }
+        let update_geometry = function & 0x10 != 0;
+        let height = match function {
+            0x00 | 0x10 if (1..=32).contains(&height) => u16::from(height),
+            0x01 | 0x11 => 14,
+            0x02 | 0x12 => 8,
+            0x04 | 0x14 => 16,
+            _ => return false,
+        };
+        if update_geometry && !matches!(height, 8 | 14 | 16) {
+            return false;
+        }
+        if matches!(function, 0x00 | 0x10) {
+            let first = usize::from(cpu.regs.dx);
+            let count = usize::from(cpu.regs.cx);
+            if first + count > 256 {
+                return false;
+            }
+            self.activate_bios_fonts(cpu);
+            let base = cpu.regs.bp;
+            let segment = cpu.regs.es;
+            let glyphs = (0..count)
+                .map(|glyph| {
+                    let offset = base.wrapping_add(glyph as u16 * height);
+                    std::array::from_fn(|row| {
+                        if (row as u16) < height {
+                            cpu.read_u8(segment, offset.wrapping_add(row as u16))
+                        } else {
+                            0
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            self.vga.load_text_font(bank, first, glyphs.into_iter());
+        } else {
+            self.activate_bios_fonts(cpu);
+            self.load_rom_text_font(bank, height);
+        }
+        if update_geometry {
+            let geometry = TextGeometry {
+                character_height: height,
+                ..self.text
+            };
+            self.set_text_geometry(cpu, geometry, geometry.font_page_bytes());
         }
         true
     }
