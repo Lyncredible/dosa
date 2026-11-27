@@ -1126,8 +1126,8 @@ impl Machine {
         } else {
             None
         };
-        if real_mode {
-            self.run_firmware_hooks();
+        if firmware_mode {
+            self.run_firmware_hooks(real_mode);
         }
         let step = self
             .cpu
@@ -1236,8 +1236,8 @@ impl Machine {
         xms::Xms::complete(&mut self.cpu, result);
     }
 
-    fn run_firmware_hooks(&mut self) {
-        if xms::Xms::at_entry(&self.cpu) && self.xms_available() {
+    fn run_firmware_hooks(&mut self, real_mode: bool) {
+        if real_mode && xms::Xms::at_entry(&self.cpu) && self.xms_available() {
             self.xms_call();
         }
         match bios::hook(&self.cpu) {
@@ -1250,7 +1250,7 @@ impl Machine {
             }
             None => {}
         }
-        if self.mouse.at_driver_entry(&self.cpu) {
+        if real_mode && self.mouse.at_driver_entry(&self.cpu) {
             self.mouse_interrupt();
         }
     }

@@ -916,9 +916,7 @@ fn pci_bios_presence_probe_reports_unsupported_firmware() {
     assert_ne!(machine.cpu.regs.flags & crate::CARRY, 0);
 }
 
-#[test]
-fn virtual_8086_can_return_from_the_bios_keyboard_poll() {
-    let directory = Directory::new("vm86-int16");
+fn virtual_bios_machine(directory: &Directory, vector: u8) -> (Machine, u16) {
     directory.write(
         "VM86.COM",
         &[
@@ -944,7 +942,7 @@ fn virtual_8086_can_return_from_the_bios_keyboard_poll() {
         0,
         &[0xb8, 0x10, 0, 0x8e, 0xd0, 0xbc, 0xc0, 0, 0x66, 0xcf], // Ring 0 stack; IRETD.
     );
-    let vector = u16::from(crate::bios::KEYBOARD_SERVICE_VECTOR) * 4;
+    let vector = u16::from(vector) * 4;
     let entry = cpu.read_u16(0, vector);
     let rom = cpu.read_u16(0, vector + 2);
     // A monitor reflects the interrupt by returning to the ROM with a
@@ -973,13 +971,41 @@ fn virtual_8086_can_return_from_the_bios_keyboard_poll() {
     }
     assert!(cpu.virtual_8086_mode());
     assert_eq!((cpu.regs.cs, cpu.regs.ip), (rom, entry));
-    cpu.regs.ax = 0x0100;
+    (machine, guest)
+}
 
+#[test]
+fn virtual_8086_can_return_from_the_bios_keyboard_poll() {
+    let directory = Directory::new("vm86-int16");
+    let (mut machine, guest) =
+        virtual_bios_machine(&directory, crate::bios::KEYBOARD_SERVICE_VECTOR);
+    machine.cpu.regs.ax = 0x0100;
     assert_eq!(machine.run(1).unwrap(), RunState::Running);
     assert!(machine.cpu.virtual_8086_mode());
     assert_eq!((machine.cpu.regs.cs, machine.cpu.regs.ip), (guest, 0x0200));
     assert_eq!(machine.cpu.regs.sp, 0x86);
     assert_ne!(machine.cpu.regs.flags & crate::ZERO, 0);
+}
+
+#[test]
+fn virtual_8086_reflected_timer_advances_bios_ticks_and_completes_irq() {
+    let directory = Directory::new("vm86-bios-timer");
+    let (mut machine, guest) = virtual_bios_machine(&directory, crate::bios::TIMER_VECTOR);
+    crate::bios::set_timer(&mut machine.cpu, 12);
+    machine.pic.acknowledge(0);
+    assert_eq!(machine.pic.next_irq(1), None);
+    let entry = machine.cpu.regs.ip;
+    assert_eq!(machine.run(1).unwrap(), RunState::Running);
+    assert_eq!(machine.cpu.regs.ip, entry + 1); // CLI at the timer entry.
+    assert_eq!(crate::bios::take_timer(&mut machine.cpu).0, 13);
+    assert_eq!(machine.pic.next_irq(1), None);
+
+    machine.cpu.regs.ip = entry + 3; // The timer resumed after its INT 1Ch callback.
+    assert_eq!(machine.run(1).unwrap(), RunState::Running);
+    assert_eq!(machine.pic.next_irq(1), Some(0));
+    assert!(machine.cpu.virtual_8086_mode());
+    assert_eq!((machine.cpu.regs.cs, machine.cpu.regs.ip), (guest, 0x0200));
+    assert_eq!(machine.cpu.regs.sp, 0x86);
 }
 
 #[test]
