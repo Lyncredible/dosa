@@ -907,6 +907,16 @@ fn callable_int15_reports_absent_apm_to_the_caller() {
 }
 
 #[test]
+fn pci_bios_presence_probe_reports_unsupported_firmware() {
+    let mut machine = Machine::new();
+    machine.cpu.regs.ax = 0xb101;
+    machine.cpu.regs.flags &= !crate::CARRY;
+    machine.interrupt(0x1a).unwrap();
+    assert_eq!(machine.cpu.regs.ax, 0x8101);
+    assert_ne!(machine.cpu.regs.flags & crate::CARRY, 0);
+}
+
+#[test]
 fn virtual_8086_can_return_from_the_bios_keyboard_poll() {
     let directory = Directory::new("vm86-int16");
     directory.write(

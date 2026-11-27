@@ -73,6 +73,7 @@ impl Machine {
                 _ => return Err(DosError::Interrupt { vector, ax }),
             },
             0x1a if ah <= 5 => self.clock_interrupt(ah),
+            0x1a if ax == 0xb101 => self.failure(0x8101),
             0x1c => {}
             0x18 if self.boot_disk.is_some() => self.exit(1),
             0x20..=0xff if self.boot_disk.is_some() => {
