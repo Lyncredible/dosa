@@ -167,6 +167,50 @@ fn floppy_boot_can_write_to_a_blank_installation_disk() {
 }
 
 #[test]
+fn boot_geometry_fits_the_image_and_extended_reads_reach_the_last_sector() {
+    use dosa_dos::{BootDrive, Machine, RunState};
+    use std::fs::File;
+    use std::io::{Seek, SeekFrom, Write};
+
+    let scratch = tempfile::tempdir().unwrap();
+    for (sectors, expected_cx, expected_dx) in [(4_u64, 4, 1), (131_072, 0x813f, 0x0f01)] {
+        let path = scratch.path().join(format!("geometry-{sectors}.img"));
+        let code = [
+            0xb4, 8, 0xcd, 0x13, // Query the maximum cylinder, head, and sector.
+            0x31, 0xc0, 0xcd, 0x16, // Wait for the host to inspect the returned registers.
+            0xb2, 0x80, 0xbe, 0x80, 0x7c, 0xb8, 0, 0x42, 0xcd, 0x13, // Read the last LBA.
+            0x72, 7, 0xa0, 0, 6, 0xb4, 0x0e, 0xcd, 0x10, // Print the byte if the read worked.
+            0xcd, 0x18,
+        ];
+        let mut boot = [0; 512];
+        boot[..code.len()].copy_from_slice(&code);
+        boot[0x80..0x88].copy_from_slice(&[0x10, 0, 1, 0, 0, 6, 0, 0]);
+        boot[0x88..0x90].copy_from_slice(&(sectors - 1).to_le_bytes());
+        boot[510..].copy_from_slice(&[0x55, 0xaa]);
+        let mut file = File::create(&path).unwrap();
+        file.set_len(sectors * 512).unwrap();
+        file.write_all(&boot).unwrap();
+        file.seek(SeekFrom::Start((sectors - 1) * 512)).unwrap();
+        file.write_all(b"K").unwrap();
+        drop(file);
+
+        let mut machine = Machine::new();
+        machine
+            .boot(File::open(path).unwrap(), BootDrive::HardDisk)
+            .unwrap();
+        assert_eq!(machine.run(100).unwrap(), RunState::WaitingForKey);
+        machine.set_paused(true);
+        let registers = machine.paused_guest().unwrap().registers();
+        assert_eq!(registers.cx, expected_cx);
+        assert_eq!(registers.dx, expected_dx);
+        machine.set_paused(false);
+        machine.key(b' ', 0x39);
+        assert_eq!(machine.run(100).unwrap(), RunState::Exited(1));
+        assert_eq!(machine.take_output(), b"K");
+    }
+}
+
+#[test]
 fn headless_boot_observes_a_bios_timer_countdown() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("slow boot.img");
