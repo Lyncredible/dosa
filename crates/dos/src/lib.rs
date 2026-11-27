@@ -78,6 +78,8 @@ pub enum DosError {
     Busy,
     GuestNotPaused,
     BootMedia(std::io::Error),
+    ReplaceFloppy(std::io::Error),
+    NoBootFloppy,
     Mount(MountError),
     Cpu(CpuError),
     CpuAfterDeniedWrite { error: CpuError, drive: char },
@@ -103,6 +105,8 @@ impl fmt::Display for DosError {
             Self::Busy => f.write_str("a DOS program is already running"),
             Self::GuestNotPaused => f.write_str("pause a DOS program before stepping"),
             Self::BootMedia(error) => write!(f, "cannot boot disk image: {error}"),
+            Self::ReplaceFloppy(error) => write!(f, "cannot read replacement floppy: {error}"),
+            Self::NoBootFloppy => f.write_str("no boot floppy is active"),
             Self::Mount(error) => write!(f, "{error}"),
             Self::Cpu(error) => write!(f, "{error}"),
             Self::CpuAfterDeniedWrite { error, drive } => write!(
@@ -754,6 +758,25 @@ impl Machine {
     /// Whether the current guest is running from a raw BIOS boot disk.
     pub fn is_booting_from_disk(&self) -> bool {
         self.boot_disk.is_some()
+    }
+
+    /// Whether the guest has a raw floppy in its BIOS boot drive.
+    pub fn has_boot_floppy(&self) -> bool {
+        self.boot_disk
+            .as_ref()
+            .is_some_and(|disk| disk.drive() == BootDrive::Floppy)
+    }
+
+    /// Change the read-only floppy in BIOS drive A: while the guest is active.
+    pub fn swap_boot_floppy(&mut self, file: std::fs::File) -> Result<(), DosError> {
+        let disk = self
+            .boot_disk
+            .as_mut()
+            .filter(|disk| disk.drive() == BootDrive::Floppy)
+            .ok_or(DosError::NoBootFloppy)?;
+        disk.replace_floppy(file).map_err(DosError::ReplaceFloppy)?;
+        bios::signal_floppy_change(&mut self.cpu);
+        Ok(())
     }
 
     /// Load and execute the first sector of a read-only raw disk image.
