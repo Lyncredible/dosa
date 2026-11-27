@@ -44,6 +44,8 @@ At the Dosa prompt, `MOUNT C "host path"` opens files, directories, and ZIPs rea
 
 Use `BOOT A "floppy.img"` or `BOOT C "hard-disk.img"` to boot a read-only raw image through BIOS INT 13h. The FreeDOS 1.4 boot floppy reaches an interactive DOS prompt. While a floppy guest is running, choose **Drives → Swap boot floppy A:** and select another raw floppy image. The replacement can be a data disk.
 
+Use `BOOT C /RW "hard-disk.img"` when the guest should write directly to an existing hard disk image. Those writes persist across launches. A save state for a writable disk can resume while the image and its write access still match the saved session.
+
 **Drives → Mount ZIP** and `--mount-session C=programs.zip` put the archive's DOS 8.3 files in a temporary writable directory. Changes last until the mount is replaced or Dosa exits, and the source ZIP stays unchanged. Choose **Mount read-only ZIP** or `--mount C=programs.zip` for a read-only view.
 
 If a guest requests write access to a read-only ZIP, Dosa names the drive in the toolbar. Choose **Drives → Stop and use ZIP copy**, then run the guest again from the writable copy.

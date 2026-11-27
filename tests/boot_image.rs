@@ -46,6 +46,52 @@ fn boots_raw_floppy_and_hard_disk_to_a_second_stage() {
 }
 
 #[test]
+fn writable_hard_disk_boot_persists_only_the_requested_bios_sectors() {
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("writable hard disk.img");
+    let mut image = vec![0; 512 * 4];
+    let program = [
+        0xc6, 0x06, 0, 0x06, b'C', // Set the data buffer's first byte.
+        0xbb, 0, 0x06, 0xb9, 2, 0, 0xb8, 1, 3, 0xcd, 0x13, // CHS sector two.
+        0x88, 0xe0, 0x14, b'0', 0xb4, 0x0e, 0xcd, 0x10, // Report status plus carry.
+        0xc6, 0x06, 0, 0x06, b'E', 0xbe, 0, 0x7d, 0xb8, 0, 0x43, 0xcd, 0x13, // EDD LBA two.
+        0x88, 0xe0, 0x14, b'0', 0xb4, 0x0e, 0xcd, 0x10, 0xc6, 0x06, 2, 0x7d, 1, 0xc6, 0x06, 8,
+        0x7d, 4, // Reset count and seek past the end.
+        0xb8, 0, 0x43, 0xcd, 0x13, 0x88, 0xe0, 0x14, b'0', 0xb4, 0x0e, 0xcd, 0x10, 0xbb, 0, 0xff,
+        0xb8, 1, 3, 0xcd, 0x13, // Write from across a DMA boundary.
+        0x88, 0xe0, 0x14, b'0', 0xb4, 0x0e, 0xcd, 0x10, 0xbb, 0, 0x06, 0xb8, 2, 2, 0xcd,
+        0x13, // Read both changed sectors.
+        0xa0, 0, 0x06, 0xb4, 0x0e, 0xcd, 0x10, 0xa0, 0, 0x08, 0xcd, 0x10, 0xcd,
+        0x18, // No next boot device.
+    ];
+    image[..program.len()].copy_from_slice(&program);
+    image[0x100..0x110].copy_from_slice(&[0x10, 0, 1, 0, 0, 6, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]);
+    image[510..512].copy_from_slice(&[0x55, 0xaa]);
+    image[512] = b'X';
+    image[1024] = b'Y';
+    std::fs::write(&path, &image).unwrap();
+
+    let run = |option| {
+        let command = format!("BOOT C {option}\"{}\"", path.display());
+        let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args(["--headless", "--exec", &command])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        output.stdout
+    };
+    assert_eq!(run(""), b"4444XY");
+    assert_eq!(std::fs::read(&path).unwrap(), image);
+    assert_eq!(run("/rw "), b"005:CE");
+    image[512] = b'C';
+    image[1024] = b'E';
+    assert_eq!(std::fs::read(&path).unwrap(), image);
+    assert_eq!(run(""), b"4444CE");
+    assert_eq!(std::fs::read(path).unwrap(), image);
+}
+
+#[test]
 fn headless_boot_observes_a_bios_timer_countdown() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("slow boot.img");
@@ -126,6 +172,29 @@ fn restores_boot_disk_status_and_reads_the_second_stage() {
             Machine::new().load_guest(&saved),
             Err(GuestSnapshotError::MediaChanged)
         ));
+        if drive == BootDrive::HardDisk {
+            let mut writable = Machine::new();
+            writable
+                .boot_writable_hard_disk(
+                    File::options()
+                        .read(true)
+                        .write(true)
+                        .open(&original)
+                        .unwrap(),
+                )
+                .unwrap();
+            assert!(matches!(
+                writable.load_guest(&saved),
+                Err(GuestSnapshotError::MediaChanged)
+            ));
+            assert_eq!(writable.run(200).unwrap(), RunState::WaitingForKey);
+            let saved_writable = writable.save_guest().unwrap();
+            assert!(matches!(
+                boot(&original).load_guest(&saved_writable),
+                Err(GuestSnapshotError::MediaChanged)
+            ));
+            writable.load_guest(&saved_writable).unwrap();
+        }
     }
 }
 

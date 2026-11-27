@@ -36,6 +36,8 @@ const MOUNT_HELP: &str = "MOUNT drive [/ISO | /FAT | /RW | /SESSION] host-path\r
     /RW       Mount a writable host directory.\r\n\
     /SESSION  Mount a temporary writable copy of a ZIP.\r\n";
 const IMGSWAP_HELP: &str = "IMGSWAP [drive]\r\nAdvance the ISO set of the selected drive.\r\n";
+const BOOT_HELP: &str = "BOOT A host-image\r\nBOOT C [/RW] host-image\r\n\
+    Boot a raw disk image. /RW allows writes to an existing hard disk image.\r\n";
 const MKDIR_HELP: &str = "MKDIR [drive:]path\r\nMD [drive:]path\r\nCreate a directory. The parent directory must exist.\r\n";
 const RMDIR_HELP: &str = "RMDIR [drive:]path\r\nRD [drive:]path\r\nRemove an empty directory. Change out of it first.\r\n";
 const SET_HELP: &str =
@@ -320,6 +322,8 @@ impl Shell {
             "PAUSE" if args == "/?" => batch::PAUSE_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("MOUNT") => MOUNT_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("IMGSWAP") => IMGSWAP_HELP.as_bytes().to_vec(),
+            "HELP" if args.eq_ignore_ascii_case("BOOT") => BOOT_HELP.as_bytes().to_vec(),
+            "BOOT" if args == "/?" => BOOT_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("SET") => SET_HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("PATH") => search_path::HELP.as_bytes().to_vec(),
             "HELP" if args.eq_ignore_ascii_case("IF") => condition::HELP.as_bytes().to_vec(),
@@ -365,7 +369,7 @@ impl Shell {
                 PROMPT [text]               Customize the DOS prompt\r\n\
                 MOUNT drive path           Mount host files or images (see HELP MOUNT)\r\n\
                 IMGSWAP [drive]            Advance to the next ISO in the set\r\n\
-                BOOT A|C path              Boot a floppy or hard disk image\r\n\
+                BOOT A|C [options] path    Boot a disk image (see HELP BOOT)\r\n\
                 DATE [mm-dd-yy]            Show or set the DOS date\r\n\
                 TIME [hh:mm]               Show or set the DOS time\r\n\
                 VER                        Display the DOS version\r\n\
@@ -482,18 +486,28 @@ impl Shell {
                 }
             }
             "BOOT" => {
-                const USAGE: &str = "usage: BOOT A|C host-disk-image";
+                const USAGE: &str = "usage: BOOT A host-image or BOOT C [/RW] host-image";
                 let (drive, host) = split_word(args)?;
                 let drive = match drive.trim_end_matches(':').to_ascii_uppercase().as_str() {
                     "A" => BootDrive::Floppy,
                     "C" => BootDrive::HardDisk,
                     _ => return Err(USAGE.into()),
                 };
-                let host = unquote(host);
+                let (option, path) = split_word(host)?;
+                let writable = !host.starts_with('"') && option.eq_ignore_ascii_case("/RW");
+                let host = unquote(if writable { path } else { host });
                 if host.is_empty() {
                     return Err(USAGE.into());
                 }
-                self.machine.boot(std::fs::File::open(host)?, drive)?;
+                if writable {
+                    if drive != BootDrive::HardDisk {
+                        return Err(USAGE.into());
+                    }
+                    let file = std::fs::OpenOptions::new().read(true).write(true).open(host)?;
+                    self.machine.boot_writable_hard_disk(file)?;
+                } else {
+                    self.machine.boot(std::fs::File::open(host)?, drive)?;
+                }
                 return Ok(Command::Launched);
             }
             _ => {

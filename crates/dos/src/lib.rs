@@ -781,10 +781,25 @@ impl Machine {
 
     /// Load and execute the first sector of a read-only raw disk image.
     pub fn boot(&mut self, file: std::fs::File, drive: BootDrive) -> Result<(), DosError> {
+        self.start_boot_disk(file, drive, false)
+    }
+
+    /// Boot an explicitly writable raw hard disk. The file must be open for read and write.
+    pub fn boot_writable_hard_disk(&mut self, file: std::fs::File) -> Result<(), DosError> {
+        self.start_boot_disk(file, BootDrive::HardDisk, true)
+    }
+
+    fn start_boot_disk(
+        &mut self,
+        file: std::fs::File,
+        drive: BootDrive,
+        writable: bool,
+    ) -> Result<(), DosError> {
         if self.state.is_active() {
             return Err(DosError::Busy);
         }
-        let (disk, sector) = boot_disk::BootDisk::open(file, drive).map_err(DosError::BootMedia)?;
+        let (disk, sector) =
+            boot_disk::BootDisk::open(file, drive, writable).map_err(DosError::BootMedia)?;
         let mut cpu = Cpu::with_profile(self.cpu_profile);
         cpu.regs.ip = 0x7c00;
         cpu.regs.sp = 0x7c00;
