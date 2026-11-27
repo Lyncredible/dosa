@@ -36,8 +36,9 @@ const MOUNT_HELP: &str = "MOUNT drive [/ISO | /FAT | /RW | /SESSION] host-path\r
     /RW       Mount a writable host directory.\r\n\
     /SESSION  Mount a temporary writable copy of a ZIP.\r\n";
 const IMGSWAP_HELP: &str = "IMGSWAP [drive]\r\nAdvance the ISO set of the selected drive.\r\n";
-const BOOT_HELP: &str = "BOOT A host-image\r\nBOOT C [/RW] host-image\r\n\
-    Boot a raw disk image. /RW allows writes to an existing hard disk image.\r\n";
+const BOOT_HELP: &str = "BOOT A [/HDD hard-disk-image] floppy-image\r\nBOOT C [/RW] hard-disk-image\r\n\
+    /HDD attaches an existing writable hard disk while booting the floppy.\r\n\
+    /RW allows writes to the hard disk being booted.\r\n";
 const MKDIR_HELP: &str = "MKDIR [drive:]path\r\nMD [drive:]path\r\nCreate a directory. The parent directory must exist.\r\n";
 const RMDIR_HELP: &str = "RMDIR [drive:]path\r\nRD [drive:]path\r\nRemove an empty directory. Change out of it first.\r\n";
 const SET_HELP: &str =
@@ -486,7 +487,7 @@ impl Shell {
                 }
             }
             "BOOT" => {
-                const USAGE: &str = "usage: BOOT A host-image or BOOT C [/RW] host-image";
+                const USAGE: &str = "usage: BOOT A [/HDD hard-disk-image] floppy-image or BOOT C [/RW] hard-disk-image";
                 let (drive, host) = split_word(args)?;
                 let drive = match drive.trim_end_matches(':').to_ascii_uppercase().as_str() {
                     "A" => BootDrive::Floppy,
@@ -494,7 +495,25 @@ impl Shell {
                     _ => return Err(USAGE.into()),
                 };
                 let (option, path) = split_word(host)?;
-                let writable = !host.starts_with('"') && option.eq_ignore_ascii_case("/RW");
+                let option = if host.starts_with('"') { "" } else { option };
+                if option.eq_ignore_ascii_case("/HDD") {
+                    let (hard_disk, floppy) = split_word(path)?;
+                    let floppy = unquote(floppy);
+                    if drive != BootDrive::Floppy || hard_disk.is_empty() || floppy.is_empty() {
+                        return Err(USAGE.into());
+                    }
+                    if std::fs::canonicalize(hard_disk)? == std::fs::canonicalize(floppy)? {
+                        return Err("the floppy and hard disk images must be distinct".into());
+                    }
+                    let floppy = std::fs::File::open(floppy)?;
+                    let hard_disk = std::fs::File::options()
+                        .read(true)
+                        .write(true)
+                        .open(hard_disk)?;
+                    self.machine.boot_floppy_with_hard_disk(floppy, hard_disk)?;
+                    return Ok(Command::Launched);
+                }
+                let writable = option.eq_ignore_ascii_case("/RW");
                 let host = unquote(if writable { path } else { host });
                 if host.is_empty() {
                     return Err(USAGE.into());

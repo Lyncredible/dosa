@@ -33,6 +33,11 @@ impl Machine {
             }
             0x11 => self.cpu.regs.ax = crate::bios::equipment(&self.cpu),
             0x12 => self.cpu.regs.ax = 640,
+            0x13 if self.cpu.regs.dx as u8 == 0x80
+                && let Some(disk) = &mut self.installation_disk =>
+            {
+                disk.interrupt(&mut self.cpu);
+            }
             0x13 if let Some(disk) = &mut self.boot_disk => disk.interrupt(&mut self.cpu),
             0x15 if ah == 0x24 => self.a20_interrupt(al),
             0x15 if ah == 0x84 => self.joystick_interrupt(),

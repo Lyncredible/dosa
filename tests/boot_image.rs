@@ -92,6 +92,81 @@ fn writable_hard_disk_boot_persists_only_the_requested_bios_sectors() {
 }
 
 #[test]
+fn floppy_boot_can_write_to_a_blank_installation_disk() {
+    use dosa_dos::{BootDrive, GuestSnapshotError, Machine};
+    use std::fs::{self, File};
+
+    let scratch = tempfile::tempdir().unwrap();
+    let floppy_path = scratch.path().join("source floppy.img");
+    let disk_path = scratch.path().join("blank hard disk.img");
+    let mut floppy = vec![0; 1_474_560];
+    let code = [
+        0xa0, 0x75, 4, 0x04, b'0', 0xb4, 0x0e, 0xcd, 0x10, // Count hard disks in the BDA.
+        0xb2, 0x80, 0xb4, 0x15, 0xcd, 0x13, // Detect a fixed hard disk.
+        0x88, 0xe0, 0x14, b'0', 0xb4, 0x0e, 0xcd, 0x10, 0xc6, 0x06, 0, 6, b'H', 0xbb, 0, 6, 0xb9,
+        2, 0, // Buffer and CHS sector two.
+        0x31, 0xd2, 0xb8, 1, 3, 0xcd, 0x13, // Attempt to write to the source floppy.
+        0x88, 0xe0, 0x14, b'0', 0xb4, 0x0e, 0xcd, 0x10, 0xb2, 0x80, 0xb8, 1, 3, 0xcd,
+        0x13, // Write the same sector on the hard disk.
+        0x88, 0xe0, 0x14, b'0', 0xb4, 0x0e, 0xcd, 0x10, 0x31, 0xd2, 0xb8, 1, 2, 0xcd,
+        0x13, // Read the original floppy sector.
+        0xa0, 0, 6, 0xb4, 0x0e, 0xcd, 0x10, 0xb2, 0x80, 0xb8, 1, 2, 0xcd,
+        0x13, // Read the new hard disk sector.
+        0xa0, 0, 6, 0xb4, 0x0e, 0xcd, 0x10, 0xcd, 0x18,
+    ];
+    floppy[..code.len()].copy_from_slice(&code);
+    floppy[510..512].copy_from_slice(&[0x55, 0xaa]);
+    floppy[512] = b'F';
+    let mut disk = vec![0; 512 * 4];
+    fs::write(&floppy_path, &floppy).unwrap();
+    fs::write(&disk_path, &disk).unwrap();
+
+    let open_with_disk = || {
+        let mut machine = Machine::new();
+        machine
+            .boot_floppy_with_hard_disk(
+                File::open(&floppy_path).unwrap(),
+                File::options()
+                    .read(true)
+                    .write(true)
+                    .open(&disk_path)
+                    .unwrap(),
+            )
+            .unwrap();
+        machine
+    };
+    let saved = open_with_disk().save_guest().unwrap();
+    open_with_disk().load_guest(&saved).unwrap();
+    let mut bare = Machine::new();
+    bare.boot(File::open(&floppy_path).unwrap(), BootDrive::Floppy)
+        .unwrap();
+    assert!(matches!(
+        bare.load_guest(&saved),
+        Err(GuestSnapshotError::MediaChanged)
+    ));
+
+    let command = format!(
+        "BOOT A /HDD \"{}\" \"{}\"",
+        disk_path.display(),
+        floppy_path.display()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args(["--headless", "--exec", &command])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(output.stdout, b"1340FH");
+    assert_eq!(fs::read(&floppy_path).unwrap(), floppy);
+    disk[512] = b'H';
+    assert_eq!(fs::read(&disk_path).unwrap(), disk);
+    assert!(matches!(
+        open_with_disk().load_guest(&saved),
+        Err(GuestSnapshotError::MediaChanged)
+    ));
+}
+
+#[test]
 fn headless_boot_observes_a_bios_timer_countdown() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("slow boot.img");

@@ -299,6 +299,7 @@ pub struct Machine {
     mounts: BTreeMap<char, Mount>,
     iso_media_changed: u32,
     boot_disk: Option<boot_disk::BootDisk>,
+    installation_disk: Option<boot_disk::BootDisk>,
     environment: Environment,
     files: DosFiles,
     state: RunState,
@@ -349,6 +350,7 @@ impl Machine {
             mounts: BTreeMap::new(),
             iso_media_changed: 0,
             boot_disk: None,
+            installation_disk: None,
             environment: Environment::default(),
             files: DosFiles::new('C', String::new()),
             state: RunState::Idle,
@@ -781,12 +783,21 @@ impl Machine {
 
     /// Load and execute the first sector of a read-only raw disk image.
     pub fn boot(&mut self, file: std::fs::File, drive: BootDrive) -> Result<(), DosError> {
-        self.start_boot_disk(file, drive, false)
+        self.start_boot_disk(file, drive, false, None)
     }
 
     /// Boot an explicitly writable raw hard disk. The file must be open for read and write.
     pub fn boot_writable_hard_disk(&mut self, file: std::fs::File) -> Result<(), DosError> {
-        self.start_boot_disk(file, BootDrive::HardDisk, true)
+        self.start_boot_disk(file, BootDrive::HardDisk, true, None)
+    }
+
+    /// Boot a read-only floppy with a distinct raw hard disk open for read and write.
+    pub fn boot_floppy_with_hard_disk(
+        &mut self,
+        floppy: std::fs::File,
+        hard_disk: std::fs::File,
+    ) -> Result<(), DosError> {
+        self.start_boot_disk(floppy, BootDrive::Floppy, false, Some(hard_disk))
     }
 
     fn start_boot_disk(
@@ -794,12 +805,17 @@ impl Machine {
         file: std::fs::File,
         drive: BootDrive,
         writable: bool,
+        hard_disk: Option<std::fs::File>,
     ) -> Result<(), DosError> {
         if self.state.is_active() {
             return Err(DosError::Busy);
         }
         let (disk, sector) =
             boot_disk::BootDisk::open(file, drive, writable).map_err(DosError::BootMedia)?;
+        let installation_disk = hard_disk
+            .map(boot_disk::BootDisk::open_installation_disk)
+            .transpose()
+            .map_err(DosError::BootMedia)?;
         let mut cpu = Cpu::with_profile(self.cpu_profile);
         cpu.regs.ip = 0x7c00;
         cpu.regs.sp = 0x7c00;
@@ -814,6 +830,10 @@ impl Machine {
         );
         disk.install_data(&mut self.cpu);
         self.boot_disk = Some(disk);
+        if let Some(installation_disk) = installation_disk {
+            installation_disk.install_data(&mut self.cpu);
+            self.installation_disk = Some(installation_disk);
+        }
         Ok(())
     }
 
@@ -837,6 +857,7 @@ impl Machine {
         self.cpu = cpu;
         self.video = video;
         self.boot_disk = None;
+        self.installation_disk = None;
         self.files = files;
         self.pending.clear();
         self.keys.clear();
@@ -1259,6 +1280,7 @@ impl Machine {
         self.set_paused(false);
         self.state = RunState::Exited(code);
         self.boot_disk = None;
+        self.installation_disk = None;
         self.pending.clear();
         self.files.close_all();
         self.audio.mpu.reset();
