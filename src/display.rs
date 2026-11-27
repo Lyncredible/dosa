@@ -1253,24 +1253,30 @@ fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: boo
     let columns = usize::from(frame.columns);
     let height = usize::from(frame.character_height);
     let glyphs = frame.code_page.glyphs();
+    let fonts = frame.fonts.map(|fonts| fonts.read());
+    let color_mask = if fonts.as_ref().is_some_and(|fonts| fonts.uses_dual_maps()) {
+        0x07
+    } else {
+        0x0f
+    };
     for (cell, data) in frame.cells.as_chunks::<2>().0.iter().enumerate() {
         let (column, row) = (cell % columns, cell / columns);
         let cursor = blink && frame.cursor == Some((column as u16, row as u16));
         let glyph = glyphs[usize::from(data[0])];
-        let color = VGA[usize::from(data[1] & 0x0f)];
+        let loaded = fonts.as_ref().map(|fonts| fonts.glyph(data[0], data[1]));
+        let color = VGA[usize::from(data[1] & color_mask)];
         let background = VGA[usize::from(data[1] >> 4 & 0x07)];
         let visible = data[1] & 0x80 == 0 || blink;
         for y in 0..height {
             let start = ((row * height + y) * width + column * 8) * 4;
+            let row = loaded.map_or(glyph[y * 8 / height], |bitmap| bitmap[y].reverse_bits());
             for (x, pixel) in pixels[start..start + 32]
                 .as_chunks_mut::<4>()
                 .0
                 .iter_mut()
                 .enumerate()
             {
-                let [r, g, b] = if cursor && y + 2 >= height
-                    || visible && glyph[y * 8 / height] & (1 << x) != 0
-                {
+                let [r, g, b] = if cursor && y + 2 >= height || visible && row & (1 << x) != 0 {
                     color
                 } else {
                     background
@@ -1284,6 +1290,41 @@ fn render_text(frame: TextFrame<'_>, width: usize, pixels: &mut [u8], blink: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_renders_the_vga_font_bank_selected_by_each_cell() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut guest = vec![
+            0xbd, 0x80, 1, 0xb8, 0, 0x11, 0xbb, 0, 1, 0xb9, 1, 0, 0xba, b'A', 0, 0xcd, 0x10, 0xbd,
+            0x81, 1, 0xb8, 0, 0x11, 0xbb, 1, 1, 0xb9, 1, 0, 0xba, b'A', 0, 0xcd, 0x10, 0xb8, 3,
+            0x11, 0xbb, 4, 0, 0xcd, 0x10, // Use bank 1 for attribute bit 3.
+            0xb8, b'A', 9, 0xbb, 7, 0, 0xb9, 1, 0, 0xcd, 0x10, 0xb8, 0, 2, 0xbb, 0, 0, 0xba, 1, 0,
+            0xcd, 0x10, // Move to the second cell.
+            0xb8, b'A', 9, 0xbb, 15, 0, 0xb9, 1, 0, 0xcd, 0x10, 0x31, 0xc0, 0xcd,
+            0x16, // Leave the guest's text on screen.
+        ];
+        guest.resize(0x80, 0);
+        guest.extend([0x80, 0x01]);
+        std::fs::write(fixture.path().join("FONT.COM"), guest).unwrap();
+
+        let mut machine = dosa_dos::Machine::new();
+        machine
+            .mount('C', Mount::open(fixture.path()).unwrap())
+            .unwrap();
+        machine.launch('C', "FONT.COM", "").unwrap();
+        assert_eq!(machine.run(512).unwrap(), RunState::WaitingForKey);
+        let Video::Text(frame) = machine.video() else {
+            panic!("expected text mode");
+        };
+        let width = usize::from(frame.columns) * 8;
+        let mut pixels = vec![0; width * usize::from(frame.rows * frame.character_height) * 4];
+        render_text(frame, width, &mut pixels, false);
+        let pixel = |x: usize| &pixels[x * 4..x * 4 + 3];
+        assert_eq!(pixel(0), &VGA[7]);
+        assert_eq!(pixel(7), &VGA[0]);
+        assert_eq!(pixel(8), &VGA[0]);
+        assert_eq!(pixel(15), &VGA[7]);
+    }
 
     #[test]
     fn screen_copy_decodes_cp437_and_shell_paste_stays_editable() {

@@ -153,6 +153,50 @@ fn bios_scan_line_selection_and_font_height_update_geometry() {
 }
 
 #[test]
+fn bios_text_fonts_keep_independent_banks_and_survive_guest_restore() {
+    let (mut cpu, mut video) = setup();
+    bios(&mut video, &mut cpu, 0x1112, 0, 0, 0);
+    expect_geometry(&video, &cpu, 50, 8, 0x2040);
+    bios(&mut video, &mut cpu, 0x1104, 1, 0, 0);
+    expect_geometry(&video, &cpu, 50, 8, 0x2040);
+    // Attribute bit 3 chooses bank 1 after this BIOS block selector call.
+    bios(&mut video, &mut cpu, 0x1103, 4, 0, 0);
+    let glyph = CodePage::Cp437.glyphs()[usize::from(b'A')];
+    let fonts = text(&video, &cpu).fonts.unwrap().read();
+    assert!(fonts.uses_dual_maps());
+    for (row, bitmap) in glyph.iter().enumerate() {
+        assert_eq!(fonts.glyph(b'A', 7)[row], bitmap.reverse_bits());
+        assert_eq!(fonts.glyph(b'A', 15)[row * 2], bitmap.reverse_bits());
+        assert_eq!(fonts.glyph(b'A', 15)[row * 2 + 1], bitmap.reverse_bits());
+    }
+
+    cpu.regs.es = 0x2000;
+    cpu.regs.bp = 0x200;
+    cpu.load(0x2000, 0x200, &[0x80, 0x01, 0xff]);
+    bios(&mut video, &mut cpu, 0x1100, 0x0301, 1, u16::from(b'A'));
+    let registers_and_ram = cpu.save_snapshot().unwrap();
+    let mut restored_cpu = Cpu::new();
+    let mut restored = Adapter::from_snapshot(video.snapshot()).unwrap();
+    assert!(restored.bind_snapshot_aperture(&mut restored_cpu));
+    restored_cpu.restore_snapshot(&registers_and_ram).unwrap();
+    let fonts = text(&restored, &restored_cpu).fonts.unwrap().read();
+    assert_eq!(&fonts.glyph(b'A', 15)[..4], &[0x80, 0x01, 0xff, 0]);
+    assert_eq!(fonts.glyph(b'A', 7)[0], glyph[0].reverse_bits());
+    let (mut next_cpu, mut next) = setup();
+    next.copy_console(&restored, &restored_cpu, &mut next_cpu);
+    assert_eq!(
+        text(&next, &next_cpu).fonts.unwrap().read().glyph(b'A', 15)[0],
+        0x80
+    );
+    next.set_code_page(&mut next_cpu, CodePage::Cp850);
+    let frame = text(&next, &next_cpu);
+    assert_eq!(frame.code_page, CodePage::Cp850);
+    assert!(frame.fonts.is_none());
+    bios(&mut restored, &mut restored_cpu, 3, 0, 0, 0);
+    assert!(text(&restored, &restored_cpu).fonts.is_none());
+}
+
+#[test]
 fn console_scroll_and_backspace_are_bounded_by_current_geometry() {
     let (mut cpu, mut video) = setup();
     assert!(video.set_console_rows(&mut cpu, 43));

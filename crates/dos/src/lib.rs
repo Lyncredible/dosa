@@ -40,6 +40,7 @@ mod tests;
 pub use gameport::JoystickState;
 pub use mouse::MouseCursor;
 pub use snapshot::{GuestSnapshotError, MAX_GUEST_SNAPSHOT_BYTES, RestoredPipelineIo};
+pub use vga::{TextFontBanks, VgaTextFonts};
 pub use video::{TextFrame, Video};
 
 use bios::{Hook, TIMER_VECTOR};
@@ -475,7 +476,7 @@ impl Machine {
     }
 
     pub fn set_code_page(&mut self, page: CodePage) {
-        self.video.code_page = page;
+        self.video.set_code_page(&mut self.cpu, page);
     }
 
     pub fn set_date(&mut self, year: u16, month: u8, day: u8) -> bool {
