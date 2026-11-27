@@ -78,6 +78,7 @@ impl Cpu {
                 let result = self.shift(op, value, count, Self::width(ins, 0)?);
                 self.write_op(ins, 0, result)?;
             }
+            Shld | Shrd => self.double_shift(ins)?,
             Mul | Imul => self.product(ins)?,
             Div | Idiv => return self.divide(ins, start_ip),
             Cbw => self.regs.ax = i16::from(self.regs.ax as i8) as u16,
