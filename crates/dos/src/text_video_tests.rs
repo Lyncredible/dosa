@@ -1,6 +1,61 @@
 use super::*;
 
 #[test]
+fn bios_font_information_returns_guest_readable_rom_and_screen_geometry() {
+    let (mut cpu, mut video) = setup();
+    let glyphs = CodePage::Cp437.glyphs();
+    for (selector, height, first, character) in [
+        (2, 14, 0, b'A'),
+        (3, 8, 0, b'A'),
+        (4, 8, 128, 0x80),
+        (6, 16, 0, b'A'),
+    ] {
+        bios(&mut video, &mut cpu, 0x1130, selector << 8, 0, 0x1200);
+        assert_eq!(cpu.regs.cx, 16);
+        assert_eq!(cpu.regs.dx, 0x1218);
+        for row in 0..height {
+            let offset = cpu.regs.bp + (u16::from(character - first) * height + row);
+            assert_eq!(
+                cpu.read_u8(cpu.regs.es, offset),
+                glyphs[usize::from(character)][usize::from(row * 8 / height)].reverse_bits()
+            );
+        }
+    }
+    for selector in [5, 7] {
+        bios(&mut video, &mut cpu, 0x1130, selector << 8, 0, 0);
+        assert_eq!(cpu.read_u8(cpu.regs.es, cpu.regs.bp), 0);
+    }
+
+    bios(&mut video, &mut cpu, 0x13, 0, 0, 0);
+    bios(&mut video, &mut cpu, 0x1130, 0x0100, 0, 0);
+    assert_eq!(cpu.regs.cx, 8);
+    assert_eq!(cpu.regs.dx, 24);
+    assert_eq!(
+        (cpu.regs.es, cpu.regs.bp),
+        (VIDEO_FIRMWARE_SEGMENT, ROM_FONT_8)
+    );
+    for (selector, vector) in [(0, HIGH_FONT_VECTOR), (1, GRAPHICS_FONT_VECTOR)] {
+        cpu.write_u16(0, vector, 0x4567);
+        cpu.write_u16(0, vector + 2, 0x1234);
+        bios(&mut video, &mut cpu, 0x1130, selector << 8, 0, 0);
+        assert_eq!((cpu.regs.es, cpu.regs.bp), (0x1234, 0x4567));
+    }
+
+    // A legacy save has no firmware font tables and may already have custom pointers.
+    cpu.write_u8(VIDEO_FIRMWARE_SEGMENT, ROM_FONTS_INSTALLED, 0);
+    cpu.load(
+        VIDEO_FIRMWARE_SEGMENT,
+        ROM_FONT_8 + u16::from(b'A') * 8,
+        &[0; 8],
+    );
+    bios(&mut video, &mut cpu, 0x1130, 0x0300, 0, 0);
+    assert!(
+        (0..8).any(|row| cpu.read_u8(cpu.regs.es, cpu.regs.bp + u16::from(b'A') * 8 + row) != 0)
+    );
+    assert_eq!(cpu.read_u16(0, GRAPHICS_FONT_VECTOR), 0x4567);
+}
+
+#[test]
 fn graphics_bios_text_draws_wraps_and_keeps_repeat_cursor() {
     for (mode, columns, height) in [(0x12, 80, 16), (0x13, 40, 8)] {
         let (mut cpu, mut video) = setup();
