@@ -115,6 +115,10 @@ impl BootDisk {
         self.drive
     }
 
+    pub(super) fn open_installation_disk(file: File) -> io::Result<Self> {
+        Self::open_media(file, BootDrive::HardDisk, true).map(|(disk, _)| disk)
+    }
+
     pub(super) fn replace_floppy(&mut self, file: File) -> io::Result<()> {
         let (mut replacement, _) = Self::open_media(file, BootDrive::Floppy, false)?;
         replacement.status = self.status;
@@ -171,8 +175,9 @@ impl BootDisk {
     pub fn install_data(&self, cpu: &mut Cpu) {
         if self.drive == BootDrive::Floppy {
             crate::bios::install_floppy(cpu);
+        } else {
+            cpu.write_u8(0x40, 0x75, 1);
         }
-        cpu.write_u8(0x40, 0x75, u8::from(self.drive == BootDrive::HardDisk));
     }
 
     pub fn interrupt(&mut self, cpu: &mut Cpu) {

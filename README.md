@@ -46,6 +46,8 @@ Use `BOOT A "floppy.img"` or `BOOT C "hard-disk.img"` to boot a read-only raw im
 
 Use `BOOT C /RW "hard-disk.img"` when the guest should write directly to an existing hard disk image. Those writes persist across launches. A save state for a writable disk can resume while the image and its write access still match the saved session.
 
+Use `BOOT A /HDD "hard-disk.img" "floppy.img"` to boot the floppy with a separate writable hard disk at BIOS drive 80h. The hard disk can be blank and must already exist. The floppy stays read-only.
+
 **Drives → Mount ZIP** and `--mount-session C=programs.zip` put the archive's DOS 8.3 files in a temporary writable directory. Changes last until the mount is replaced or Dosa exits, and the source ZIP stays unchanged. Choose **Mount read-only ZIP** or `--mount C=programs.zip` for a read-only view.
 
 If a guest requests write access to a read-only ZIP, Dosa names the drive in the toolbar. Choose **Drives → Stop and use ZIP copy**, then run the guest again from the writable copy.

@@ -21,6 +21,7 @@ const VERSION_OPTICAL_CHANGE: u16 = 5;
 const VERSION_UPPER_MEMORY: u16 = 6;
 const VERSION_HIGH_PROGRAM: u16 = 7;
 const VERSION_MEMORY_STRATEGY: u16 = 8;
+const VERSION_INSTALLATION_DISK: u16 = 9;
 const HEADER_BYTES: usize = 18;
 /// Maximum size in bytes of a serialized guest save state.
 pub const MAX_GUEST_SNAPSHOT_BYTES: usize = 300 * 1024 * 1024;
@@ -94,6 +95,15 @@ struct State<'a> {
 }
 
 impl Machine {
+    fn boot_media_bytes(&self) -> u64 {
+        let boot = self.boot_disk.as_ref().map_or(0, BootDisk::media_bytes);
+        let installation = self
+            .installation_disk
+            .as_ref()
+            .map_or(0, BootDisk::media_bytes);
+        boot.saturating_add(installation)
+    }
+
     /// Save the guest and attached shell file tables, preserving shared open files.
     pub fn save_guest_with_shell_io(
         &self,
@@ -159,10 +169,7 @@ impl Machine {
             elapsed,
             paused: self.paused_since.is_some(),
             session_clock: self.session_clock.snapshot(),
-            media: fingerprints(
-                &self.mounts,
-                self.boot_disk.as_ref().map_or(0, BootDisk::media_bytes),
-            )?,
+            media: fingerprints(&self.mounts, self.boot_media_bytes())?,
             state: self.state,
             pending: self.pending.clone(),
             files: self
@@ -199,10 +206,16 @@ impl Machine {
             .as_ref()
             .map(BootDisk::snapshot)
             .transpose()?;
+        let installation = self
+            .installation_disk
+            .as_ref()
+            .map(BootDisk::snapshot)
+            .transpose()?;
         let upper = self.xms.upper_blocks();
         let version = match (boot, replay, midi, self.iso_media_changed) {
             (boot, replay, midi, changed)
-                if self.memory_strategy != MemoryStrategy::for_program(self.upper_program)
+                if installation.is_some()
+                    || self.memory_strategy != MemoryStrategy::for_program(self.upper_program)
                     || self.session_memory_strategy != MemoryStrategy::default()
                     || self.upper_program.is_none()
                         && self.blocks.range(xms::UPPER_START..).next().is_some() =>
@@ -220,7 +233,12 @@ impl Machine {
                     metadata,
                 )
                 .map_err(|_| Invalid)?;
-                VERSION_MEMORY_STRATEGY
+                if let Some(installation) = installation {
+                    metadata = postcard::to_extend(&installation, metadata).map_err(|_| Invalid)?;
+                    VERSION_INSTALLATION_DISK
+                } else {
+                    VERSION_MEMORY_STRATEGY
+                }
             }
             (boot, replay, midi, changed) if let Some(program) = self.upper_program => {
                 metadata =
@@ -340,6 +358,7 @@ impl Machine {
                 | VERSION_UPPER_MEMORY
                 | VERSION_HIGH_PROGRAM
                 | VERSION_MEMORY_STRATEGY
+                | VERSION_INSTALLATION_DISK
         ) {
             return Err(GuestSnapshotError::Version(version));
         }
@@ -353,6 +372,7 @@ impl Machine {
         let (state, trailing): (State<'static>, _) =
             postcard::take_from_bytes(metadata).map_err(|_| Invalid)?;
         let mut saved_strategy = None;
+        let mut installation = None;
         let (boot, replay, midi, iso_media_changed, upper, upper_program) = match version {
             VERSION_LEGACY if trailing.is_empty() => (None, None, None, 0, None, None),
             VERSION_ADLIB_REPLAY => (
@@ -388,9 +408,18 @@ impl Machine {
                 let (boot, replay, midi, changed, upper, program) = decode_extension(trailing)?;
                 (boot, replay, midi, changed, Some(upper), Some(program))
             }
-            VERSION_MEMORY_STRATEGY => {
-                let (boot, replay, midi, changed, upper, program, strategy) =
-                    decode_extension(trailing)?;
+            VERSION_MEMORY_STRATEGY | VERSION_INSTALLATION_DISK => {
+                let ((boot, replay, midi, changed, upper, program, strategy), remaining) =
+                    postcard::take_from_bytes::<(Option<DiskSnapshot>, _, _, _, _, _, _)>(trailing)
+                        .map_err(|_| Invalid)?;
+                if version == VERSION_INSTALLATION_DISK {
+                    if boot.is_none() {
+                        return Err(Invalid);
+                    }
+                    installation = Some(decode_extension(remaining)?);
+                } else if !remaining.is_empty() {
+                    return Err(Invalid);
+                }
                 saved_strategy = Some(strategy);
                 (boot, replay, midi, changed, Some(upper), program)
             }
@@ -406,11 +435,7 @@ impl Machine {
         {
             return Err(Invalid);
         }
-        if fingerprints(
-            &self.mounts,
-            self.boot_disk.as_ref().map_or(0, BootDisk::media_bytes),
-        )? != state.media
-        {
+        if fingerprints(&self.mounts, self.boot_media_bytes())? != state.media {
             return Err(MediaChanged);
         }
         let iso_drives = self.mounts.iter().fold(0, |mask, (&drive, mount)| {
@@ -423,13 +448,9 @@ impl Machine {
         if iso_media_changed & !iso_drives != 0 {
             return Err(Invalid);
         }
-        let boot_status = match (boot, &self.boot_disk) {
-            (None, None) => None,
-            (Some(saved), Some(disk)) if disk.snapshot()?.media == saved.media => {
-                Some(saved.status)
-            }
-            _ => return Err(MediaChanged),
-        };
+        let boot_status = disk_restore_status(self.boot_disk.as_ref(), boot)?;
+        let installation_status =
+            disk_restore_status(self.installation_disk.as_ref(), installation)?;
         let mut environment = Environment::default();
         environment.set("COMSPEC", "").map_err(|_| Invalid)?;
         environment.set("BLASTER", "").map_err(|_| Invalid)?;
@@ -487,6 +508,10 @@ impl Machine {
         if let Some((disk, status)) = boot_disk.as_mut().zip(boot_status) {
             disk.restore_status(status);
         }
+        let mut installation_disk = self.installation_disk.take();
+        if let Some((disk, status)) = installation_disk.as_mut().zip(installation_status) {
+            disk.restore_status(status);
+        }
         *self = Self {
             cpu,
             cpu_profile: state.profile,
@@ -494,6 +519,7 @@ impl Machine {
             mounts: std::mem::take(&mut self.mounts),
             iso_media_changed,
             boot_disk,
+            installation_disk,
             environment,
             files,
             state: state.state,
@@ -560,6 +586,19 @@ fn valid_dos_blocks(
         previous_end = end;
     }
     true
+}
+
+fn disk_restore_status(
+    disk: Option<&BootDisk>,
+    saved: Option<DiskSnapshot>,
+) -> Result<Option<u8>, GuestSnapshotError> {
+    match (disk, saved) {
+        (None, None) => Ok(None),
+        (Some(disk), Some(saved)) if disk.snapshot()?.media == saved.media => {
+            Ok(Some(saved.status))
+        }
+        _ => Err(GuestSnapshotError::MediaChanged),
+    }
 }
 
 fn decode_extension<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, GuestSnapshotError> {
