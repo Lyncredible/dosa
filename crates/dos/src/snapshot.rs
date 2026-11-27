@@ -476,6 +476,7 @@ impl Machine {
             return Err(Invalid);
         }
         cpu.restore_snapshot(cpu_bytes)?;
+        video.restore_legacy_blink_default(&mut cpu);
         let mut xms = xms::Xms::from_snapshot(state.xms, cpu.memory.len()).ok_or(Invalid)?;
         let (memory_strategy, session_memory_strategy) = saved_strategy.unwrap_or_else(|| {
             (

@@ -304,6 +304,15 @@ impl Vga {
         }
     }
 
+    pub(crate) fn blink_enabled(&self) -> bool {
+        self.attributes[0x10] & 0x08 != 0
+    }
+
+    pub(crate) fn set_blink_enabled(&mut self, enabled: bool) {
+        let mode = &mut self.attributes[0x10];
+        *mode = (*mode & !0x08) | (u8::from(enabled) << 3);
+    }
+
     pub(crate) fn pixel(&self, x: usize, y: usize, write: Option<u8>) -> u8 {
         let (start, stride) = self.start_and_stride();
         if self.planar16 {

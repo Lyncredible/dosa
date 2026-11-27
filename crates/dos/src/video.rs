@@ -11,8 +11,9 @@ mod text_tests;
 
 const TEXT: usize = 0xb8000;
 // The firmware flag is part of CPU RAM, so older guest snapshots still decode.
-const FONT_FIRMWARE_SEGMENT: u16 = 0xf000;
+const VIDEO_FIRMWARE_SEGMENT: u16 = 0xf000;
 const FONT_FIRMWARE_FLAG: u16 = 0x0780;
+const BLINK_FIRMWARE_FLAG: u16 = 0x0781;
 const COLS: usize = 80;
 #[cfg(test)]
 const ROW_BYTES: usize = COLS * 2;
@@ -29,6 +30,7 @@ pub struct TextFrame<'a> {
     pub character_height: u16,
     pub code_page: CodePage,
     pub fonts: Option<VgaTextFonts<'a>>,
+    pub blink_enabled: bool,
     pub cells: &'a [u8],
     pub cursor: Option<(u16, u16)>,
 }
@@ -269,6 +271,7 @@ impl Adapter {
                 character_height: self.text.character_height,
                 code_page: self.code_page,
                 fonts: Self::bios_fonts_active(cpu).then(|| self.vga.text_fonts()),
+                blink_enabled: self.vga.blink_enabled(),
                 cells: &cpu.memory[TEXT..TEXT + self.text.text_bytes()],
                 cursor: (self.cursor_shape & 0x2000 == 0)
                     .then_some((self.col as u16, self.row as u16)),
@@ -320,9 +323,12 @@ impl Adapter {
             .copy_from_slice(&from.memory[TEXT..TEXT + MAX_TEXT_BYTES]);
         self.code_page = previous.code_page;
         self.ansi = previous.ansi;
-        if previous.mode == 3 && Self::bios_fonts_active(from) {
-            self.vga.copy_text_fonts(&previous.vga);
-            to.write_u8(FONT_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG, 1);
+        if previous.mode == 3 {
+            self.set_blink_enabled(to, previous.vga.blink_enabled());
+            if Self::bios_fonts_active(from) {
+                self.vga.copy_text_fonts(&previous.vga);
+                to.write_u8(VIDEO_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG, 1);
+            }
         }
         self.console = previous.console;
         self.next_scan_lines = self.console.scan_lines;
@@ -395,7 +401,7 @@ impl Adapter {
             self.vga.leave(cpu);
         }
         self.mode = mode;
-        cpu.write_u8(FONT_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG, 0);
+        cpu.write_u8(VIDEO_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG, 0);
         self.palette = default_palette();
         if mode == 0x12 {
             for (index, color) in self.palette[..64].iter_mut().enumerate() {
@@ -409,6 +415,7 @@ impl Adapter {
         }
         self.cga_color = 15;
         if mode == 3 {
+            self.set_blink_enabled(cpu, true);
             self.set_text_geometry(cpu, TextGeometry::standard(self.next_scan_lines), 0x1000);
         }
         if clear {
@@ -824,6 +831,7 @@ impl Adapter {
                 self.vga
                     .set_attribute(0x11, cpu.read_u8(cpu.regs.es, cpu.regs.dx.wrapping_add(16)));
             }
+            0x10 if al == 3 && bl <= 1 => self.set_blink_enabled(cpu, bl == 1),
             0x10 if al == 0x12 => {
                 let start = usize::from(cpu.regs.bx).min(256);
                 let count = usize::from(cpu.regs.cx).min(256 - start);
@@ -858,19 +866,19 @@ impl Adapter {
     }
 
     fn bios_fonts_active(cpu: &Cpu) -> bool {
-        cpu.read_u8(FONT_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG) == 1
+        cpu.read_u8(VIDEO_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG) == 1
     }
 
     pub(crate) fn set_code_page(&mut self, cpu: &mut Cpu, page: CodePage) {
         self.code_page = page;
-        cpu.write_u8(FONT_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG, 0);
+        cpu.write_u8(VIDEO_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG, 0);
     }
 
     fn activate_bios_fonts(&mut self, cpu: &mut Cpu) {
         if !Self::bios_fonts_active(cpu) {
             self.vga.select_text_fonts(0);
             self.load_rom_text_font(0, self.text.character_height);
-            cpu.write_u8(FONT_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG, 1);
+            cpu.write_u8(VIDEO_FIRMWARE_SEGMENT, FONT_FIRMWARE_FLAG, 1);
         }
     }
 
@@ -965,6 +973,19 @@ impl Adapter {
                 Some(if self.retrace { 0x09 } else { 0 })
             }
             _ => self.vga.read_port(port),
+        }
+    }
+
+    fn set_blink_enabled(&mut self, cpu: &mut Cpu, enabled: bool) {
+        self.vga.set_blink_enabled(enabled);
+        let control = cpu.read_u8(0x40, 0x65);
+        cpu.write_u8(0x40, 0x65, (control & !0x20) | (u8::from(enabled) << 5));
+        cpu.write_u8(VIDEO_FIRMWARE_SEGMENT, BLINK_FIRMWARE_FLAG, 1);
+    }
+
+    pub(crate) fn restore_legacy_blink_default(&mut self, cpu: &mut Cpu) {
+        if self.mode == 3 && cpu.read_u8(VIDEO_FIRMWARE_SEGMENT, BLINK_FIRMWARE_FLAG) == 0 {
+            self.set_blink_enabled(cpu, true);
         }
     }
 
