@@ -14,6 +14,13 @@ const TEXT: usize = 0xb8000;
 const VIDEO_FIRMWARE_SEGMENT: u16 = 0xf000;
 const FONT_FIRMWARE_FLAG: u16 = 0x0780;
 const BLINK_FIRMWARE_FLAG: u16 = 0x0781;
+const ROM_FONTS_INSTALLED: u16 = 0x0782;
+const ROM_FONT_8: u16 = 0x5000;
+const ROM_FONT_14: u16 = 0x5800;
+const ROM_FONT_16: u16 = 0x6600;
+const ROM_ALTERNATE_FONT: u16 = 0x7600;
+const HIGH_FONT_VECTOR: u16 = 0x1f * 4;
+const GRAPHICS_FONT_VECTOR: u16 = 0x43 * 4;
 const COLS: usize = 80;
 #[cfg(test)]
 const ROW_BYTES: usize = COLS * 2;
@@ -437,6 +444,7 @@ impl Adapter {
             cpu.write_u8(0x40, 0x84, if mode == 0x12 { 29 } else { 24 });
             cpu.write_u16(0x40, 0x85, if mode == 0x12 { 16 } else { 8 });
         }
+        set_font_vector(cpu, GRAPHICS_FONT_VECTOR, rom_font_for_screen(cpu));
         self.update_cursor(cpu);
         true
     }
@@ -846,6 +854,7 @@ impl Adapter {
                         .map(expand_dac);
                 }
             }
+            0x11 if al == 0x30 => return bios_font_info(cpu, bh),
             0x11 if self.mode == 3 => return self.bios_text_font(cpu, al, bh, bl),
             0x12 if bl == 0x10 => {
                 cpu.regs.bx = 3;
@@ -1007,7 +1016,70 @@ fn cga_scanline(y: usize) -> usize {
     TEXT + (y % 2) * CGA_BANK + (y / 2) * CGA_STRIDE
 }
 
+fn set_font_vector(cpu: &mut Cpu, vector: u16, offset: u16) {
+    cpu.write_u16(0, vector, offset);
+    cpu.write_u16(0, vector + 2, VIDEO_FIRMWARE_SEGMENT);
+}
+
+fn rom_font_for_screen(cpu: &Cpu) -> u16 {
+    match cpu.read_u16(0x40, 0x85) {
+        8 => ROM_FONT_8,
+        14 => ROM_FONT_14,
+        _ => ROM_FONT_16,
+    }
+}
+
+fn install_rom_font_tables(cpu: &mut Cpu) {
+    if cpu.read_u8(VIDEO_FIRMWARE_SEGMENT, ROM_FONTS_INSTALLED) == 1 {
+        return;
+    }
+    let glyphs = CodePage::Cp437.glyphs();
+    for (offset, height) in [(ROM_FONT_8, 8), (ROM_FONT_14, 14), (ROM_FONT_16, 16)] {
+        let bytes: Vec<u8> = glyphs
+            .iter()
+            .flat_map(|bitmap| (0..height).map(move |row| bitmap[row * 8 / height].reverse_bits()))
+            .collect();
+        cpu.load(VIDEO_FIRMWARE_SEGMENT, offset, &bytes);
+    }
+    // The built-in font uses the same glyphs in 8- and 9-dot layouts.
+    cpu.write_u8(VIDEO_FIRMWARE_SEGMENT, ROM_ALTERNATE_FONT, 0);
+    for (vector, offset) in [
+        (HIGH_FONT_VECTOR, ROM_FONT_8 + 128 * 8),
+        (GRAPHICS_FONT_VECTOR, rom_font_for_screen(cpu)),
+    ] {
+        if cpu.read_u16(0, vector) == 0 && cpu.read_u16(0, vector + 2) == 0 {
+            set_font_vector(cpu, vector, offset);
+        }
+    }
+    cpu.write_u8(VIDEO_FIRMWARE_SEGMENT, ROM_FONTS_INSTALLED, 1);
+}
+
+fn bios_font_info(cpu: &mut Cpu, selector: u8) -> bool {
+    let offset = match selector {
+        0 => HIGH_FONT_VECTOR,
+        1 => GRAPHICS_FONT_VECTOR,
+        2 => ROM_FONT_14,
+        3 => ROM_FONT_8,
+        4 => ROM_FONT_8 + 128 * 8,
+        5 | 7 => ROM_ALTERNATE_FONT,
+        6 => ROM_FONT_16,
+        _ => return false,
+    };
+    install_rom_font_tables(cpu);
+    let (segment, pointer) = if selector <= 1 {
+        (cpu.read_u16(0, offset + 2), cpu.read_u16(0, offset))
+    } else {
+        (VIDEO_FIRMWARE_SEGMENT, offset)
+    };
+    cpu.regs.es = segment;
+    cpu.regs.bp = pointer;
+    cpu.regs.cx = cpu.read_u16(0x40, 0x85);
+    cpu.regs.dx = (cpu.regs.dx & 0xff00) | u16::from(cpu.read_u8(0x40, 0x84));
+    true
+}
+
 pub(crate) fn initialize(cpu: &mut Cpu, video: &mut Adapter) {
+    install_rom_font_tables(cpu);
     blank_text(&mut cpu.memory[TEXT..TEXT + MAX_TEXT_BYTES]);
     video.set_mode(cpu, 3);
     video.update_scan_line_selection(cpu);
