@@ -40,6 +40,7 @@ impl Machine {
             }
             0x13 if let Some(disk) = &mut self.boot_disk => disk.interrupt(&mut self.cpu),
             0x15 if ah == 0x24 => self.a20_interrupt(al),
+            0x15 if ax == 0xe820 => crate::bios::memory_map(&mut self.cpu),
             0x15 if ah == 0x84 => self.joystick_interrupt(),
             0x15 if ah == 0x88 => {
                 self.cpu.regs.ax = self.cpu.extended_memory_kib();

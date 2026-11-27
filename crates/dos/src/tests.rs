@@ -32,6 +32,66 @@ impl Directory {
 }
 
 #[test]
+fn bios_e820_enumerates_ram_and_reserved_regions() {
+    use dosa_cpu::{CpuProfile, Register};
+
+    const SMAP: u32 = 0x534d_4150;
+    let mut machine = Machine::new();
+    let segment = 0x2000;
+    let prepare = |machine: &mut Machine, entry, size, signature, offset| {
+        let cpu = &mut machine.cpu;
+        cpu.set_reg(Register::EAX, 0xe820).unwrap();
+        cpu.set_reg(Register::EBX, entry).unwrap();
+        cpu.set_reg(Register::ECX, size).unwrap();
+        cpu.set_reg(Register::EDX, signature).unwrap();
+        cpu.regs.es = segment;
+        cpu.regs.di = offset;
+    };
+    let extended = u64::from(machine.cpu.extended_memory_kib()) * 1024;
+    for (entry, next, base, length, kind) in [
+        (0, 1, 0_u64, 0xa0000_u64, 1_u32),
+        (1, 2, 0xa0000, 0x60000, 2),
+        (2, 0, 0x100000, extended, 1),
+    ] {
+        prepare(&mut machine, entry, 24, SMAP, 0x0200);
+        machine.cpu.regs.flags |= 1;
+        machine.cpu.load(segment, 0x0200, &[0x55; 24]);
+        machine.interrupt(0x15).unwrap();
+        let cpu = &machine.cpu;
+        assert_eq!(cpu.regs.flags & 1, 0);
+        assert_eq!(cpu.get_reg(Register::EAX), Some(SMAP));
+        assert_eq!(cpu.get_reg(Register::EBX), Some(next));
+        assert_eq!(cpu.get_reg(Register::ECX), Some(20));
+        let bytes: [u8; 24] =
+            std::array::from_fn(|index| cpu.read_u8(segment, 0x200 + index as u16));
+        assert_eq!(&bytes[..8], &base.to_le_bytes());
+        assert_eq!(&bytes[8..16], &length.to_le_bytes());
+        assert_eq!(&bytes[16..20], &kind.to_le_bytes());
+        assert_eq!(&bytes[20..], &[0x55; 4]);
+    }
+
+    for (entry, size, signature, offset) in [
+        (0x10000, 20, SMAP, 0x0200),
+        (0, 19, SMAP, 0x0200),
+        (0, 20, 0x4150, 0x0200),
+        (0, 20, SMAP, 0xffed),
+    ] {
+        prepare(&mut machine, entry, size, signature, offset);
+        machine.cpu.write_u8(segment, offset, 0x55);
+        machine.interrupt(0x15).unwrap();
+        assert_eq!(machine.cpu.regs.flags & 1, 1);
+        assert_eq!(machine.cpu.regs.ax >> 8, 0x86);
+        assert_eq!(machine.cpu.read_u8(segment, offset), 0x55);
+    }
+
+    machine.cpu = dosa_cpu::Cpu::with_profile(CpuProfile::I286);
+    prepare(&mut machine, 0, 20, SMAP, 0x0200);
+    machine.interrupt(0x15).unwrap();
+    assert_eq!(machine.cpu.regs.flags & 1, 1);
+    assert_eq!(machine.cpu.regs.ax >> 8, 0x86);
+}
+
+#[test]
 fn guest_joystick_reads_port_and_bios_with_one_or_no_controllers() {
     let directory = Directory::new("joystick");
     directory.write(
