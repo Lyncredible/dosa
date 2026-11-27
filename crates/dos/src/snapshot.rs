@@ -18,6 +18,7 @@ const VERSION_ADLIB_REPLAY: u16 = 2;
 const VERSION_BOOT_MEDIA: u16 = 3;
 const VERSION_MIDI: u16 = 4;
 const VERSION_OPTICAL_CHANGE: u16 = 5;
+const VERSION_UPPER_MEMORY: u16 = 6;
 const HEADER_BYTES: usize = 18;
 /// Maximum size in bytes of a serialized guest save state.
 pub const MAX_GUEST_SNAPSHOT_BYTES: usize = 300 * 1024 * 1024;
@@ -196,7 +197,13 @@ impl Machine {
             .as_ref()
             .map(BootDisk::snapshot)
             .transpose()?;
+        let upper = self.xms.upper_blocks();
         let version = match (boot, replay, midi, self.iso_media_changed) {
+            (boot, replay, midi, changed) if !upper.is_empty() => {
+                metadata = postcard::to_extend(&(boot, replay, midi, changed, upper), metadata)
+                    .map_err(|_| Invalid)?;
+                VERSION_UPPER_MEMORY
+            }
             (boot, replay, midi, changed) if changed != 0 => {
                 metadata = postcard::to_extend(&(boot, replay, midi, changed), metadata)
                     .map_err(|_| Invalid)?;
@@ -301,6 +308,7 @@ impl Machine {
                 | VERSION_BOOT_MEDIA
                 | VERSION_MIDI
                 | VERSION_OPTICAL_CHANGE
+                | VERSION_UPPER_MEMORY
         ) {
             return Err(GuestSnapshotError::Version(version));
         }
@@ -313,18 +321,19 @@ impl Machine {
         }
         let (state, trailing): (State<'static>, _) =
             postcard::take_from_bytes(metadata).map_err(|_| Invalid)?;
-        let (boot, replay, midi, iso_media_changed) = match version {
-            VERSION_LEGACY if trailing.is_empty() => (None, None, None, 0),
+        let (boot, replay, midi, iso_media_changed, upper) = match version {
+            VERSION_LEGACY if trailing.is_empty() => (None, None, None, 0, None),
             VERSION_ADLIB_REPLAY => (
                 None,
                 Some(decode_extension::<SynthReplay>(trailing)?),
                 None,
                 0,
+                None,
             ),
             VERSION_BOOT_MEDIA => {
                 let (boot, replay) =
                     decode_extension::<(DiskSnapshot, Option<SynthReplay>)>(trailing)?;
-                (Some(boot), replay, None, 0)
+                (Some(boot), replay, None, 0, None)
             }
             VERSION_MIDI => {
                 let (boot, replay, midi) = decode_extension::<(
@@ -332,14 +341,16 @@ impl Machine {
                     Option<SynthReplay>,
                     MidiSnapshot<MidiReplay>,
                 )>(trailing)?;
-                (boot, replay, Some(midi), 0)
+                (boot, replay, Some(midi), 0, None)
             }
-            VERSION_OPTICAL_CHANGE => decode_extension::<(
-                Option<DiskSnapshot>,
-                Option<SynthReplay>,
-                Option<MidiSnapshot<MidiReplay>>,
-                u32,
-            )>(trailing)?,
+            VERSION_OPTICAL_CHANGE => {
+                let (boot, replay, midi, changed) = decode_extension(trailing)?;
+                (boot, replay, midi, changed, None)
+            }
+            VERSION_UPPER_MEMORY => {
+                let (boot, replay, midi, changed, upper) = decode_extension(trailing)?;
+                (boot, replay, midi, changed, Some(upper))
+            }
             _ => return Err(Invalid),
         };
         if !state.state.is_active()
@@ -401,7 +412,13 @@ impl Machine {
             return Err(Invalid);
         }
         cpu.restore_snapshot(cpu_bytes)?;
-        let xms = xms::Xms::from_snapshot(state.xms, cpu.memory.len()).ok_or(Invalid)?;
+        let mut xms = xms::Xms::from_snapshot(state.xms, cpu.memory.len()).ok_or(Invalid)?;
+        if let Some(upper) = upper {
+            if !cpu.has_a20() || boot_status.is_some() {
+                return Err(Invalid);
+            }
+            xms.restore_upper(upper).ok_or(Invalid)?;
+        }
         video.refresh(&cpu);
         let now = Instant::now();
         let clock = now.checked_sub(state.elapsed).ok_or(Invalid)?;

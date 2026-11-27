@@ -1110,3 +1110,87 @@ fn xms_a20_requests_are_balanced_and_hma_can_be_reclaimed() {
     assert_eq!(call(&mut machine, 4), (0, 0x94));
     assert_eq!(call(&mut machine, 7), (1, 0));
 }
+
+#[test]
+fn xms_upper_memory_survives_save_and_restore_and_can_be_reused() {
+    fn call(code: &mut Vec<u8>, function: u8, dx: u16, result: u8) {
+        let [low, high] = dx.to_le_bytes();
+        code.extend([
+            0xba,
+            low,
+            high,
+            0xb4,
+            function,
+            0xff,
+            0x1e,
+            0,
+            4, // CALL FAR [0400h]
+            0xa3,
+            result,
+            4,
+            0x89,
+            0x1e,
+            result + 2,
+            4,
+            0x89,
+            0x16,
+            result + 4,
+            4,
+        ]);
+    }
+
+    let directory = Directory::new("xms-upper-memory");
+    let mut code = vec![
+        0xb8, 0x10, 0x43, 0xcd, 0x2f, // Read the installed XMS entry point.
+        0x89, 0x1e, 0, 4, 0x8c, 0x06, 2, 4,
+    ];
+    call(&mut code, 0x10, 0xffff, 0x10);
+    call(&mut code, 0x10, 0x1000, 0x16);
+    code.extend([0x8e, 0xc3, 0x26, 0xc6, 0x06, 0, 0, 0xa5]); // Mark the first allocated block.
+    call(&mut code, 0x10, 0x1000, 0x1c);
+    call(&mut code, 0x10, 1, 0x22);
+    call(&mut code, 0x11, 0xd001, 0x28);
+    code.extend([0x31, 0xc0, 0xcd, 0x16]); // Save while both upper blocks are live.
+    code.extend([0x26, 0xa0, 0, 0, 0xa2, 0x3a, 4]); // Read the original byte through ES.
+    call(&mut code, 0x11, 0xd000, 0x2e);
+    call(&mut code, 0x10, 1, 0x34);
+    call(&mut code, 0x11, 0xe000, 0x40);
+    call(&mut code, 0x11, 0xd000, 0x46);
+    call(&mut code, 0x10, 0x2000, 0x4c);
+    code.extend([0xb8, 0, 0x4c, 0xcd, 0x21]);
+    directory.write("UMB.COM", &code);
+
+    for profile in [crate::CpuProfile::I286, crate::CpuProfile::I386] {
+        let mut machine = directory.machine();
+        machine.set_cpu_profile(profile).unwrap();
+        machine.launch('C', "UMB.COM", "").unwrap();
+        assert_eq!(machine.run(256).unwrap(), RunState::WaitingForKey);
+        assert!(!machine.cpu.a20_enabled());
+        let checkpoint = machine.save_guest().unwrap();
+
+        let mut restored = directory.machine();
+        restored.load_guest(&checkpoint).unwrap();
+        let result = |offset| {
+            std::array::from_fn::<_, 3, _>(|index| {
+                restored.cpu.read_u16(crate::PSP, offset + index as u16 * 2)
+            })
+        };
+        let [ax, bx, dx] = result(0x410);
+        assert_eq!((ax, bx as u8, dx), (0, 0xb0, 0x2000));
+        assert_eq!(result(0x416), [1, 0xd000, 0x1000]);
+        assert_eq!(result(0x41c), [1, 0xe000, 0x1000]);
+        let [ax, bx, dx] = result(0x422);
+        assert_eq!((ax, bx as u8, dx), (0, 0xb1, 0));
+        let [ax, bx, _] = result(0x428);
+        assert_eq!((ax, bx as u8), (0, 0xb2));
+        restored.key(b'\r', 0x1c);
+        assert_eq!(restored.run(256).unwrap(), RunState::Exited(0));
+        assert_eq!(restored.cpu.read_u8(crate::PSP, 0x43a), 0xa5);
+        let status = |offset| restored.cpu.read_u16(crate::PSP, offset);
+        for offset in [0x42e, 0x434, 0x440, 0x446, 0x44c] {
+            assert_eq!(status(offset), 1, "AX stored at {offset:04x}");
+        }
+        assert_eq!((status(0x436), status(0x438)), (0xd000, 1));
+        assert_eq!((status(0x44e), status(0x450)), (0xd000, 0x2000));
+    }
+}
