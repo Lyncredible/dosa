@@ -148,9 +148,17 @@ impl BootDisk {
                 )
             })?,
             BootDrive::HardDisk => {
-                let heads = if sectors > 1024 * 16 * 63 { 255 } else { 16 };
-                let cylinders = sectors.div_ceil(u64::from(heads) * 63).min(1024) as u16;
-                (cylinders, heads, 63, 0)
+                let track_sectors = sectors.min(63) as u16;
+                let tracks = sectors / u64::from(track_sectors);
+                let heads = if tracks > 1024 * 16 {
+                    255
+                } else {
+                    tracks.min(16) as u16
+                };
+                // DOS partitioners use whole cylinders reported by INT 13h.
+                // Extended reads and writes still have access to the final partial cylinder.
+                let cylinders = (tracks / u64::from(heads)).min(1024) as u16;
+                (cylinders, heads, track_sectors, 0)
             }
         };
         file.rewind()?;
