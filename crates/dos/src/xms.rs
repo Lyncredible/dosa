@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{collections::BTreeMap, ops::Range};
 
 use dosa_cpu::Cpu;
 
@@ -10,10 +10,16 @@ const HMA_END: usize = 0x100000 + HMA_BYTES;
 const POOL_START: usize = 0x110000;
 const KIB: usize = 1024;
 const HANDLES: u16 = 64;
+// Keep the arena clear of VGA, option ROM space at C000h, and the BIOS at F000h.
+const UPPER_START: u16 = 0xd000;
+const UPPER_END: u16 = 0xf000;
 
 const OUT_OF_MEMORY: u8 = 0xa0;
 const INVALID_HANDLE: u8 = 0xa2;
 const BLOCK_LOCKED: u8 = 0xab;
+const UMB_TOO_SMALL: u8 = 0xb0;
+const NO_UMBS: u8 = 0xb1;
+const INVALID_UMB: u8 = 0xb2;
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Block {
@@ -27,6 +33,7 @@ pub(super) struct Xms {
     hma: bool,
     global_a20: bool,
     local_a20: u16,
+    upper: BTreeMap<u16, u16>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -44,6 +51,7 @@ impl Default for Xms {
             hma: false,
             global_a20: false,
             local_a20: 0,
+            upper: BTreeMap::new(),
         }
     }
 }
@@ -83,7 +91,25 @@ impl Xms {
             hma: state.hma,
             global_a20: state.global_a20,
             local_a20: state.local_a20,
+            upper: BTreeMap::new(),
         })
+    }
+
+    pub(super) fn upper_blocks(&self) -> &BTreeMap<u16, u16> {
+        &self.upper
+    }
+
+    pub(super) fn restore_upper(&mut self, blocks: BTreeMap<u16, u16>) -> Option<()> {
+        let mut previous_end = UPPER_START;
+        for (&segment, &paragraphs) in &blocks {
+            let end = segment.checked_add(paragraphs)?;
+            if paragraphs == 0 || segment < previous_end || end > UPPER_END {
+                return None;
+            }
+            previous_end = end;
+        }
+        self.upper = blocks;
+        Some(())
     }
 
     pub(super) fn install(cpu: &mut Cpu) {
@@ -175,14 +201,41 @@ impl Xms {
                 cpu.regs.dx = (block.bytes / KIB) as u16;
             }),
             0x0f => self.resize(handle, usize::from(cpu.regs.bx) * KIB, cpu),
-            0x10 => {
-                cpu.regs.dx = 0;
-                Err(0xb1)
-            }
-            0x11 => Err(0xb2),
+            0x10 => match self.request_upper(handle) {
+                Ok(segment) => {
+                    cpu.regs.bx = segment;
+                    Ok(())
+                }
+                Err((code, largest)) => {
+                    cpu.regs.dx = largest;
+                    Err(code)
+                }
+            },
+            0x11 => self.upper.remove(&handle).map(|_| ()).ok_or(INVALID_UMB),
             _ => Err(0x80),
         };
         Self::complete(cpu, result);
+    }
+
+    fn request_upper(&mut self, paragraphs: u16) -> Result<u16, (u8, u16)> {
+        let mut start = UPPER_START;
+        let mut largest = 0;
+        for (next, used) in self
+            .upper
+            .iter()
+            .map(|(&segment, &size)| (segment, size))
+            .chain([(UPPER_END, 0)])
+        {
+            let available = next - start;
+            if paragraphs != 0 && available >= paragraphs {
+                self.upper.insert(start, paragraphs);
+                return Ok(start);
+            }
+            largest = largest.max(available);
+            start = next + used;
+        }
+        let code = if largest == 0 { NO_UMBS } else { UMB_TOO_SMALL };
+        Err((code, largest))
     }
 
     fn free_handles(&self) -> u8 {
@@ -372,4 +425,21 @@ fn xms_snapshot_retains_handle_numbers_and_rejects_overlapping_blocks() {
     let mut invalid = xms.snapshot();
     invalid.blocks[1].as_mut().unwrap().base = POOL_START;
     assert!(Xms::from_snapshot(invalid, end).is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn upper_memory_restore_rejects_invalid_ranges_without_replacing_live_blocks() {
+    let mut xms = Xms::default();
+    assert_eq!(xms.request_upper(0x100), Ok(UPPER_START));
+    for invalid in [
+        BTreeMap::from([(UPPER_START - 1, 1)]),
+        BTreeMap::from([(UPPER_START, 0)]),
+        BTreeMap::from([(UPPER_START, 2), (UPPER_START + 1, 1)]),
+        BTreeMap::from([(UPPER_END - 1, 2)]),
+        BTreeMap::from([(UPPER_START, u16::MAX)]),
+    ] {
+        assert_eq!(xms.restore_upper(invalid), None);
+        assert_eq!(xms.upper_blocks(), &BTreeMap::from([(UPPER_START, 0x100)]));
+    }
 }
