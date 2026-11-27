@@ -263,7 +263,7 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
                 continue;
             }
             Command::Launched => {
-                let mut halted_since = None;
+                let mut halted_since: Option<Instant> = None;
                 // A booted OS may poll the real-time BIOS clock before displaying its prompt.
                 // A fast host can spend the regular instruction budget during that wait.
                 let boot_started = shell.machine.is_booting_from_disk().then(Instant::now);
@@ -271,7 +271,7 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
                     check_headless_limit(
                         boot_started.map(|started| started.elapsed()),
                         &mut remaining_slices,
-                        halted_since.is_some(),
+                        halted_since.map(|since| since.elapsed()),
                     )
                     .map_err(|message| shell.guest_failed(message.into()))?;
                     let state = shell.machine.run(20_000);
@@ -287,10 +287,7 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
                             );
                         }
                         RunState::WaitingForInterrupt => {
-                            let since = halted_since.get_or_insert_with(Instant::now);
-                            if since.elapsed() >= HEADLESS_IRQ_WAIT {
-                                return Err(shell.guest_failed(HALT_TIMEOUT.into()));
-                            }
+                            halted_since.get_or_insert_with(Instant::now);
                             std::thread::sleep(Duration::from_millis(1));
                         }
                         RunState::Idle => break,
@@ -313,13 +310,16 @@ fn run_headless(mut shell: Shell, command: &str) -> Result<u8, Box<dyn std::erro
 fn check_headless_limit(
     boot_elapsed: Option<Duration>,
     remaining_slices: &mut usize,
-    halted: bool,
+    halted_elapsed: Option<Duration>,
 ) -> Result<(), &'static str> {
     match boot_elapsed {
         Some(elapsed) if elapsed < HEADLESS_BOOT_WAIT => Ok(()),
         Some(_) => Err("disk boot exceeded the headless time limit"),
+        None if halted_elapsed.is_some_and(|elapsed| elapsed >= HEADLESS_IRQ_WAIT) => {
+            Err(HALT_TIMEOUT)
+        }
         None => {
-            let message = if halted {
+            let message = if halted_elapsed.is_some() {
                 HALT_TIMEOUT
             } else {
                 "program exceeded the headless instruction budget"
@@ -346,16 +346,32 @@ mod tests {
     #[test]
     fn disk_boot_uses_wall_time_even_when_the_program_budget_is_spent() {
         let mut slices = 1;
-        assert!(check_headless_limit(None, &mut slices, false).is_ok());
+        assert!(check_headless_limit(None, &mut slices, None).is_ok());
         assert_eq!(slices, 0);
-        assert!(check_headless_limit(None, &mut slices, false).is_err());
+        assert!(check_headless_limit(None, &mut slices, None).is_err());
         assert_eq!(
-            check_headless_limit(None, &mut slices, true),
+            check_headless_limit(None, &mut slices, Some(Duration::ZERO)),
             Err(HALT_TIMEOUT)
         );
-        assert!(check_headless_limit(Some(Duration::from_secs(11)), &mut slices, false).is_ok());
-        assert!(check_headless_limit(Some(HEADLESS_BOOT_WAIT), &mut slices, false).is_err());
+        assert!(check_headless_limit(Some(Duration::from_secs(11)), &mut slices, None).is_ok());
+        assert!(check_headless_limit(Some(HEADLESS_BOOT_WAIT), &mut slices, None).is_err());
         assert_eq!(slices, 0);
+    }
+
+    #[test]
+    fn a_halted_boot_uses_the_boot_deadline_and_other_programs_have_a_short_irq_wait() {
+        let mut slices = 8;
+        let halted = Some(HEADLESS_IRQ_WAIT);
+        assert_eq!(
+            check_headless_limit(None, &mut slices, halted),
+            Err(HALT_TIMEOUT)
+        );
+        assert!(check_headless_limit(Some(Duration::from_secs(11)), &mut slices, halted).is_ok());
+        assert_eq!(
+            check_headless_limit(Some(HEADLESS_BOOT_WAIT), &mut slices, halted),
+            Err("disk boot exceeded the headless time limit")
+        );
+        assert_eq!(slices, 8);
     }
 
     #[test]
