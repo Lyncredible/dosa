@@ -6,6 +6,7 @@ description = "A GPU-rendered DOS emulator"
 
 [workspace]
 members = ["crates/cpu", "crates/desktop", "crates/dos", "crates/mount"]
+exclude = ["vendor/oplon"]
 resolver = "3"
 
 [dependencies]

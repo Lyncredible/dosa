@@ -18,7 +18,7 @@
 use super::tables::{EXP_OUT, KSL, KSL_SHIFT, LOGSIN_ROM, MUL};
 
 /// Envelope generator phase.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 enum EgState {
     /// Silent and idle (key released and faded out).
     Off,
@@ -79,6 +79,7 @@ const EG_INC: [u8; 15 * 8] = {
     t
 };
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct Operator {
     // ---- register-derived configuration (set by patch / key) ----
     /// Phase increment per sample (computed from F-num/block/mul).
@@ -138,6 +139,30 @@ pub(crate) struct Operator {
 }
 
 impl Operator {
+    pub(crate) fn valid_adlib_snapshot(&self) -> bool {
+        self.mul < 16
+            && self.waveform <= 7
+            && self.tl_eg <= 252
+            && self.ksl_reg <= 3
+            && self.attack_rate <= 15
+            && self.decay_rate <= 15
+            && self.release_rate <= 15
+            && self.sustain_level_eg <= MAX_ATT_INDEX as u16
+            && self.fnum <= 1023
+            && self.block <= 7
+            && self.ksl_eg <= 256
+            && self.att_static == u32::from(self.tl_eg) + u32::from(self.ksl_eg)
+            && self.ksr_off <= 15
+            && [self.eg_att, self.eg_dec, self.eg_rel]
+                .into_iter()
+                .all(|(shift, row)| shift < 32 && row <= EG_INC.len() - 8 && row % 8 == 0)
+            && (0..=MAX_ATT_INDEX).contains(&self.volume)
+            && (-4096..=4096).contains(&self.prev_out)
+            && (-4096..=4096).contains(&self.out)
+            && !self.opl3
+            && self.vib_shift <= 1
+    }
+
     pub(crate) const fn new() -> Self {
         Self {
             phase_inc: 0,
@@ -486,7 +511,11 @@ impl Operator {
     pub(crate) fn output_at(&mut self, phase10: u32, tremolo: u16) -> i32 {
         let att = self.attenuation_eg(tremolo);
         // OPL2's waveform-select register is 2-bit; OPL3 widens it to 3-bit.
-        let wf = if self.opl3 { self.waveform } else { self.waveform & 0x03 };
+        let wf = if self.opl3 {
+            self.waveform
+        } else {
+            self.waveform & 0x03
+        };
         let out = waveform_output(wf, phase10 & 0x3FF, att);
         self.prev_out = self.out;
         self.out = out;
@@ -519,7 +548,11 @@ impl Operator {
 /// attenuation in the log-sine domain (Q8).
 #[inline]
 fn logsin(p: u32) -> u32 {
-    let idx = if p & 0x100 != 0 { 255 - (p & 0xFF) } else { p & 0xFF };
+    let idx = if p & 0x100 != 0 {
+        255 - (p & 0xFF)
+    } else {
+        p & 0xFF
+    };
     LOGSIN_ROM[idx as usize] as u32
 }
 
@@ -665,20 +698,32 @@ mod tests {
         let (idx, neg, mute) = match waveform & 0x07 {
             0 => {
                 let quad = (p >> 8) & 3;
-                let idx = if quad & 1 != 0 { 255 - (p & 0xFF) } else { p & 0xFF };
+                let idx = if quad & 1 != 0 {
+                    255 - (p & 0xFF)
+                } else {
+                    p & 0xFF
+                };
                 (idx, quad & 2 != 0, false)
             }
             1 => {
                 if p & 0x200 != 0 {
                     (0, false, true)
                 } else {
-                    let idx = if p & 0x100 != 0 { 255 - (p & 0xFF) } else { p & 0xFF };
+                    let idx = if p & 0x100 != 0 {
+                        255 - (p & 0xFF)
+                    } else {
+                        p & 0xFF
+                    };
                     (idx, false, false)
                 }
             }
             2 | 6 => {
                 let pp = p & 0x1FF;
-                let idx = if pp & 0x100 != 0 { 255 - (pp & 0xFF) } else { pp & 0xFF };
+                let idx = if pp & 0x100 != 0 {
+                    255 - (pp & 0xFF)
+                } else {
+                    pp & 0xFF
+                };
                 (idx, false, false)
             }
             3 | 7 => {
@@ -691,7 +736,11 @@ mod tests {
             }
             _ => {
                 let quad = (p >> 8) & 3;
-                let idx = if quad & 1 != 0 { 255 - (p & 0xFF) } else { p & 0xFF };
+                let idx = if quad & 1 != 0 {
+                    255 - (p & 0xFF)
+                } else {
+                    p & 0xFF
+                };
                 (idx, quad & 2 != 0, false)
             }
         };
@@ -748,6 +797,9 @@ mod wf_golden {
                 }
             }
         }
-        assert_eq!(h, 0x220c_fe4b_bd17_c54d, "waveform output changed ({h:016x})");
+        assert_eq!(
+            h, 0x220c_fe4b_bd17_c54d,
+            "waveform output changed ({h:016x})"
+        );
     }
 }

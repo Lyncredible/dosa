@@ -38,6 +38,7 @@ pub const OPL3_CHANNELS: usize = 18;
 
 /// One 2-operator FM channel: modulator (op 0) → carrier (op 1), or both
 /// summed in additive ("AM") mode.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct OplChannel {
     modulator: Operator,
     carrier: Operator,
@@ -115,6 +116,7 @@ const RM_HH: u8 = 0x01;
 /// stream down to the caller's output rate with 4-point cubic interpolation.
 /// Rendering directly at 44100/48000 would fold harmonics at the *wrong*
 /// Nyquist and produce inauthentic timbre on bright operators.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Opl2 {
     channels: [OplChannel; OPL3_CHANNELS],
     /// Native operator rate (Hz).
@@ -157,6 +159,29 @@ pub struct Opl2 {
 }
 
 impl Opl2 {
+    /// Validate serialized state before using it as a standard-clock AdLib chip.
+    pub fn valid_adlib_snapshot(&self, output_rate: u32) -> bool {
+        let step = (u64::from(OPL_NATIVE_RATE) << 32) / u64::from(output_rate.max(1));
+        self.native_rate == OPL_NATIVE_RATE
+            && self.resamp_step_q32 == step
+            && self.resamp_cursor_q32 < (1 << 32)
+            && self.native_hist.iter().all(|&(left, right)| {
+                (-147_456..=147_456).contains(&left) && (-147_456..=147_456).contains(&right)
+            })
+            && self.tremolopos < 210
+            && self.rhythm_keys & !0x1f == 0
+            && (1..1 << 23).contains(&self.noise)
+            && !self.opl3_enable
+            && self.fourop_mask == 0
+            && self.channels.iter().all(|channel| {
+                channel.feedback <= 7
+                    && channel.fnum_high <= 3
+                    && channel.block <= 7
+                    && channel.modulator.valid_adlib_snapshot()
+                    && channel.carrier.valid_adlib_snapshot()
+            })
+    }
+
     /// New OPL rendering at `output_rate` Hz (stereo), assuming the canonical
     /// 3.579545 MHz YM3812 clock (native operator rate 49716 Hz). Starts in
     /// OPL2 mode.
@@ -397,7 +422,11 @@ impl Opl2 {
                 continue;
             }
             if let Some(c) = self.channels.get_mut(ch) {
-                let op = if modu { &mut c.modulator } else { &mut c.carrier };
+                let op = if modu {
+                    &mut c.modulator
+                } else {
+                    &mut c.carrier
+                };
                 if on {
                     op.key_on();
                 } else {
@@ -429,13 +458,33 @@ impl Opl2 {
         c.additive = patch.additive;
         let m = &patch.modulator;
         c.modulator.set_patch(
-            m.mul, m.waveform, m.tl, m.ksl, m.ksr, m.sustaining, m.attack, m.decay, m.sustain,
-            m.release, m.am, m.vib,
+            m.mul,
+            m.waveform,
+            m.tl,
+            m.ksl,
+            m.ksr,
+            m.sustaining,
+            m.attack,
+            m.decay,
+            m.sustain,
+            m.release,
+            m.am,
+            m.vib,
         );
         let cr = &patch.carrier;
         c.carrier.set_patch(
-            cr.mul, cr.waveform, cr.tl, cr.ksl, cr.ksr, cr.sustaining, cr.attack, cr.decay,
-            cr.sustain, cr.release, cr.am, cr.vib,
+            cr.mul,
+            cr.waveform,
+            cr.tl,
+            cr.ksl,
+            cr.ksr,
+            cr.sustaining,
+            cr.attack,
+            cr.decay,
+            cr.sustain,
+            cr.release,
+            cr.am,
+            cr.vib,
         );
     }
 
@@ -447,10 +496,24 @@ impl Opl2 {
         let Some(c) = self.channels.get_mut(ch) else {
             return;
         };
-        let op = if carrier { &mut c.carrier } else { &mut c.modulator };
+        let op = if carrier {
+            &mut c.carrier
+        } else {
+            &mut c.modulator
+        };
         op.set_patch(
-            p.mul, p.waveform, p.tl, p.ksl, p.ksr, p.sustaining, p.attack, p.decay, p.sustain,
-            p.release, p.am, p.vib,
+            p.mul,
+            p.waveform,
+            p.tl,
+            p.ksl,
+            p.ksr,
+            p.sustaining,
+            p.attack,
+            p.decay,
+            p.sustain,
+            p.release,
+            p.am,
+            p.vib,
         );
     }
 
@@ -459,7 +522,11 @@ impl Opl2 {
     /// be phase-driven independently here).
     pub fn set_operator_frequency(&mut self, ch: usize, carrier: bool, fnum: u16, block: u8) {
         if let Some(c) = self.channels.get_mut(ch) {
-            let op = if carrier { &mut c.carrier } else { &mut c.modulator };
+            let op = if carrier {
+                &mut c.carrier
+            } else {
+                &mut c.modulator
+            };
             op.set_frequency(fnum, block);
         }
     }
@@ -489,7 +556,11 @@ impl Opl2 {
     /// can't use [`Self::set_carrier_tl`]).
     pub fn set_rhythm_operator_tl(&mut self, ch: usize, carrier: bool, tl: u8) {
         if let Some(c) = self.channels.get_mut(ch) {
-            let op = if carrier { &mut c.carrier } else { &mut c.modulator };
+            let op = if carrier {
+                &mut c.carrier
+            } else {
+                &mut c.modulator
+            };
             op.set_total_level(tl);
         }
     }
@@ -701,14 +772,18 @@ impl Opl2 {
 
         // Hi-hat (HH)
         let hh_phase = (rm << 9) | if (rm ^ noise_bit) != 0 { 0xD0 } else { 0x34 };
-        let hh_out = self.channels[CH_HH_SD].modulator.output_at(hh_phase, tremolo);
+        let hh_out = self.channels[CH_HH_SD]
+            .modulator
+            .output_at(hh_phase, tremolo);
         // Snare drum (SD)
         let hh_bit8 = bit(hh_p, 8);
         let sd_phase = (hh_bit8 << 9) | ((hh_bit8 ^ noise_bit) << 8);
         let sd_out = self.channels[CH_HH_SD].carrier.output_at(sd_phase, tremolo);
         // Tom-tom (TT): normal operator (own phase, no modulation)
         let tt_phase = self.channels[CH_TT_CY].modulator.phase_out() & 0x3FF;
-        let tt_out = self.channels[CH_TT_CY].modulator.output_at(tt_phase, tremolo);
+        let tt_out = self.channels[CH_TT_CY]
+            .modulator
+            .output_at(tt_phase, tremolo);
         // Cymbal (CY)
         let cy_phase = (rm << 9) | 0x80;
         let cy_out = self.channels[CH_TT_CY].carrier.output_at(cy_phase, tremolo);
@@ -891,7 +966,10 @@ mod tests {
                 break;
             }
         }
-        assert!(chip.channel_is_silent(0), "channel should release to silence");
+        assert!(
+            chip.channel_is_silent(0),
+            "channel should release to silence"
+        );
     }
 
     #[test]
@@ -1005,12 +1083,30 @@ mod tests {
         // input now. (Same sequence as examples/opl2_hash.rs.)
         let mut opl = Opl2::new(44100);
         for (r, v) in [
-            (0x20u8, 0x21u8), (0x23, 0x21), (0x40, 0x10), (0x43, 0x00),
-            (0x60, 0xF2), (0x63, 0xF2), (0x80, 0x05), (0x83, 0x05),
-            (0xC0, 0x06), (0xA0, 0x98), (0xB0, 0x31),
-            (0x28, 0x22), (0x2B, 0x22), (0x48, 0x00), (0x4B, 0x00),
-            (0x68, 0xF4), (0x6B, 0xF4), (0x88, 0x03), (0x8B, 0x03),
-            (0xE8, 0x02), (0xEB, 0x03), (0xC8, 0x0A), (0xA8, 0x40), (0xB8, 0x25),
+            (0x20u8, 0x21u8),
+            (0x23, 0x21),
+            (0x40, 0x10),
+            (0x43, 0x00),
+            (0x60, 0xF2),
+            (0x63, 0xF2),
+            (0x80, 0x05),
+            (0x83, 0x05),
+            (0xC0, 0x06),
+            (0xA0, 0x98),
+            (0xB0, 0x31),
+            (0x28, 0x22),
+            (0x2B, 0x22),
+            (0x48, 0x00),
+            (0x4B, 0x00),
+            (0x68, 0xF4),
+            (0x6B, 0xF4),
+            (0x88, 0x03),
+            (0x8B, 0x03),
+            (0xE8, 0x02),
+            (0xEB, 0x03),
+            (0xC8, 0x0A),
+            (0xA8, 0x40),
+            (0xB8, 0x25),
         ] {
             opl.write_reg(r, v);
         }
@@ -1026,7 +1122,10 @@ mod tests {
                 h = h.wrapping_mul(0x0000_0100_0000_01b3);
             }
         }
-        assert_eq!(h, 0xa17a_333a_f7d2_d119, "OPL2 render changed (hash {h:016x})");
+        assert_eq!(
+            h, 0xa17a_333a_f7d2_d119,
+            "OPL2 render changed (hash {h:016x})"
+        );
     }
 
     #[test]
