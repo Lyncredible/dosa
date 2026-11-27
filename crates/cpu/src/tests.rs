@@ -1138,6 +1138,76 @@ fn virtual_8086_interrupts_switch_to_the_monitor_stack_and_return() {
 }
 
 #[test]
+fn virtual_8086_port_io_obeys_the_tss_bitmap_at_every_operand_width() {
+    let mut cpu = virtual_8086_test_cpu(0x0002_3002);
+    cpu.load(0x1800, 8, &[0xb8, 0x18, 0, 0x0f, 0, 0xd8, 0x66, 0xcf]);
+    cpu.load(0x1800, 0x70, &[0x66, 0x83, 0xc4, 4, 0x66, 0xcf]); // Drop error code and retry.
+    cpu.load(0, 13 * 8, &[0x70, 0, 8, 0, 0, 0x8e, 0, 0]);
+    cpu.write_u16(0x1400, 0x18, 0x75); // TSS limit includes exactly two bitmap bytes for port 67h.
+    cpu.load(0x1b00, 4, &[0x90, 0, 0, 0, 0x20, 0]); // ESP0 and SS0.
+    cpu.write_u16(0x1b00, 0x66, 0x68); // I/O map offset in the TSS.
+    cpu.write_u16(0x1b00, 0x74, 0x0500); // Deny ports 68h and 6Ah.
+    cpu.load(
+        0x1902,
+        0x20,
+        &[
+            0xe4, 0x61, // IN AL,61h.
+            0xba, 0x67, 0,    // MOV DX,67h.
+            0xef, // OUT DX,AX.
+            0x66, 0xed, // IN EAX,DX.
+            0xe4, 0x68, // IN AL,68h beyond the last full bitmap word.
+        ],
+    );
+    advance(&mut cpu, 3);
+    assert!(cpu.control.virtual_8086);
+    assert_eq!(
+        cpu.step().unwrap(),
+        Step::PortRead {
+            port: 0x61,
+            width: 1
+        }
+    );
+    cpu.complete_port_read(1, 0xf8);
+    advance(&mut cpu, 1); // MOV DX.
+
+    advance(&mut cpu, 1); // OUT DX,AX must fault before writing to either port.
+    assert_eq!(cpu.instruction_pointer(), 0x70);
+    assert_eq!(cpu.read_u16(0x1c00, 0x68), 0);
+    assert_eq!(cpu.read_u16(0x1c00, 0x6c), 0x25);
+    cpu.write_u16(0x1b00, 0x74, 0x0400);
+    advance(&mut cpu, 2); // Retry after opening just port 68h.
+    assert_eq!(
+        cpu.step().unwrap(),
+        Step::PortWrite {
+            port: 0x67,
+            width: 2,
+            value: 0xf8
+        }
+    );
+
+    advance(&mut cpu, 1); // IN EAX,DX still spans the denied port 6Ah.
+    assert_eq!(cpu.instruction_pointer(), 0x70);
+    assert_eq!(cpu.read_u16(0x1c00, 0x68), 0);
+    assert_eq!(cpu.read_u16(0x1c00, 0x6c), 0x26);
+    cpu.write_u16(0x1b00, 0x74, 0);
+    advance(&mut cpu, 2);
+    assert_eq!(
+        cpu.step().unwrap(),
+        Step::PortRead {
+            port: 0x67,
+            width: 4
+        }
+    );
+    cpu.complete_port_read(4, 0x78563412);
+
+    advance(&mut cpu, 1); // The two-byte read exceeds the cached TSS limit.
+    assert_eq!(cpu.instruction_pointer(), 0x70);
+    assert_eq!(cpu.read_u16(0x1c00, 0x68), 0);
+    assert_eq!(cpu.read_u16(0x1c00, 0x6c), 0x28);
+    assert_eq!(cpu.get_reg(Register::EAX), Some(0x78563412));
+}
+
+#[test]
 fn protected_mode_local_descriptors_are_selectable_and_queryable_on_286_and_386() {
     for profile in [CpuProfile::I286, CpuProfile::I386] {
         let mut cpu = program_for(
