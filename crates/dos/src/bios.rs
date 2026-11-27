@@ -8,6 +8,8 @@ use crate::pit::BIOS_DIVISOR;
 pub(super) const TIMER_VECTOR: u8 = 0x08;
 const USER_TIMER_VECTOR: u8 = 0x1c;
 const ROM: u16 = 0xf000;
+// This firmware byte travels with the BIOS tick data in the guest's RAM image.
+const RTC_DST_OPTION: u16 = 0x07f0;
 const TIMER_ENTRY: u16 = 0x0800;
 const TIMER_RETURN: u16 = TIMER_ENTRY + 3;
 const KEYBOARD_ENTRY: u16 = 0x0900;
@@ -92,4 +94,31 @@ pub(super) fn take_timer(cpu: &mut Cpu) -> (u32, u8) {
     let midnight = cpu.read_u8(BDA, MIDNIGHT);
     cpu.write_u8(BDA, MIDNIGHT, 0);
     (read_ticks(cpu), midnight)
+}
+
+pub(super) fn set_timer(cpu: &mut Cpu, ticks: u32) {
+    write_ticks(cpu, ticks);
+    cpu.write_u8(BDA, MIDNIGHT, 0);
+}
+
+pub(super) fn bcd_pair(high: u8, low: u8) -> u16 {
+    let encode = |value: u8| ((value / 10) << 4) | (value % 10);
+    u16::from_be_bytes([encode(high), encode(low)])
+}
+
+pub(super) fn decode_bcd_pair(word: u16) -> Option<(u8, u8)> {
+    let decode = |byte: u8| {
+        let (tens, units) = (byte >> 4, byte & 0x0f);
+        (tens <= 9 && units <= 9).then_some(tens * 10 + units)
+    };
+    let [high, low] = word.to_be_bytes();
+    Some((decode(high)?, decode(low)?))
+}
+
+pub(super) fn rtc_dst(cpu: &Cpu) -> u8 {
+    cpu.read_u8(ROM, RTC_DST_OPTION) & 1
+}
+
+pub(super) fn set_rtc_dst(cpu: &mut Cpu, option: u8) {
+    cpu.write_u8(ROM, RTC_DST_OPTION, option);
 }

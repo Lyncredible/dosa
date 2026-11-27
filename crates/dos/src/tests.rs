@@ -1383,3 +1383,70 @@ fn dos_upper_memory_link_and_strategy_survive_restore_and_protect_live_blocks() 
     assert_eq!(read(0x420), 1);
     assert_eq!(read(0x422) as u8, 0);
 }
+
+#[test]
+fn at_bios_rtc_roundtrips_bcd_clock_settings_through_a_guest_save() {
+    let directory = Directory::new("bios-rtc");
+    directory.write("CLOCK.COM", &[0xeb, 0xfe]);
+    let mut machine = directory.machine();
+    machine.launch('C', "CLOCK.COM", "").unwrap();
+    let call = |machine: &mut Machine, ah, cx, dx| {
+        machine.cpu.regs.ax = u16::from(ah) << 8;
+        machine.cpu.regs.cx = cx;
+        machine.cpu.regs.dx = dx;
+        machine.interrupt(0x1a).unwrap();
+        (
+            machine.cpu.regs.cx,
+            machine.cpu.regs.dx,
+            machine.cpu.regs.flags & crate::CARRY != 0,
+        )
+    };
+    assert!(!call(&mut machine, 5u8, 0x2024, 0x0229).2);
+    assert!(!call(&mut machine, 3, 0x1234, 0x1701).2);
+    assert!(call(&mut machine, 5, 0x2023, 0x0229).2);
+    assert!(call(&mut machine, 3, 0x123a, 0x1700).2);
+    let bytes = machine.save_guest().unwrap();
+
+    let mut restored = directory.machine();
+    restored.load_guest(&bytes).unwrap();
+    assert_eq!(call(&mut restored, 4, 0, 0), (0x2024, 0x0229, false));
+    let seconds_since_midnight = |(hour, min, sec): (u8, u8, u8)| {
+        u32::from(hour) * 3600 + u32::from(min) * 60 + u32::from(sec)
+    };
+    let clock_seconds = |clock: crate::DosClock| {
+        let (hour, min, sec, _) = clock.time();
+        seconds_since_midnight((hour, min, sec))
+    };
+    let before = clock_seconds(restored.session_clock.now());
+    let (cx, dx, carry) = call(&mut restored, 2, 0, 0);
+    let after = clock_seconds(restored.session_clock.now());
+    let (hour, minute) = crate::bios::decode_bcd_pair(cx).unwrap();
+    let (second, dst) = crate::bios::decode_bcd_pair(dx).unwrap();
+    assert!(!carry);
+    assert_eq!(dst, 1);
+    assert!((before..=after).contains(&seconds_since_midnight((hour, minute, second))));
+}
+
+#[test]
+fn pc_bios_can_set_timer_ticks_without_an_at_rtc() {
+    let directory = Directory::new("pc-bios-ticks");
+    directory.write("CLOCK.COM", &[0xeb, 0xfe]);
+    let mut machine = directory.machine();
+    machine.set_cpu_profile(crate::CpuProfile::I8086).unwrap();
+    machine.launch('C', "CLOCK.COM", "").unwrap();
+    machine.cpu.write_u8(0x40, 0x70, 6);
+    machine.cpu.regs.ax = 0x0100;
+    machine.cpu.regs.cx = 0x000f;
+    machine.cpu.regs.dx = 0x91ab;
+    machine.interrupt(0x1a).unwrap();
+    machine.cpu.regs.ax = 0;
+    machine.interrupt(0x1a).unwrap();
+    assert_eq!(machine.cpu.regs.cx, 0x000f);
+    assert_eq!(machine.cpu.regs.dx, 0x91ab);
+    assert_eq!(machine.cpu.regs.ax, 0);
+    assert_eq!(machine.cpu.regs.flags & crate::CARRY, 0);
+    machine.cpu.regs.ax = 0x0200;
+    machine.interrupt(0x1a).unwrap();
+    assert_eq!(machine.cpu.regs.ax, 0x8600);
+    assert_ne!(machine.cpu.regs.flags & crate::CARRY, 0);
+}
