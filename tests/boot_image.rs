@@ -46,6 +46,30 @@ fn boots_raw_floppy_and_hard_disk_to_a_second_stage() {
 }
 
 #[test]
+fn headless_boot_observes_a_bios_timer_countdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("slow boot.img");
+    let mut image = vec![0; 1_474_560];
+    let code = [
+        0x31, 0xc9, 0x31, 0xd2, 0xb8, 0, 1, 0xcd, 0x1a, // Clear BIOS ticks.
+        0x31, 0xc0, 0xcd, 0x1a, // Read BIOS ticks.
+        0x83, 0xfa, 20, 0x72, 0xf7, // Poll for just over a second.
+        0xb8, b'K', 0x0e, 0xcd, 0x10, 0xcd, 0x18, // No next boot device
+    ];
+    image[..code.len()].copy_from_slice(&code);
+    image[510..512].copy_from_slice(&[0x55, 0xaa]);
+    std::fs::write(&path, image).unwrap();
+    let command = format!("BOOT A \"{}\"", path.display());
+    let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+        .args(["--headless", "--exec", &command])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(output.stdout, b"K");
+}
+
+#[test]
 fn restores_boot_disk_status_and_reads_the_second_stage() {
     use dosa_dos::{BootDrive, GuestSnapshotError, Machine, RunState};
     use std::fs::{self, File};
