@@ -22,6 +22,7 @@ const VERSION_UPPER_MEMORY: u16 = 6;
 const VERSION_HIGH_PROGRAM: u16 = 7;
 const VERSION_MEMORY_STRATEGY: u16 = 8;
 const VERSION_INSTALLATION_DISK: u16 = 9;
+const VERSION_ADLIB_CHIP: u16 = 10;
 const HEADER_BYTES: usize = 18;
 /// Maximum size in bytes of a serialized guest save state.
 pub const MAX_GUEST_SNAPSHOT_BYTES: usize = 300 * 1024 * 1024;
@@ -162,7 +163,6 @@ impl Machine {
         if elapsed > MAX_ELAPSED {
             return Err(Unavailable("the guest has been running too long"));
         }
-        let replay = self.audio.adlib_replay().map_err(Unavailable)?;
         let midi = self.audio.mpu.snapshot().map_err(Unavailable)?;
         let state = State {
             profile: self.cpu_profile,
@@ -212,8 +212,10 @@ impl Machine {
             .map(BootDisk::snapshot)
             .transpose()?;
         let upper = self.xms.upper_blocks();
-        let version = match (boot, replay, midi, self.iso_media_changed) {
-            (boot, replay, midi, changed)
+        // Versions 3 through 9 encode an optional AdLib replay in their extensions.
+        let replay: Option<()> = None;
+        let version = match (boot, midi, self.iso_media_changed) {
+            (boot, midi, changed)
                 if installation.is_some()
                     || self.memory_strategy != MemoryStrategy::for_program(self.upper_program)
                     || self.session_memory_strategy != MemoryStrategy::default()
@@ -240,53 +242,44 @@ impl Machine {
                     VERSION_MEMORY_STRATEGY
                 }
             }
-            (boot, replay, midi, changed) if let Some(program) = self.upper_program => {
+            (boot, midi, changed) if let Some(program) = self.upper_program => {
                 metadata =
                     postcard::to_extend(&(boot, replay, midi, changed, upper, program), metadata)
                         .map_err(|_| Invalid)?;
                 VERSION_HIGH_PROGRAM
             }
-            (boot, replay, midi, changed) if !upper.is_empty() => {
+            (boot, midi, changed) if !upper.is_empty() => {
                 metadata = postcard::to_extend(&(boot, replay, midi, changed, upper), metadata)
                     .map_err(|_| Invalid)?;
                 VERSION_UPPER_MEMORY
             }
-            (boot, replay, midi, changed) if changed != 0 => {
+            (boot, midi, changed) if changed != 0 => {
                 metadata = postcard::to_extend(&(boot, replay, midi, changed), metadata)
                     .map_err(|_| Invalid)?;
                 VERSION_OPTICAL_CHANGE
             }
-            (boot, replay, Some(midi), _) => {
+            (boot, Some(midi), _) => {
                 metadata =
                     postcard::to_extend(&(boot, replay, midi), metadata).map_err(|_| Invalid)?;
                 VERSION_MIDI
             }
-            (Some(disk), replay, None, _) => {
+            (Some(disk), None, _) => {
                 metadata = postcard::to_extend(&(disk, replay), metadata).map_err(|_| Invalid)?;
                 VERSION_BOOT_MEDIA
             }
-            (None, Some(replay), None, _) => {
-                metadata = postcard::to_extend(replay, metadata).map_err(|_| Invalid)?;
-                VERSION_ADLIB_REPLAY
-            }
-            (None, None, None, _) => VERSION_LEGACY,
+            (None, None, _) => VERSION_LEGACY,
+        };
+        let version = if let Some(chip) = self.audio.adlib_chip() {
+            // The prefix adds the live chip while retaining the existing device extensions.
+            let mut prefix = postcard::to_allocvec(&(version, chip)).map_err(|_| Invalid)?;
+            prefix.append(&mut metadata);
+            metadata = prefix;
+            VERSION_ADLIB_CHIP
+        } else {
+            version
         };
         let cpu = self.cpu.save_snapshot()?;
-        let metadata_len = u32::try_from(metadata.len()).map_err(|_| Invalid)?;
-        if HEADER_BYTES + metadata.len() + cpu.len() > MAX_GUEST_SNAPSHOT_BYTES {
-            return Err(Unavailable("the guest save state is too large"));
-        }
-        let mut checksum = crc32fast::Hasher::new();
-        checksum.update(&metadata);
-        checksum.update(&cpu);
-        let mut bytes = Vec::with_capacity(HEADER_BYTES + metadata.len() + cpu.len());
-        bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&version.to_le_bytes());
-        bytes.extend_from_slice(&metadata_len.to_le_bytes());
-        bytes.extend_from_slice(&checksum.finalize().to_le_bytes());
-        bytes.append(&mut metadata);
-        bytes.extend_from_slice(&cpu);
-        Ok(bytes)
+        encode_snapshot(version, metadata, &cpu)
     }
 
     /// Load a saved guest once the entire state and mounted media validate.
@@ -348,18 +341,7 @@ impl Machine {
             return Err(Invalid);
         }
         let version = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
-        if !matches!(
-            version,
-            VERSION_LEGACY
-                | VERSION_ADLIB_REPLAY
-                | VERSION_BOOT_MEDIA
-                | VERSION_MIDI
-                | VERSION_OPTICAL_CHANGE
-                | VERSION_UPPER_MEMORY
-                | VERSION_HIGH_PROGRAM
-                | VERSION_MEMORY_STRATEGY
-                | VERSION_INSTALLATION_DISK
-        ) {
+        if !(VERSION_LEGACY..=VERSION_ADLIB_CHIP).contains(&version) {
             return Err(GuestSnapshotError::Version(version));
         }
         let metadata_len = u32::from_le_bytes(bytes[10..14].try_into().unwrap()) as usize;
@@ -369,6 +351,18 @@ impl Machine {
         if crc32fast::hash(payload) != checksum {
             return Err(Invalid);
         }
+        let (version, chip, metadata) = if version == VERSION_ADLIB_CHIP {
+            let ((base, chip), remaining) =
+                postcard::take_from_bytes::<(u16, oplon::Opl2)>(metadata).map_err(|_| Invalid)?;
+            if !(VERSION_LEGACY..=VERSION_INSTALLATION_DISK).contains(&base)
+                || base == VERSION_ADLIB_REPLAY
+            {
+                return Err(Invalid);
+            }
+            (base, Some(chip), remaining)
+        } else {
+            (version, None, metadata)
+        };
         let (state, trailing): (State<'static>, _) =
             postcard::take_from_bytes(metadata).map_err(|_| Invalid)?;
         let mut saved_strategy = None;
@@ -467,7 +461,7 @@ impl Machine {
             None => Vec::new(),
         };
         let mut audio =
-            audio::Audio::from_snapshot(state.audio, state.elapsed, replay).ok_or(Invalid)?;
+            audio::Audio::from_snapshot(state.audio, state.elapsed, replay, chip).ok_or(Invalid)?;
         audio.set_levels(self.audio.levels);
         audio.mpu = Mpu401::from_snapshot(midi, &self.audio.mpu, audio.sample)?;
         let mut video = Adapter::from_snapshot(state.video).ok_or(Invalid)?;
@@ -600,6 +594,29 @@ fn disk_restore_status(
         }
         _ => Err(GuestSnapshotError::MediaChanged),
     }
+}
+
+fn encode_snapshot(
+    version: u16,
+    mut metadata: Vec<u8>,
+    cpu: &[u8],
+) -> Result<Vec<u8>, GuestSnapshotError> {
+    use GuestSnapshotError::{Invalid, Unavailable};
+    let metadata_len = u32::try_from(metadata.len()).map_err(|_| Invalid)?;
+    if HEADER_BYTES + metadata.len() + cpu.len() > MAX_GUEST_SNAPSHOT_BYTES {
+        return Err(Unavailable("the guest save state is too large"));
+    }
+    let mut checksum = crc32fast::Hasher::new();
+    checksum.update(&metadata);
+    checksum.update(cpu);
+    let mut bytes = Vec::with_capacity(HEADER_BYTES + metadata.len() + cpu.len());
+    bytes.extend_from_slice(MAGIC);
+    bytes.extend_from_slice(&version.to_le_bytes());
+    bytes.extend_from_slice(&metadata_len.to_le_bytes());
+    bytes.extend_from_slice(&checksum.finalize().to_le_bytes());
+    bytes.append(&mut metadata);
+    bytes.extend_from_slice(cpu);
+    Ok(bytes)
 }
 
 fn decode_extension<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, GuestSnapshotError> {
@@ -738,10 +755,11 @@ mod tests {
         let started = machine.elapsed();
         let start = started + Duration::from_millis(1);
         let write = |m: &mut Machine, address, value, at| {
+            m.audio.advance(at, &m.cpu);
             assert!(m.audio.write_port(0x388, address, at, &mut m.cpu));
             assert!(m.audio.write_port(0x389, value, at, &mut m.cpu));
         };
-        for (register, value) in [
+        let initial_writes = [
             (0x20, 1),
             (0x23, 1),
             (0x40, 0),
@@ -752,7 +770,8 @@ mod tests {
             (0x83, 0x77),
             (0xa0, 0x98),
             (0xb0, 0x31),
-        ] {
+        ];
+        for (register, value) in initial_writes {
             write(&mut machine, register, value, start);
         }
         let change = started + Duration::from_millis(20);
@@ -763,16 +782,68 @@ mod tests {
         machine.take_audio();
         machine.paused_since = Some(machine.clock + started + Duration::from_millis(40));
         let state = machine.save_guest().unwrap();
-        assert_eq!(&state[8..10], &VERSION_ADLIB_REPLAY.to_le_bytes());
+        assert_eq!(&state[8..10], &VERSION_ADLIB_CHIP.to_le_bytes());
+        let length = u32::from_le_bytes(state[10..14].try_into().unwrap()) as usize;
+        let (metadata, cpu) = state[HEADER_BYTES..].split_at(length);
+        let ((base, _), old_metadata) =
+            postcard::take_from_bytes::<(u16, oplon::Opl2)>(metadata).unwrap();
+        assert_eq!(base, VERSION_LEGACY);
+
+        // Version 2 stored (frames, register writes) after the base metadata.
+        let frames_per_ms = AUDIO_SAMPLE_RATE / 1000;
+        let mut writes: Vec<_> = initial_writes
+            .into_iter()
+            .map(|(register, value)| (0u32, register, value))
+            .collect();
+        writes.push((19 * frames_per_ms, 0xa0, 0xcc));
+        let legacy_metadata =
+            postcard::to_extend(&(34 * frames_per_ms, writes), old_metadata.to_vec()).unwrap();
+        let legacy = encode_snapshot(VERSION_ADLIB_REPLAY, legacy_metadata, cpu).unwrap();
 
         let mut restored = directory.machine();
         restored.load_guest(&state).unwrap();
+        let mut from_legacy = directory.machine();
+        from_legacy.load_guest(&legacy).unwrap();
+        let resaved = from_legacy.save_guest().unwrap();
+        assert_eq!(&resaved[8..10], &VERSION_ADLIB_CHIP.to_le_bytes());
         let end = started + Duration::from_millis(46);
         machine.audio.advance(end, &machine.cpu);
         restored.audio.advance(end, &restored.cpu);
+        from_legacy.audio.advance(end, &from_legacy.cpu);
         let expected = machine.take_audio();
         assert!(expected.iter().any(|sample| sample.abs() > 0.01));
         assert_eq!(restored.take_audio(), expected);
+        assert_eq!(from_legacy.take_audio(), expected);
+
+        let mut invalid_metadata =
+            postcard::to_allocvec(&(base, oplon::Opl2::new(44_100))).unwrap();
+        invalid_metadata.extend_from_slice(old_metadata);
+        let invalid = encode_snapshot(VERSION_ADLIB_CHIP, invalid_metadata, cpu).unwrap();
+        assert!(matches!(
+            restored.load_guest(&invalid),
+            Err(GuestSnapshotError::Invalid)
+        ));
+    }
+
+    #[test]
+    fn saves_and_resumes_adlib_after_more_than_a_million_writes() {
+        let directory = Directory::new("save-guest-adlib-long");
+        directory.write("LOOP.COM", &[0xeb, 0xfe]);
+        let mut machine = directory.machine();
+        machine.launch('C', "LOOP.COM", "").unwrap();
+        let at = machine.elapsed();
+        machine.audio.write_port(0x388, 0xa0, at, &mut machine.cpu);
+        for index in 0..1_000_001 {
+            machine
+                .audio
+                .write_port(0x389, index as u8, at, &mut machine.cpu);
+        }
+        machine.set_paused(true);
+        let state = machine.save_guest().unwrap();
+        assert_eq!(&state[8..10], &VERSION_ADLIB_CHIP.to_le_bytes());
+        let mut restored = directory.machine();
+        restored.load_guest(&state).unwrap();
+        assert!(restored.save_guest().is_ok());
     }
 
     #[test]

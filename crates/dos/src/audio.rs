@@ -74,14 +74,15 @@ impl Audio {
         }
     }
 
-    pub(super) fn adlib_replay(&self) -> Result<Option<&SynthReplay>, &'static str> {
-        self.adlib.replay()
+    pub(super) fn adlib_chip(&self) -> Option<&oplon::Opl2> {
+        self.adlib.chip()
     }
 
     pub(super) fn from_snapshot(
         state: AudioSnapshot,
         elapsed: Duration,
         replay: Option<SynthReplay>,
+        chip: Option<oplon::Opl2>,
     ) -> Option<Self> {
         if state.sample > sample_at(elapsed)
             || state.samples.len() > MAX_SAMPLES
@@ -94,9 +95,14 @@ impl Audio {
         {
             return None;
         }
+        let chip = match (chip, replay) {
+            (None, Some(replay)) => Some(replay.restore(state.sample)?),
+            (chip, None) => chip,
+            (Some(_), Some(_)) => return None,
+        };
         Some(Self {
             speaker: state.speaker,
-            adlib: Adlib::from_snapshot(state.adlib, replay, state.sample)?,
+            adlib: Adlib::from_snapshot(state.adlib, chip)?,
             dma: state.dma,
             sound_blaster: state.sound_blaster,
             mpu: Mpu401::default(),
