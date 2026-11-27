@@ -1446,6 +1446,43 @@ fn dir_formats_wide_bare_and_lowercase_listings() {
 }
 
 #[test]
+fn dir_accepts_dos_compression_switches_on_regular_mounts() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("compressed-host.zip");
+    let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, bytes) in [
+        ("Z.TXT", &b"z"[..]),
+        ("A.TXT", &[b'a'; 1024]),
+        (
+            "TEST.BAT",
+            &b"@ECHO OFF\r\nSET DIRCMD=/CH /O:CN\r\nDIR *.TXT /-C /B\r\n"[..],
+        ),
+    ] {
+        zip.start_file(name, options).unwrap();
+        zip.write_all(bytes).unwrap();
+    }
+    zip.finish().unwrap();
+    let drive = format!("C={}", path.display());
+    let run = |command| {
+        let output = Command::new(env!("CARGO_BIN_EXE_dosa"))
+            .args(["--headless", "--mount", &drive, "--exec", command])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{command}: {output:?}");
+        output.stdout
+    };
+    let normal = run("DIR *.TXT");
+    assert_eq!(run("DIR *.TXT /C"), normal);
+    assert_eq!(run("DIR *.TXT /CH"), normal);
+    let wide = run("DIR *.TXT /W");
+    assert_eq!(run("DIR *.TXT /W/CH"), wide);
+    assert_eq!(run("DIR *.TXT /B /O:-C-N"), b"Z.TXT\r\nA.TXT\r\n");
+    assert_eq!(run("TEST.BAT"), b"A.TXT\r\nZ.TXT\r\n");
+}
+
+#[test]
 fn dir_reports_allocatable_space_for_writable_host_mounts() {
     let fixture = Fixture::new();
     fs::write(fixture.0.join("DATA.TXT"), vec![0; 1024]).unwrap();

@@ -5,7 +5,8 @@ use dosa_mount::{DosTimestamp, Entry, Mount, attributes};
 
 use super::{Command, PAUSE_MESSAGE, PendingInput, Shell, split_word};
 
-pub(super) const HELP: &str = "DIR [drive:][path][pattern] [/W] [/B] [/L] [/S] [/P] [/O[:order]] [/A[:attributes]]\r\n\
+pub(super) const HELP: &str = "DIR [drive:][path][pattern] [/W] [/B] [/L] [/S] [/P]\r\n\
+        [/O[:order]] [/A[:attributes]] [/C[H]]\r\n\
     /W  List five names per row.\r\n\
     /B  List names only. With /S, list full paths.\r\n\
     /L  Show names in lowercase.\r\n\
@@ -15,6 +16,8 @@ pub(super) const HELP: &str = "DIR [drive:][path][pattern] [/W] [/B] [/L] [/S] [
         Prefix a sort letter with - to reverse it.\r\n\
     /A  Include hidden and system entries, or filter by H, S, D, A, or R.\r\n\
         Prefix an attribute with - to exclude it.\r\n\
+    /C, /CH, /O:C  DOS compression switches for DriveSpace and DoubleSpace.\r\n\
+        Dosa mounts present ordinary DOS files.\r\n\
     Set DIRCMD for defaults. Use /-switch to cancel a default.\r\n";
 
 #[derive(Default)]
@@ -65,6 +68,8 @@ impl Options {
             "L" => self.lowercase = enable,
             "S" => self.recursive = enable,
             "P" => self.paging = enable,
+            // Compression ratios are only meaningful on DriveSpace or DoubleSpace volumes.
+            "C" | "CH" => {}
             "?" if enable => self.help = true,
             "O" if !enable => self.order.clear(),
             "A" if !enable => self.attributes = AttributeFilter::default(),
@@ -166,6 +171,8 @@ impl SortKey {
                 Some('D') => SortField::Date,
                 Some('S') => SortField::Size,
                 Some('G') => SortField::Directory,
+                // All entries tie on compression. Keep any remaining sort keys.
+                Some('C') => continue,
                 _ => return Err(format!("invalid DIR sort order {order}").into()),
             };
             keys.push(Self { field, descending });
