@@ -256,6 +256,54 @@ fn cpu_profiles_reject_later_generations_before_execution() {
 }
 
 #[test]
+fn bit_tests_use_signed_memory_indices_and_report_the_previous_bit() {
+    let mut cpu = program(&[
+        0x0f, 0xa3, 0xc8, // BT AX,CX
+        0x0f, 0xba, 0xf0, 31, // BTR AX,31
+        0x0f, 0xab, 0x0e, 0, 2, // BTS WORD [0200h],CX
+        0x66, 0x0f, 0xbb, 0x1e, 0, 2, // BTC DWORD [0200h],EBX
+        0x0f, 0xba, 0x26, 0, 2, 33, // BT WORD [0200h],33
+    ]);
+    let other_flags = 2 | SF | ZF;
+    cpu.regs.flags = other_flags;
+    cpu.regs.ax = 0x8000;
+    cpu.regs.cx = 0xffff;
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.regs.ax, 0x8000);
+    assert_eq!(cpu.regs.flags, other_flags | CF);
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.regs.ax, 0);
+    assert_eq!(cpu.regs.flags, other_flags | CF);
+
+    cpu.regs.cx = 17;
+    cpu.write_u16(cpu.regs.ds, 0x200, 2);
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.read_u16(cpu.regs.ds, 0x200), 2);
+    assert_eq!(cpu.read_u16(cpu.regs.ds, 0x202), 2);
+    assert_eq!(cpu.regs.flags, other_flags);
+
+    cpu.set_reg(Register::EBX, u32::MAX).unwrap();
+    cpu.write_u16(cpu.regs.ds, 0x1fe, 0x8000);
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.read_u16(cpu.regs.ds, 0x1fe), 0);
+    assert_eq!(cpu.read_u16(cpu.regs.ds, 0x200), 2);
+    assert_eq!(cpu.regs.flags, other_flags | CF);
+
+    cpu.regs.flags = other_flags;
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.read_u16(cpu.regs.ds, 0x200), 2);
+    assert_eq!(cpu.regs.flags, other_flags | CF);
+
+    let mut early = program_for(CpuProfile::I286, &[0x0f, 0xab, 0xc8]);
+    let before = early.regs;
+    assert_eq!(
+        early.step().unwrap_err().kind,
+        CpuErrorKind::UnavailableOnProfile(CpuProfile::I286)
+    );
+    assert_eq!(early.regs, before);
+}
+
+#[test]
 fn double_shifts_use_the_source_and_preserve_state_for_a_zero_count() {
     let mut cpu = program(&[
         0x0f, 0xa4, 0xd8, 4, // SHLD AX,BX,4
