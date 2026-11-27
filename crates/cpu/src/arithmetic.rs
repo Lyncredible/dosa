@@ -61,6 +61,32 @@ impl Cpu {
         result & mask(width)
     }
 
+    pub(super) fn double_shift(&mut self, instruction: &Instruction) -> Option<()> {
+        let count = self.read_op(instruction, 2)? & 31;
+        if count == 0 {
+            return Some(());
+        }
+        let width = Self::width(instruction, 0)?;
+        let bits = u32::from(width) * 8;
+        let destination = self.read_op(instruction, 0)?;
+        let source = self.read_op(instruction, 1)?;
+        let (shifted, carry) = if instruction.mnemonic() == Mnemonic::Shld {
+            let combined = (u64::from(destination) << bits) | u64::from(source);
+            (combined << count >> bits, combined >> (2 * bits - count))
+        } else {
+            let combined = (u64::from(source) << bits) | u64::from(destination);
+            (combined >> count, combined >> (count - 1))
+        };
+        let result = shifted as u32 & mask(width);
+        self.write_op(instruction, 0, result)?;
+        self.set_flag(CF, carry & 1 != 0);
+        self.set_szp(result, width);
+        if count == 1 {
+            self.set_flag(OF, (destination ^ result) & sign_bit(width) != 0);
+        }
+        Some(())
+    }
+
     pub(super) fn shift(&mut self, op: Mnemonic, mut value: u32, count: u32, width: u8) -> u32 {
         use Mnemonic::*;
         let bits = u32::from(width * 8);

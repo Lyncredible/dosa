@@ -256,6 +256,61 @@ fn cpu_profiles_reject_later_generations_before_execution() {
 }
 
 #[test]
+fn double_shifts_use_the_source_and_preserve_state_for_a_zero_count() {
+    let mut cpu = program(&[
+        0x0f, 0xa4, 0xd8, 4, // SHLD AX,BX,4
+        0x0f, 0xad, 0xd8, // SHRD AX,BX,CL
+        0x66, 0x0f, 0xac, 0x1e, 0, 2, 1, // SHRD DWORD [0200h],EBX,1
+        0x66, 0x0f, 0xa4, 0xd8, 33, // SHLD EAX,EBX,33
+        0x66, 0x0f, 0xad, 0xd8, // SHRD EAX,EBX,CL
+    ]);
+    cpu.regs.ax = 0x8123;
+    cpu.regs.bx = 0xf456;
+    cpu.regs.flags = 2 | CF | SF | ZF;
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.regs.ax, 0x123f);
+    assert_eq!(cpu.regs.bx, 0xf456);
+    assert_eq!(cpu.regs.flags, 2 | PF);
+
+    cpu.regs.ax = 0x8123;
+    cpu.regs.bx = 0x4567;
+    cpu.regs.cx = 4;
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.regs.ax, 0x7812);
+    assert_eq!(cpu.regs.bx, 0x4567);
+    assert_eq!(cpu.regs.flags, 2 | PF);
+
+    cpu.set_reg(Register::EBX, 1).unwrap();
+    cpu.load(cpu.regs.ds, 0x200, &[1, 0, 0, 0]);
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.read_u16(cpu.regs.ds, 0x200), 0);
+    assert_eq!(cpu.read_u16(cpu.regs.ds, 0x202), 0x8000);
+    assert_eq!(cpu.get_reg(Register::EBX), Some(1));
+    assert_eq!(cpu.regs.flags, 2 | OF | SF | PF | CF);
+
+    cpu.set_reg(Register::EAX, 0x80000000).unwrap();
+    cpu.set_reg(Register::EBX, 0).unwrap();
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.get_reg(Register::EAX), Some(0));
+    assert_eq!(cpu.regs.flags, 2 | OF | ZF | PF | CF);
+
+    cpu.set_reg(Register::EAX, 0x12345678).unwrap();
+    cpu.regs.cx = 32;
+    let previous_flags = cpu.regs.flags;
+    advance(&mut cpu, 1);
+    assert_eq!(cpu.get_reg(Register::EAX), Some(0x12345678));
+    assert_eq!(cpu.regs.flags, previous_flags);
+
+    let mut early = program_for(CpuProfile::I286, &[0x0f, 0xad, 0xd8]);
+    let before = early.regs;
+    assert_eq!(
+        early.step().unwrap_err().kind,
+        CpuErrorKind::UnavailableOnProfile(CpuProfile::I286)
+    );
+    assert_eq!(early.regs, before);
+}
+
+#[test]
 fn setcc_writes_a_single_byte_without_modifying_flags() {
     for (flags, outcomes) in [
         (2, 0xaaaa),
