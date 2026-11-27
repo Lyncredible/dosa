@@ -261,6 +261,32 @@ impl UpperProgram {
     }
 }
 
+#[derive(Clone, Copy, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+struct MemoryStrategy {
+    code: u8,
+    linked: bool,
+}
+
+impl MemoryStrategy {
+    fn for_program(program: Option<UpperProgram>) -> Self {
+        match program {
+            Some(program) => Self {
+                code: if program.allow_conventional_allocations {
+                    0x80
+                } else {
+                    0x40
+                },
+                linked: true,
+            },
+            None => Self::default(),
+        }
+    }
+
+    fn valid_code(code: u8) -> bool {
+        matches!(code, 0..=2 | 0x40..=0x42 | 0x80..=0x82)
+    }
+}
+
 pub struct Machine {
     cpu: Cpu,
     cpu_profile: CpuProfile,
@@ -291,6 +317,8 @@ pub struct Machine {
     paused_since: Option<Instant>,
     dta: (u16, u16),
     upper_program: Option<UpperProgram>,
+    memory_strategy: MemoryStrategy,
+    session_memory_strategy: MemoryStrategy,
     blocks: BTreeMap<u16, u16>,
     line: Vec<u8>,
 }
@@ -339,6 +367,8 @@ impl Machine {
             paused_since: None,
             dta: (PSP, 0x80),
             upper_program: None,
+            memory_strategy: MemoryStrategy::default(),
+            session_memory_strategy: MemoryStrategy::default(),
             blocks: BTreeMap::new(),
             line: Vec::new(),
         }
@@ -710,7 +740,13 @@ impl Machine {
             None => (load(None)?, None),
         };
         cpu.load(cpu.regs.ds, 0x18, &files.psp_handles());
-        self.start(cpu, files, upper_program);
+        let mut strategy = if upper_program.is_some() {
+            MemoryStrategy::for_program(upper_program)
+        } else {
+            self.session_memory_strategy
+        };
+        strategy.linked &= cpu.has_a20();
+        self.start(cpu, files, upper_program, strategy);
         Ok(())
     }
 
@@ -726,13 +762,24 @@ impl Machine {
         cpu.regs.dx = u16::from(drive.number());
         cpu.regs.flags |= 0x0200;
         cpu.load(0, 0x7c00, &sector);
-        self.start(cpu, DosFiles::new('C', String::new()), None);
+        self.start(
+            cpu,
+            DosFiles::new('C', String::new()),
+            None,
+            MemoryStrategy::default(),
+        );
         disk.install_data(&mut self.cpu);
         self.boot_disk = Some(disk);
         Ok(())
     }
 
-    fn start(&mut self, mut cpu: Cpu, files: DosFiles, upper_program: Option<UpperProgram>) {
+    fn start(
+        &mut self,
+        mut cpu: Cpu,
+        files: DosFiles,
+        upper_program: Option<UpperProgram>,
+        memory_strategy: MemoryStrategy,
+    ) {
         let mut video = Adapter::new();
         video::initialize(&mut cpu, &mut video);
         let elapsed = self.clock.elapsed();
@@ -753,9 +800,7 @@ impl Machine {
         self.fast_a20 = false;
         self.xms = xms::Xms::default();
         self.upper_program = upper_program;
-        if let Some(upper) = upper_program {
-            self.xms.reserve_upper_for_dos(upper.end);
-        }
+        self.memory_strategy = memory_strategy;
         self.gameport.reset_timers();
         self.mouse = Mouse::default();
         self.pic = Pic::default();
@@ -768,6 +813,7 @@ impl Machine {
         let end = upper_program.map_or(CONVENTIONAL_END, |upper| upper.end);
         self.dta = (psp, 0x80);
         self.blocks = BTreeMap::from([(psp, end - psp)]);
+        self.refresh_dos_umb_reservation();
         self.line.clear();
         self.state = RunState::Running;
     }
