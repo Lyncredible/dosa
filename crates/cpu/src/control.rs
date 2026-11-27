@@ -66,6 +66,13 @@ pub(super) struct InterruptGate {
     pub(super) disable_irq: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(super) struct TaskRegister {
+    selector: u16,
+    span: Table,
+    wide: bool,
+}
+
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(super) struct Control {
     pub(super) cr0: u32,
@@ -75,6 +82,8 @@ pub(super) struct Control {
     idtr: Table,
     ldtr: u16,
     ldt: Option<Table>,
+    #[serde(skip)]
+    pub(super) task_register: Option<TaskRegister>,
     pub(super) segments: [Option<Segment>; 6],
 }
 
@@ -96,6 +105,15 @@ impl Control {
         };
         valid_cr0
             && valid_ldt
+            && self.task_register.is_none_or(|task| {
+                task.selector & 4 == 0
+                    && task.selector & !7 != 0
+                    && match profile {
+                        CpuProfile::I8086 => false,
+                        CpuProfile::I286 => !task.wide && task.span.limit <= u32::from(u16::MAX),
+                        CpuProfile::I386 => true,
+                    }
+            })
             && self.gdtr.limit <= u32::from(u16::MAX)
             && self.idtr.limit <= u32::from(u16::MAX)
             && self.cr3 & 0xfff == 0
@@ -114,6 +132,7 @@ impl Control {
             },
             ldtr: 0,
             ldt: None,
+            task_register: None,
             segments: [None; 6],
         }
     }
@@ -283,6 +302,48 @@ impl Cpu {
         };
         self.control.ldtr = selector;
         self.control.ldt = table;
+        Some(())
+    }
+
+    pub(super) fn task_register_instruction(&mut self, ins: &Instruction) -> Option<()> {
+        if !self.protected_mode() {
+            return None;
+        }
+        if ins.mnemonic() == Mnemonic::Str {
+            return self.write_op(
+                ins,
+                0,
+                self.control
+                    .task_register
+                    .map_or(0, |task| u32::from(task.selector)),
+            );
+        }
+        if self.regs.cs & 3 != 0 {
+            return self.segment_fault(13, 0);
+        }
+        let selector = self.read_op(ins, 0)? as u16;
+        let index = u32::from(selector & !7);
+        let selector_code = selector & !3;
+        let address = self.control.gdtr.at(index, 8);
+        let Some(address) = address.filter(|_| index != 0 && selector & 4 == 0) else {
+            return self.segment_fault(13, selector_code);
+        };
+        let low = self.read_linear(address, 4)?;
+        let high = self.read_linear(address + 4, 4)?;
+        let access = (high >> 8) as u8;
+        let kind = access & 0x1f;
+        if !(kind == 1 || kind == 9 && self.profile == CpuProfile::I386) {
+            return self.segment_fault(13, selector_code);
+        }
+        if access & 0x80 == 0 {
+            return self.segment_fault(11, selector_code);
+        }
+        self.write_linear(address + 5, 1, u32::from(access | 2))?;
+        self.control.task_register = Some(TaskRegister {
+            selector,
+            span: self.descriptor_span(low, high),
+            wide: kind == 9,
+        });
         Some(())
     }
 

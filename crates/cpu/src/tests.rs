@@ -854,6 +854,80 @@ fn protected_mode_segment_faults_push_error_codes_and_resume_guest_execution() {
 }
 
 #[test]
+fn task_register_load_marks_the_descriptor_busy_and_survives_a_snapshot() {
+    for (profile, limit, access) in [
+        (CpuProfile::I286, 0x2b, 0x81),
+        (CpuProfile::I386, 0x67, 0x89),
+    ] {
+        let mut cpu = program_for(
+            profile,
+            &[
+                0xfa, 0x0f, 1, 0x16, 0, 2, // CLI; LGDT [0200h].
+                0xb8, 9, 0, 0x0f, 1, 0xf0, 0xea, 0, 0, 8, 0, // Set PE and TS, then far jump.
+            ],
+        );
+        cpu.load(cpu.regs.ds, 0x200, &[0x1f, 0, 0, 0x40, 1, 0]);
+        cpu.load(
+            0x1400,
+            8,
+            &[
+                0xff, 0, 0, 0x80, 1, 0x9a, 0, 0, // Code at 18000h.
+                0xff, 0, 0, 0xa0, 1, 0x92, 0, 0, // Stack at 1A000h.
+                limit, 0, 0, 0xc0, 1, access, 0, 0, // Available TSS at 1C000h.
+            ],
+        );
+        cpu.load(0, 13 * 8, &[0x60, 0, 8, 0, 0, 0x86, 0, 0]);
+        cpu.load(
+            0x1800,
+            0,
+            &[
+                0xba, 0x10, 0, 0x8e, 0xd2, 0xbc, 0xf0, 0, // Initialize SS:SP.
+                0xb8, 0x18, 0, 0x0f, 0, 0xd8, // LTR AX.
+                0x0f, 0x06, // CLTS.
+                0x0f, 0, 0xcb, // STR BX.
+                0x0f, 0, 0xdb, // LTR BX faults because the TSS is busy.
+                0xf4,
+            ],
+        );
+        cpu.load(
+            0x1800,
+            0x60,
+            &[0x5d, 0x58, 0x83, 0xc0, 3, 0x50, 0xcf], // Capture error, skip LTR, IRET.
+        );
+        advance(&mut cpu, 9);
+        let legacy = cpu.save_snapshot().unwrap();
+        assert_eq!(&legacy[8..10], &[1, 0]);
+        let flags = cpu.regs.flags;
+        advance(&mut cpu, 1);
+        assert_eq!(cpu.regs.flags, flags);
+        assert_eq!(cpu.read_u8(0x1400, 0x1d), access | 2);
+        let state = cpu.save_snapshot().unwrap();
+        assert_eq!(&state[8..10], &[2, 0]);
+
+        let mut restored = Cpu::with_profile(profile);
+        restored.restore_snapshot(&legacy).unwrap();
+        assert!(restored.control.task_register.is_none());
+        restored.restore_snapshot(&state).unwrap();
+        assert!(restored.control.task_register.is_some());
+        assert_eq!(restored.control.task_register, cpu.control.task_register);
+        assert_ne!(restored.control.cr0 & 8, 0);
+        advance(&mut restored, 1); // CLTS.
+        assert_eq!(restored.control.cr0 & 8, 0);
+        assert_eq!(restored.regs.flags, flags);
+        for _ in 0..16 {
+            if restored.step().unwrap() == Step::Halt {
+                break;
+            }
+        }
+        assert!(restored.is_halted());
+        assert_eq!(restored.regs.bx, 0x18);
+        assert_eq!(restored.regs.bp, 0x18);
+        assert_eq!(restored.regs.sp, 0xf0);
+        assert_eq!(restored.read_u8(0x1400, 0x1d), access | 2);
+    }
+}
+
+#[test]
 fn protected_mode_local_descriptors_are_selectable_and_queryable_on_286_and_386() {
     for profile in [CpuProfile::I286, CpuProfile::I386] {
         let mut cpu = program_for(

@@ -16,6 +16,13 @@ impl Cpu {
             }
             Sgdt | Sidt | Lgdt | Lidt => self.table_instruction(ins)?,
             Lldt | Sldt => self.ldt_instruction(ins)?,
+            Ltr | Str => self.task_register_instruction(ins)?,
+            Clts => {
+                if self.protected_mode() && self.regs.cs & 3 != 0 {
+                    return self.segment_fault(13, 0);
+                }
+                self.control.cr0 &= !(1 << 3);
+            }
             Lar | Lsl | Verr | Verw => self.verify_selector(ins)?,
             Smsw | Lmsw => self.machine_status_instruction(ins)?,
             Lea => {
