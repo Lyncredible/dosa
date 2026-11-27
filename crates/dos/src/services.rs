@@ -58,13 +58,7 @@ impl Machine {
                 3 => {}
                 _ => return Err(DosError::Interrupt { vector, ax }),
             },
-            0x1a if ah == 0 => {
-                let (ticks, midnight) = crate::bios::take_timer(&mut self.cpu);
-                self.cpu.regs.cx = (ticks >> 16) as u16;
-                self.cpu.regs.dx = ticks as u16;
-                self.set_al(midnight);
-                self.success();
-            }
+            0x1a if ah <= 5 => self.clock_interrupt(ah),
             0x1c => {}
             0x18 if self.boot_disk.is_some() => self.exit(1),
             0x20..=0xff if self.boot_disk.is_some() => {
@@ -90,6 +84,53 @@ impl Machine {
             _ => return Err(DosError::Interrupt { vector, ax }),
         }
         Ok(())
+    }
+
+    fn clock_interrupt(&mut self, function: u8) {
+        use crate::bios::{bcd_pair, decode_bcd_pair, rtc_dst, set_rtc_dst, set_timer, take_timer};
+        if function >= 2 && !self.cpu.has_a20() {
+            self.failure(0x8600);
+            return;
+        }
+        let cx = self.cpu.regs.cx;
+        let dx = self.cpu.regs.dx;
+        match function {
+            0 => {
+                let (ticks, midnight) = take_timer(&mut self.cpu);
+                self.cpu.regs.cx = (ticks >> 16) as u16;
+                self.cpu.regs.dx = ticks as u16;
+                self.set_al(midnight);
+            }
+            1 => {
+                let ticks = u32::from(cx) << 16 | u32::from(dx);
+                set_timer(&mut self.cpu, ticks);
+            }
+            2 => {
+                let (hours, minutes, seconds, _) = self.session_clock.now().time();
+                self.cpu.regs.cx = bcd_pair(hours, minutes);
+                self.cpu.regs.dx = bcd_pair(seconds, rtc_dst(&self.cpu));
+            }
+            3 if let Some(((hours, minutes), (seconds, dst))) =
+                decode_bcd_pair(cx).zip(decode_bcd_pair(dx))
+                && dst <= 1
+                && self.set_time(hours, minutes, seconds, 0) =>
+            {
+                set_rtc_dst(&mut self.cpu, dst);
+            }
+            4 => {
+                let (year, month, day, _) = self.session_clock.now().date();
+                self.cpu.regs.cx = bcd_pair((year / 100) as u8, (year % 100) as u8);
+                self.cpu.regs.dx = bcd_pair(month, day);
+            }
+            5 if let Some(((century, year), (month, day))) =
+                decode_bcd_pair(cx).zip(decode_bcd_pair(dx))
+                && self.set_date(u16::from(century) * 100 + u16::from(year), month, day) => {}
+            _ => {
+                self.failure(0x8600);
+                return;
+            }
+        }
+        self.success();
     }
 
     fn a20_interrupt(&mut self, function: u8) {
