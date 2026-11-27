@@ -1247,3 +1247,139 @@ fn high_program_restore_preserves_dos_and_xms_memory_boundaries() {
     assert_eq!(read(0x208), 0xd000);
     assert_eq!(read(0x20a), 0xd044);
 }
+
+fn call_dos_memory(code: &mut Vec<u8>, ax: u16, bx: u16, result: Option<u16>) {
+    let [al, ah] = ax.to_le_bytes();
+    let [bl, bh] = bx.to_le_bytes();
+    code.extend([0xb8, al, ah, 0xbb, bl, bh, 0xcd, 0x21]);
+    if let Some(result) = result {
+        let [low, high] = result.to_le_bytes();
+        code.extend([0xa3, low, high]);
+    }
+}
+
+fn free_dos_memory(code: &mut Vec<u8>, segment: u16) {
+    let [low, high] = segment.to_le_bytes();
+    code.extend([0xb8, low, high, 0x8e, 0xc0]);
+    call_dos_memory(code, 0x4900, 0, None);
+}
+
+#[test]
+fn dos_allocation_strategies_choose_first_smallest_or_highest_gap() {
+    let directory = Directory::new("allocation-strategy");
+    let mut code = Vec::new();
+    call_dos_memory(&mut code, 0x4a00, 0x100, None);
+    for paragraphs in [0x20, 0x20, 0x10, 0x20] {
+        call_dos_memory(&mut code, 0x4800, paragraphs, None);
+    }
+    free_dos_memory(&mut code, 0x1101);
+    free_dos_memory(&mut code, 0x1143);
+    call_dos_memory(&mut code, 0x5801, 1, None);
+    call_dos_memory(&mut code, 0x4800, 8, Some(0x400));
+    call_dos_memory(&mut code, 0x5801, 0, None);
+    call_dos_memory(&mut code, 0x4800, 8, Some(0x402));
+    call_dos_memory(&mut code, 0x5801, 2, None);
+    call_dos_memory(&mut code, 0x4800, 8, Some(0x404));
+    call_dos_memory(&mut code, 0x5801, 0x1080, Some(0x406));
+    call_dos_memory(&mut code, 0x5800, 0, Some(0x408));
+    call_dos_memory(&mut code, 0x4c00, 0, None);
+    directory.write("FIT.COM", &code);
+
+    let mut machine = directory.machine();
+    machine.launch('C', "FIT.COM", "").unwrap();
+    assert_eq!(machine.run(256).unwrap(), RunState::Exited(0));
+    let read = |offset| machine.cpu.read_u16(crate::PSP, offset);
+    assert_eq!(
+        [read(0x400), read(0x402), read(0x404)],
+        [0x1143, 0x1101, 0x9ff8]
+    );
+    assert_eq!([read(0x406), read(0x408)], [1, 2]);
+
+    let mut code = Vec::new();
+    call_dos_memory(&mut code, 0x5800, 0, Some(0x400));
+    call_dos_memory(&mut code, 0x4c00, 0, None);
+    directory.write("READ.COM", &code);
+    let io = machine
+        .prepare_shell_io('C', &Default::default(), None, None, None)
+        .unwrap();
+    machine
+        .launch_high_with_shell_io(
+            'C',
+            "READ.COM",
+            "",
+            io,
+            crate::UpperMemoryRequest::default(),
+        )
+        .unwrap();
+    assert_eq!(machine.run(256).unwrap(), RunState::Exited(0));
+    assert_eq!(machine.cpu.read_u16(0xd000, 0x400), 0x40);
+    machine.launch('C', "READ.COM", "").unwrap();
+    assert_eq!(machine.run(256).unwrap(), RunState::Exited(0));
+    assert_eq!(machine.cpu.read_u16(crate::PSP, 0x400), 2);
+}
+
+#[test]
+fn dos_upper_memory_link_and_strategy_survive_restore_and_protect_live_blocks() {
+    fn query_xms_upper(code: &mut Vec<u8>, paragraphs: u16, result: u16) {
+        let [dl, dh] = paragraphs.to_le_bytes();
+        let [low, high] = result.to_le_bytes();
+        code.extend([0xba, dl, dh, 0xb4, 0x10, 0xff, 0x1e, 0, 4]); // XMS request UMB.
+        code.extend([0x89, 0x1e, low, high]); // Base segment or reason in BL.
+    }
+
+    let directory = Directory::new("umb-link");
+    let mut code = vec![
+        0xb8, 0x10, 0x43, 0xcd, 0x2f, 0x89, 0x1e, 0, 4, 0x8c, 0x06, 2, 4,
+    ]; // Get the XMS entry point.
+    code.extend([0x0e, 0x07]); // Restore ES to the PSP before resizing.
+    call_dos_memory(&mut code, 0x4a00, 0x100, None);
+    call_dos_memory(&mut code, 0x5801, 0x40, None);
+    call_dos_memory(&mut code, 0x4800, 0x10, Some(0x410));
+    call_dos_memory(&mut code, 0x5803, 1, None);
+    call_dos_memory(&mut code, 0x4800, 0x10, Some(0x412));
+    code.extend([0x31, 0xc0, 0xcd, 0x16]); // Wait for input before restoring the guest.
+    call_dos_memory(&mut code, 0x5802, 0, Some(0x414));
+    call_dos_memory(&mut code, 0x5800, 0, Some(0x416));
+    call_dos_memory(&mut code, 0x4800, 2, Some(0x418));
+    call_dos_memory(&mut code, 0x5803, 0, None);
+    call_dos_memory(&mut code, 0x5801, 0, None);
+    code.extend([0x31, 0xc0, 0xcd, 0x16]); // Save again with live, detached upper blocks.
+    query_xms_upper(&mut code, 1, 0x41a);
+    call_dos_memory(&mut code, 0x5801, 0x80, None);
+    call_dos_memory(&mut code, 0x4800, 1, Some(0x41c));
+    free_dos_memory(&mut code, 0xd000);
+    free_dos_memory(&mut code, 0xd011);
+    query_xms_upper(&mut code, 1, 0x41e);
+    call_dos_memory(&mut code, 0x5803, 1, Some(0x420));
+    call_dos_memory(&mut code, 0x5802, 0, Some(0x422));
+    call_dos_memory(&mut code, 0x4c00, 0, None);
+    directory.write("LINK.COM", &code);
+
+    let mut machine = directory.machine();
+    machine.launch('C', "LINK.COM", "").unwrap();
+    assert_eq!(machine.run(256).unwrap(), RunState::WaitingForKey);
+    let bytes = machine.save_guest().unwrap();
+    assert_eq!(u16::from_le_bytes([bytes[8], bytes[9]]), 8);
+
+    let mut restored = directory.machine();
+    restored.load_guest(&bytes).unwrap();
+    restored.key(b'\r', 0x1c);
+    assert_eq!(restored.run(256).unwrap(), RunState::WaitingForKey);
+    let bytes = restored.save_guest().unwrap();
+    assert_eq!(u16::from_le_bytes([bytes[8], bytes[9]]), 8);
+    let mut restored = directory.machine();
+    restored.load_guest(&bytes).unwrap();
+    restored.key(b'\r', 0x1c);
+    assert_eq!(restored.run(256).unwrap(), RunState::Exited(0));
+    let read = |offset| restored.cpu.read_u16(crate::PSP, offset);
+    assert_eq!(read(0x410), 8);
+    assert_eq!(read(0x412), 0xd000);
+    assert_eq!(read(0x414) as u8, 1);
+    assert_eq!(read(0x416), 0x40);
+    assert_eq!(read(0x418), 0xd011);
+    assert_eq!(read(0x41a) as u8, 0xb1);
+    assert_eq!(read(0x41c), 0x1101);
+    assert_eq!(read(0x41e), 0xd000);
+    assert_eq!(read(0x420), 1);
+    assert_eq!(read(0x422) as u8, 0);
+}

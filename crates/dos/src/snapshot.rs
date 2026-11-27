@@ -20,6 +20,7 @@ const VERSION_MIDI: u16 = 4;
 const VERSION_OPTICAL_CHANGE: u16 = 5;
 const VERSION_UPPER_MEMORY: u16 = 6;
 const VERSION_HIGH_PROGRAM: u16 = 7;
+const VERSION_MEMORY_STRATEGY: u16 = 8;
 const HEADER_BYTES: usize = 18;
 /// Maximum size in bytes of a serialized guest save state.
 pub const MAX_GUEST_SNAPSHOT_BYTES: usize = 300 * 1024 * 1024;
@@ -200,6 +201,27 @@ impl Machine {
             .transpose()?;
         let upper = self.xms.upper_blocks();
         let version = match (boot, replay, midi, self.iso_media_changed) {
+            (boot, replay, midi, changed)
+                if self.memory_strategy != MemoryStrategy::for_program(self.upper_program)
+                    || self.session_memory_strategy != MemoryStrategy::default()
+                    || self.upper_program.is_none()
+                        && self.blocks.range(xms::UPPER_START..).next().is_some() =>
+            {
+                metadata = postcard::to_extend(
+                    &(
+                        boot,
+                        replay,
+                        midi,
+                        changed,
+                        upper,
+                        self.upper_program,
+                        (self.memory_strategy, self.session_memory_strategy),
+                    ),
+                    metadata,
+                )
+                .map_err(|_| Invalid)?;
+                VERSION_MEMORY_STRATEGY
+            }
             (boot, replay, midi, changed) if let Some(program) = self.upper_program => {
                 metadata =
                     postcard::to_extend(&(boot, replay, midi, changed, upper, program), metadata)
@@ -317,6 +339,7 @@ impl Machine {
                 | VERSION_OPTICAL_CHANGE
                 | VERSION_UPPER_MEMORY
                 | VERSION_HIGH_PROGRAM
+                | VERSION_MEMORY_STRATEGY
         ) {
             return Err(GuestSnapshotError::Version(version));
         }
@@ -329,6 +352,7 @@ impl Machine {
         }
         let (state, trailing): (State<'static>, _) =
             postcard::take_from_bytes(metadata).map_err(|_| Invalid)?;
+        let mut saved_strategy = None;
         let (boot, replay, midi, iso_media_changed, upper, upper_program) = match version {
             VERSION_LEGACY if trailing.is_empty() => (None, None, None, 0, None, None),
             VERSION_ADLIB_REPLAY => (
@@ -363,6 +387,12 @@ impl Machine {
             VERSION_HIGH_PROGRAM => {
                 let (boot, replay, midi, changed, upper, program) = decode_extension(trailing)?;
                 (boot, replay, midi, changed, Some(upper), Some(program))
+            }
+            VERSION_MEMORY_STRATEGY => {
+                let (boot, replay, midi, changed, upper, program, strategy) =
+                    decode_extension(trailing)?;
+                saved_strategy = Some(strategy);
+                (boot, replay, midi, changed, Some(upper), program)
             }
             _ => return Err(Invalid),
         };
@@ -426,14 +456,26 @@ impl Machine {
         }
         cpu.restore_snapshot(cpu_bytes)?;
         let mut xms = xms::Xms::from_snapshot(state.xms, cpu.memory.len()).ok_or(Invalid)?;
-        if let Some(program) = upper_program {
-            if !valid_high_program(&state.blocks, program) {
-                return Err(Invalid);
-            }
-            xms.reserve_upper_for_dos(program.end);
+        let (memory_strategy, session_memory_strategy) = saved_strategy.unwrap_or_else(|| {
+            (
+                MemoryStrategy::for_program(upper_program),
+                MemoryStrategy::default(),
+            )
+        });
+        let upper_end = Self::reserved_upper_end(upper_program, memory_strategy, &state.blocks);
+        if !MemoryStrategy::valid_code(memory_strategy.code)
+            || !MemoryStrategy::valid_code(session_memory_strategy.code)
+            || !valid_dos_blocks(&state.blocks, upper_program, upper_end)
+            || (upper_end != xms::UPPER_START && (!cpu.has_a20() || boot_status.is_some()))
+            || (version < VERSION_MEMORY_STRATEGY
+                && upper_program.is_none()
+                && upper_end != xms::UPPER_START)
+        {
+            return Err(Invalid);
         }
+        xms.reserve_upper_for_dos(upper_end);
         if let Some(upper) = upper {
-            if !cpu.has_a20() || boot_status.is_some() {
+            if (!cpu.has_a20() || boot_status.is_some()) && !BTreeMap::is_empty(&upper) {
                 return Err(Invalid);
             }
             xms.restore_upper(upper).ok_or(Invalid)?;
@@ -475,6 +517,8 @@ impl Machine {
             paused_since: state.paused.then_some(now),
             dta: state.dta,
             upper_program,
+            memory_strategy,
+            session_memory_strategy,
             blocks: state.blocks,
             line: state.line,
         };
@@ -482,9 +526,19 @@ impl Machine {
     }
 }
 
-fn valid_high_program(blocks: &BTreeMap<u16, u16>, program: UpperProgram) -> bool {
-    if !(UpperProgram::MIN_END..=xms::UPPER_END).contains(&program.end)
-        || !blocks.contains_key(&xms::UPPER_START)
+fn valid_dos_blocks(
+    blocks: &BTreeMap<u16, u16>,
+    program: Option<UpperProgram>,
+    upper_end: u16,
+) -> bool {
+    let psp = if program.is_some() {
+        xms::UPPER_START
+    } else {
+        PSP
+    };
+    if !(xms::UPPER_START..=xms::UPPER_END).contains(&upper_end)
+        || program.is_some() && upper_end < UpperProgram::MIN_END
+        || !blocks.contains_key(&psp)
     {
         return false;
     }
@@ -496,8 +550,10 @@ fn valid_high_program(blocks: &BTreeMap<u16, u16>, program: UpperProgram) -> boo
         if size == 0 || segment < previous_end {
             return false;
         }
-        if !(segment >= xms::UPPER_START && end <= program.end
-            || program.allow_conventional_allocations && segment >= PSP && end <= CONVENTIONAL_END)
+        if !(segment >= xms::UPPER_START && end <= upper_end
+            || program.is_none_or(|upper| upper.allow_conventional_allocations)
+                && segment >= PSP
+                && end <= CONVENTIONAL_END)
         {
             return false;
         }

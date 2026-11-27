@@ -605,7 +605,12 @@ impl Machine {
                 }
             }
             0x48 => self.allocate(bx),
-            0x49 if es != self.psp() && self.blocks.remove(&es).is_some() => self.success(),
+            0x49 if es != self.psp() && self.blocks.remove(&es).is_some() => {
+                if es >= xms::UPPER_START {
+                    self.refresh_dos_umb_reservation();
+                }
+                self.success();
+            }
             0x49 => self.failure(9),
             0x4a => self.resize(es, bx),
             0x4c => self.exit(al),
@@ -636,6 +641,7 @@ impl Machine {
                 }
                 Err(code) => self.failure(code),
             },
+            0x58 => self.memory_control(al, bx),
             0x5a | 0x5b => self.failure(5),
             0x66 if al == 1 => {
                 self.cpu.regs.bx = self.code_page().number();
@@ -771,6 +777,66 @@ impl Machine {
         }
     }
 
+    fn memory_control(&mut self, subfunction: u8, value: u16) {
+        match subfunction {
+            0 => self.cpu.regs.ax = self.memory_strategy.code.into(),
+            1 => {
+                let Ok(code) = u8::try_from(value) else {
+                    self.failure(1);
+                    return;
+                };
+                if !crate::MemoryStrategy::valid_code(code) {
+                    self.failure(1);
+                    return;
+                }
+                self.memory_strategy.code = code;
+                if self.upper_program.is_none() && self.boot_disk.is_none() {
+                    self.session_memory_strategy.code = code;
+                }
+            }
+            2 => self.set_al(u8::from(self.memory_strategy.linked)),
+            3 if value <= 1 => {
+                let linked = value == 1;
+                if linked
+                    && (!self.xms_available()
+                        || self.upper_program.is_none() && !self.xms.upper_blocks().is_empty())
+                {
+                    self.failure(1);
+                    return;
+                }
+                self.memory_strategy.linked = linked;
+                if self.upper_program.is_none() && self.boot_disk.is_none() {
+                    self.session_memory_strategy.linked = linked;
+                }
+                self.refresh_dos_umb_reservation();
+            }
+            _ => {
+                self.failure(1);
+                return;
+            }
+        }
+        self.success();
+    }
+
+    pub(super) fn refresh_dos_umb_reservation(&mut self) {
+        let end = Self::reserved_upper_end(self.upper_program, self.memory_strategy, &self.blocks);
+        self.xms.reserve_upper_for_dos(end);
+    }
+
+    pub(super) fn reserved_upper_end(
+        program: Option<crate::UpperProgram>,
+        strategy: crate::MemoryStrategy,
+        blocks: &std::collections::BTreeMap<u16, u16>,
+    ) -> u16 {
+        if let Some(program) = program {
+            program.end
+        } else if strategy.linked || blocks.range(xms::UPPER_START..).next().is_some() {
+            xms::UPPER_END
+        } else {
+            xms::UPPER_START
+        }
+    }
+
     fn resize(&mut self, segment: u16, paragraphs: u16) {
         if !self.blocks.contains_key(&segment) || paragraphs == 0 {
             self.failure(9);
@@ -778,7 +844,7 @@ impl Machine {
         }
         use std::ops::Bound::Excluded;
         let end = if segment >= xms::UPPER_START {
-            self.upper_program.map_or(xms::UPPER_END, |upper| upper.end)
+            Self::reserved_upper_end(self.upper_program, self.memory_strategy, &self.blocks)
         } else {
             CONVENTIONAL_END
         };
@@ -805,12 +871,20 @@ impl Machine {
 
     fn allocate(&mut self, paragraphs: u16) {
         let mut maximum = 0;
-        let upper = self.upper_program.map(|upper| xms::UPPER_START..upper.end);
-        let low = self
-            .upper_program
-            .is_none_or(|upper| upper.allow_conventional_allocations)
-            .then_some(PSP..CONVENTIONAL_END);
+        let strategy = self.memory_strategy.code;
+        let upper = (strategy >= 0x40 && self.memory_strategy.linked).then(|| {
+            let end =
+                Self::reserved_upper_end(self.upper_program, self.memory_strategy, &self.blocks);
+            xms::UPPER_START..end
+        });
+        let low = (strategy & 0x40 == 0
+            && self
+                .upper_program
+                .is_none_or(|upper| upper.allow_conventional_allocations))
+        .then_some(PSP..CONVENTIONAL_END);
+        let fit = strategy & 0x3f;
         for arena in upper.into_iter().chain(low) {
+            let mut selected = None;
             let mut usable = arena.start;
             let end = arena.end;
             let blocks = self
@@ -822,12 +896,25 @@ impl Machine {
                 let available = boundary.saturating_sub(usable);
                 maximum = maximum.max(available);
                 if paragraphs > 0 && available >= paragraphs {
-                    self.blocks.insert(usable, paragraphs);
-                    self.cpu.regs.ax = usable;
-                    self.success();
-                    return;
+                    match fit {
+                        0 => {
+                            selected = Some((usable, available));
+                            break;
+                        }
+                        1 if selected.is_none_or(|(_, size)| available < size) => {
+                            selected = Some((usable, available));
+                        }
+                        2 => selected = Some((boundary - paragraphs, available)),
+                        _ => {}
+                    }
                 }
                 usable = (next + size).saturating_add(1);
+            }
+            if let Some((segment, _)) = selected {
+                self.blocks.insert(segment, paragraphs);
+                self.cpu.regs.ax = segment;
+                self.success();
+                return;
             }
         }
         self.cpu.regs.bx = maximum;
